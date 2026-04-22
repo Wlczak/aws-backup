@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { api, type RestoreEstimate } from '../lib/api';
   import { bytes } from '../lib/format';
+  import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
   let estimate = $state<RestoreEstimate | null>(null);
@@ -8,6 +10,15 @@
   let info = $state('');
   let loading = $state(false);
   let confirmTrigger = $state(false);
+
+  onMount(() => {
+    const pre = selectionPaths();
+    if (pre.length > 0) {
+      raw = pre.join('\n');
+      info = `Pre-filled ${pre.length} path(s) from Files selection.`;
+      clearSelection();
+    }
+  });
 
   function paths(): string[] {
     return raw
