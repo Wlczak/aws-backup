@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -19,8 +20,11 @@ type ScanStats struct {
 // Logger is a minimal sink for scan-level messages. nil is fine.
 type Logger func(msg string)
 
-// Scan walks src, upserts every entry into the DB, and flips previously
-// uploaded rows whose last_seen_at predates the scan start to 'missing'.
+const flushInterval = 3 * time.Second
+
+// Scan walks src, accumulates discovered files in RAM, and flushes them to the
+// DB in batches every few seconds. This avoids hammering SQLite with one
+// transaction per file during large scans.
 //
 // When paths is non-empty, only files whose RelPath matches or is under one
 // of the given paths are processed (partial rescan). Missing-detection is
@@ -29,36 +33,87 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 	var stats ScanStats
 	scanStart := time.Now().UTC()
 
-	err := src.Walk(ctx, func(e Entry) error {
+	var (
+		mu  sync.Mutex
+		buf []db.BatchEntry
+	)
+
+	// flush drains the buffer and upserts into DB. Called only from the
+	// flusher goroutine so stats are updated without a lock.
+	flush := func() error {
+		mu.Lock()
+		if len(buf) == 0 {
+			mu.Unlock()
+			return nil
+		}
+		entries := make([]db.BatchEntry, len(buf))
+		copy(entries, buf)
+		buf = buf[:0]
+		mu.Unlock()
+
+		results, err := d.UpsertFileBatch(ctx, entries, scanStart)
+		if err != nil {
+			return err
+		}
+		for i, r := range results {
+			stats.Seen++
+			switch {
+			case r.Created:
+				stats.New++
+				if log != nil {
+					log("new: " + entries[i].Path)
+				}
+			case r.Changed:
+				stats.Changed++
+				if log != nil {
+					log("changed: " + entries[i].Path)
+				}
+			default:
+				stats.Unchanged++
+			}
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	flushErrCh := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(flushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := flush(); err != nil {
+					flushErrCh <- err
+					return
+				}
+			case <-done:
+				flushErrCh <- flush()
+				return
+			}
+		}
+	}()
+
+	walkErr := src.Walk(ctx, func(e Entry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if len(paths) > 0 && !matchesAnyPath(e.RelPath, paths) {
 			return nil
 		}
-		stats.Seen++
-		r, err := d.UpsertFile(ctx, e.RelPath, e.Size, e.ModTime, scanStart)
-		if err != nil {
-			return err
-		}
-		switch {
-		case r.Created:
-			stats.New++
-			if log != nil {
-				log("new: " + e.RelPath)
-			}
-		case r.Changed:
-			stats.Changed++
-			if log != nil {
-				log("changed: " + e.RelPath)
-			}
-		default:
-			stats.Unchanged++
-		}
+		mu.Lock()
+		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
+		mu.Unlock()
 		return nil
 	})
-	if err != nil {
-		return stats, err
+
+	close(done)
+	flushErr := <-flushErrCh
+	if walkErr != nil {
+		return stats, walkErr
+	}
+	if flushErr != nil {
+		return stats, flushErr
 	}
 
 	// Only detect missing files on a full scan; partial scans only walked a

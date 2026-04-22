@@ -39,6 +39,82 @@ type UpsertResult struct {
 	Changed bool // size or mtime differ from stored row
 }
 
+// BatchEntry is a single file record passed to UpsertFileBatch.
+type BatchEntry struct {
+	Path    string
+	Size    int64
+	ModTime time.Time
+}
+
+// UpsertFileBatch processes many entries in a single transaction for performance.
+// Returns one UpsertResult per entry in the same order.
+func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt time.Time) ([]UpsertResult, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	results := make([]UpsertResult, len(entries))
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	for i, e := range entries {
+		var (
+			existingID   int64
+			existingSize int64
+			existingMT   string
+		)
+		err = tx.QueryRowContext(ctx,
+			`SELECT id, size, mtime FROM files WHERE path = ?`, e.Path,
+		).Scan(&existingID, &existingSize, &existingMT)
+
+		switch {
+		case err == sql.ErrNoRows:
+			r, err := tx.ExecContext(ctx,
+				`INSERT INTO files (path, size, mtime, status, last_seen_at)
+				 VALUES (?, ?, ?, ?, ?)`,
+				e.Path, e.Size, isoTime(e.ModTime), StatusPending, isoTime(seenAt),
+			)
+			if err != nil {
+				return nil, err
+			}
+			results[i].ID, _ = r.LastInsertId()
+			results[i].Created = true
+			results[i].Changed = true
+
+		case err != nil:
+			return nil, err
+
+		default:
+			results[i].ID = existingID
+			storedMT, _ := parseTime(existingMT)
+			if e.Size != existingSize || !storedMT.Equal(e.ModTime) {
+				results[i].Changed = true
+				_, err = tx.ExecContext(ctx,
+					`UPDATE files
+					   SET size = ?, mtime = ?, status = ?, md5 = NULL,
+					       zip_name = NULL, s3_key = NULL, uploaded_at = NULL,
+					       last_seen_at = ?
+					 WHERE id = ?`,
+					e.Size, isoTime(e.ModTime), StatusPending, isoTime(seenAt), existingID,
+				)
+			} else {
+				_, err = tx.ExecContext(ctx,
+					`UPDATE files SET last_seen_at = ? WHERE id = ?`,
+					isoTime(seenAt), existingID,
+				)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return results, tx.Commit()
+}
+
 // UpsertFile inserts or updates the path row. It always refreshes
 // last_seen_at. If size or mtime changed (or the row is new) the status is
 // reset to pending and md5/zip_name/s3_key/uploaded_at are cleared so the
