@@ -27,7 +27,6 @@ web: web/dist/index.html
 
 web/dist/index.html: $(WEB_SRC)
 	cd web && npm ci --prefer-offline --no-audit && npm run build
-	touch web/dist/.gitkeep
 
 # Install the npm deps without building.
 web-install:
