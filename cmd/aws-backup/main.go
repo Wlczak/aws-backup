@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -76,14 +77,19 @@ func main() {
 }
 
 // appState bundles the long-lived objects shared by the serve command.
+// src, store, and sched are guarded by mu because /api/settings can
+// hot-swap them while a run is in flight.
 type appState struct {
+	mu      sync.Mutex
 	cfg     config.Config
 	cfgPath string
 	db      *db.DB
 	src     source.Source
 	store   storage.Storage
+	sched   *scheduler.Scheduler
 	bus     *events.Bus
 	dbPath  string
+	logger  *slog.Logger
 }
 
 func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
@@ -138,6 +144,8 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 }
 
 func (a *appState) buildEngine() (*engine.Engine, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return engine.New(engine.Options{
 		DB:          a.db,
 		Source:      a.src,
@@ -149,6 +157,75 @@ func (a *appState) buildEngine() (*engine.Engine, error) {
 		RetryFailed: a.cfg.Backup.RetryFailed,
 		Emit:        a.bus.Publish,
 	}), nil
+}
+
+// applySettings hot-swaps source, storage, and scheduler when the
+// corresponding config section changes. Called by the API after a
+// successful PUT /api/settings. All pre-checks happen before any swap
+// so a failed step never leaves partial state; in-flight runs keep
+// their captured src/store references (old instances are GC'd once
+// every run that captured them finishes).
+func (a *appState) applySettings(ctx context.Context, prev, next config.Config) error {
+	var (
+		newSrc   source.Source
+		newStore storage.Storage
+	)
+	sourceChanged := prev.Source != next.Source
+	s3Changed := prev.S3 != next.S3
+	scheduleChanged := prev.Backup.Schedule != next.Backup.Schedule
+
+	if sourceChanged {
+		s, err := source.FromConfig(next.Source)
+		if err != nil {
+			return fmt.Errorf("source: %w", err)
+		}
+		newSrc = s
+	}
+	if s3Changed {
+		s, err := storage.NewS3Storage(ctx, storage.S3Config{
+			Endpoint:        next.S3.Endpoint,
+			UsePathStyle:    next.S3.UsePathStyle,
+			Region:          next.S3.Region,
+			Bucket:          next.S3.Bucket,
+			AccessKeyID:     next.S3.AccessKeyID,
+			SecretAccessKey: next.S3.SecretAccessKey,
+			StorageClass:    next.S3.StorageClass,
+		})
+		if err != nil {
+			if newSrc != nil {
+				newSrc.Close()
+			}
+			return fmt.Errorf("storage: %w", err)
+		}
+		newStore = s
+	}
+
+	a.mu.Lock()
+	if newSrc != nil {
+		a.src = newSrc
+		if a.logger != nil {
+			a.logger.Info("source hot-swapped", "type", next.Source.Type)
+		}
+	}
+	if newStore != nil {
+		a.store = newStore
+		if a.logger != nil {
+			a.logger.Info("storage hot-swapped", "endpoint", next.S3.Endpoint, "bucket", next.S3.Bucket)
+		}
+	}
+	a.cfg = next
+	sched := a.sched
+	a.mu.Unlock()
+
+	if scheduleChanged && sched != nil {
+		if err := sched.Update(next.Backup.Schedule); err != nil {
+			return fmt.Errorf("schedule: %w", err)
+		}
+		if a.logger != nil {
+			a.logger.Info("schedule updated", "expr", next.Backup.Schedule)
+		}
+	}
+	return nil
 }
 
 func (a *appState) close() {
@@ -197,6 +274,7 @@ func runServe(cfgPath string) {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	app.logger = logger
 	defer app.close()
 
 	srv := api.NewServer(api.Deps{
@@ -205,7 +283,10 @@ func runServe(cfgPath string) {
 		Config:      &app.cfg,
 		ConfigPath:  app.cfgPath,
 		BuildEngine: app.buildEngine,
-		Logger:      logger,
+		ApplySettings: func(prev, next config.Config) error {
+			return app.applySettings(context.Background(), prev, next)
+		},
+		Logger: logger,
 	})
 
 	sched, err := scheduler.New(app.cfg.Backup.Schedule, func(ctx context.Context) error {
@@ -218,6 +299,9 @@ func runServe(cfgPath string) {
 	if err != nil {
 		fatalf("scheduler: %v", err)
 	}
+	app.mu.Lock()
+	app.sched = sched
+	app.mu.Unlock()
 	sched.Start()
 	defer sched.Stop()
 

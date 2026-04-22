@@ -30,7 +30,12 @@ type Deps struct {
 	// know how to wire S3 / Source. The caller supplies a wired Engine
 	// whose Source/Storage are already bound to the live config.
 	BuildEngine func() (*engine.Engine, error)
-	Logger      *slog.Logger
+	// ApplySettings fires after a successful PUT /api/settings save.
+	// It is passed the previous and the newly saved config so the
+	// caller can hot-swap source/storage/scheduler. Returning an error
+	// rolls back the save. nil means "nothing to apply" (tests).
+	ApplySettings func(prev, next config.Config) error
+	Logger        *slog.Logger
 }
 
 // Server exposes the Router for tests and for the CLI to Serve() from.

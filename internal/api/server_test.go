@@ -143,6 +143,80 @@ func TestSettingsPutPreservesRedacted(t *testing.T) {
 	}
 }
 
+func TestSettingsPutInvokesApplySettings(t *testing.T) {
+	ts, deps := newTestServer(t)
+
+	var gotPrev, gotNext config.Config
+	var applied bool
+	srv := &Server{deps: Deps{
+		DB:         deps.DB,
+		Bus:        deps.Bus,
+		Config:     deps.Config,
+		ConfigPath: deps.ConfigPath,
+		BuildEngine: deps.BuildEngine,
+		ApplySettings: func(prev, next config.Config) error {
+			gotPrev, gotNext, applied = prev, next, true
+			return nil
+		},
+	}}
+	ts.Config.Handler = srv.Router()
+
+	body := *deps.Config
+	body.S3.Bucket = "new-bucket"
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := ts.Client().Do(req)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	if !applied {
+		t.Fatal("ApplySettings was not called")
+	}
+	if gotPrev.S3.Bucket == gotNext.S3.Bucket {
+		t.Errorf("prev/next look identical: prev=%q next=%q", gotPrev.S3.Bucket, gotNext.S3.Bucket)
+	}
+	if gotNext.S3.Bucket != "new-bucket" {
+		t.Errorf("next.bucket=%q want new-bucket", gotNext.S3.Bucket)
+	}
+	if deps.Config.S3.Bucket != "new-bucket" {
+		t.Errorf("live config not updated: %q", deps.Config.S3.Bucket)
+	}
+}
+
+func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
+	ts, deps := newTestServer(t)
+	origBucket := deps.Config.S3.Bucket
+
+	srv := &Server{deps: Deps{
+		DB:         deps.DB,
+		Bus:        deps.Bus,
+		Config:     deps.Config,
+		ConfigPath: deps.ConfigPath,
+		BuildEngine: deps.BuildEngine,
+		ApplySettings: func(prev, next config.Config) error {
+			return fmt.Errorf("synthetic hot-swap failure")
+		},
+	}}
+	ts.Config.Handler = srv.Router()
+
+	body := *deps.Config
+	body.S3.Bucket = "should-not-stick"
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := ts.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 500 {
+		t.Fatalf("status=%d want 500", resp.StatusCode)
+	}
+	if deps.Config.S3.Bucket != origBucket {
+		t.Errorf("live config changed despite apply failure: got %q", deps.Config.S3.Bucket)
+	}
+}
+
 func TestSettingsPutInvalidRejected(t *testing.T) {
 	ts, deps := newTestServer(t)
 	bad := config.Default()
