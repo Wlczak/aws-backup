@@ -1,0 +1,164 @@
+// Typed wrappers around the aws-backup HTTP API. Kept free of UI concerns
+// so pages + components can import without pulling in Svelte.
+
+export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
+
+export interface Run {
+  id: number;
+  started_at: string;
+  finished_at?: string;
+  status: RunStatus;
+  files_scanned: number;
+  files_uploaded: number;
+  bytes_uploaded: number;
+  error_message?: string;
+}
+
+export interface LogEntry {
+  id: number;
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+}
+
+export interface FileRow {
+  id: number;
+  path: string;
+  size: number;
+  mtime: string;
+  md5?: string;
+  status: FileStatus;
+  zip_name?: string;
+  s3_key?: string;
+  uploaded_at?: string;
+  last_seen_at: string;
+}
+
+export interface FilesPage {
+  files: FileRow[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface RunsPage {
+  runs: Run[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface RunDetail {
+  run: Run;
+  logs: LogEntry[];
+}
+
+export interface FileStats {
+  by_status: Record<string, number>;
+  total_count: number;
+  total_size: number;
+}
+
+export interface Status {
+  current?: Run;
+  last?: Run;
+}
+
+export interface RestoreEstimate {
+  file_count: number;
+  total_bytes: number;
+  request_fee_usd: number;
+  retrieval_fee_usd: number;
+  egress_fee_usd: number;
+  total_fee_usd: number;
+  wait_hours_min: number;
+  wait_hours_max: number;
+  unknown_paths?: string[];
+}
+
+export interface TestResult {
+  ok: boolean;
+  message?: string;
+}
+
+// Reuse the server's Config shape loosely — the Settings page works
+// with opaque JSON so changes don't require frontend updates.
+export type Config = Record<string, unknown>;
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(path, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (!resp.ok) {
+    let msg = resp.statusText;
+    try {
+      const body = await resp.json();
+      if (body?.error) msg = body.error;
+    } catch { /* ignore non-JSON error bodies */ }
+    throw new Error(`${resp.status}: ${msg}`);
+  }
+  if (resp.status === 204) return undefined as T;
+  return (await resp.json()) as T;
+}
+
+export const api = {
+  status: () => request<Status>('/api/status'),
+  runs: (page = 1, limit = 20) => request<RunsPage>(`/api/runs?page=${page}&limit=${limit}`),
+  run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
+  triggerRun: () => request<{ run_id: number }>('/api/runs', { method: 'POST' }),
+  cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
+
+  files: (opts: { page?: number; limit?: number; status?: string; search?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.page) qs.set('page', String(opts.page));
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    if (opts.status) qs.set('status', opts.status);
+    if (opts.search) qs.set('search', opts.search);
+    return request<FilesPage>(`/api/files?${qs.toString()}`);
+  },
+  fileStats: () => request<FileStats>('/api/files/stats'),
+
+  settings: () => request<Config>('/api/settings'),
+  updateSettings: (cfg: Config) =>
+    request<Config>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+
+  testSource: () => request<TestResult>('/api/smb/test'),
+  testStorage: () => request<TestResult>('/api/s3/test'),
+
+  restoreEstimate: (paths: string[]) =>
+    request<RestoreEstimate>('/api/restore/estimate', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+  restoreTrigger: (paths: string[]) =>
+    request<{ error?: string }>('/api/restore/trigger', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+};
+
+// subscribeEvents opens a live EventSource against /api/events. Returns
+// an AbortController-style { close } — callers should invoke it on
+// component teardown to unsubscribe.
+export function subscribeEvents(onEvent: (type: string, data: unknown) => void): { close: () => void } {
+  const es = new EventSource('/api/events');
+  const handler = (ev: MessageEvent) => {
+    try {
+      onEvent(ev.type, JSON.parse(ev.data));
+    } catch {
+      onEvent(ev.type, ev.data);
+    }
+  };
+  const types = [
+    'scan_progress', 'scan_complete',
+    'upload_start', 'upload_complete', 'upload_failed',
+    'run_start', 'run_complete',
+  ];
+  for (const t of types) es.addEventListener(t, handler as EventListener);
+  return { close: () => es.close() };
+}
