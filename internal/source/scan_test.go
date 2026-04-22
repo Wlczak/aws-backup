@@ -31,7 +31,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	d := openDB(t)
 
 	// First scan: 2 new files.
-	s, err := Scan(ctx, src, d, nil)
+	s, err := Scan(ctx, src, d, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	// Sleep so scanStart is strictly after the last upload's last_seen_at.
 	time.Sleep(10 * time.Millisecond)
 
-	s, err = Scan(ctx, src, d, nil)
+	s, err = Scan(ctx, src, d, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestScanContextCancel(t *testing.T) {
 	d := openDB(t)
 
 	cancel() // cancel before scan runs
-	if _, err := Scan(ctx, src, d, nil); err == nil {
+	if _, err := Scan(ctx, src, d, nil, nil); err == nil {
 		t.Fatal("expected cancel error")
 	}
 }

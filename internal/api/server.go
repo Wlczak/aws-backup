@@ -26,10 +26,10 @@ type Deps struct {
 	Config     *config.Config
 	ConfigPath string
 	// BuildEngine constructs an Engine for a new backup run with the
-	// current config. Kept as a callback so feature 9 doesn't need to
-	// know how to wire S3 / Source. The caller supplies a wired Engine
-	// whose Source/Storage are already bound to the live config.
-	BuildEngine func() (*engine.Engine, error)
+	// current config. mode and scanPaths are per-run parameters: mode
+	// selects scan-only, upload-only, or full (default); scanPaths
+	// restricts a scan to matching file paths (partial rescan).
+	BuildEngine func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error)
 	// ApplySettings fires after a successful PUT /api/settings save.
 	// It is passed the previous and the newly saved config so the
 	// caller can hot-swap source/storage/scheduler. Returning an error

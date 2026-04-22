@@ -143,7 +143,7 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}, nil
 }
 
-func (a *appState) buildEngine() (*engine.Engine, error) {
+func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return engine.New(engine.Options{
@@ -155,6 +155,8 @@ func (a *appState) buildEngine() (*engine.Engine, error) {
 		ChunkSize:   a.cfg.Backup.ChunkSize,
 		ZipThresh:   a.cfg.Backup.ZipThreshold,
 		RetryFailed: a.cfg.Backup.RetryFailed,
+		Mode:        mode,
+		ScanPaths:   scanPaths,
 		Emit:        a.bus.Publish,
 	}), nil
 }
@@ -242,7 +244,7 @@ func runBackup(cfgPath string) {
 	}
 	defer app.close()
 
-	eng, _ := app.buildEngine()
+	eng, _ := app.buildEngine(engine.RunModeFull, nil)
 	eng = engine.New(engine.Options{
 		DB:          app.db,
 		Source:      app.src,

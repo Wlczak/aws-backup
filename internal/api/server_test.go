@@ -54,7 +54,7 @@ func newTestServer(t *testing.T) (*httptest.Server, Deps) {
 		Bus:        bus,
 		Config:     &cfg,
 		ConfigPath: cfgPath,
-		BuildEngine: func() (*engine.Engine, error) {
+		BuildEngine: func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 			return engine.New(engine.Options{
 				DB:        d,
 				Source:    src,
@@ -63,6 +63,8 @@ func newTestServer(t *testing.T) (*httptest.Server, Deps) {
 				KeyPrefix: "backups",
 				ChunkSize: 2,
 				ZipThresh: 100,
+				Mode:      mode,
+				ScanPaths: scanPaths,
 				Emit:      bus.Publish,
 			}), nil
 		},

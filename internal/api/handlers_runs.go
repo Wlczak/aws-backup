@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/engine"
 )
 
 type runsListResponse struct {
@@ -95,11 +96,38 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runDetailResponse{Run: toSummary(run), Logs: out})
 }
 
+type triggerRunRequest struct {
+	// Mode controls which phases run: "full" (default), "scan", or "upload".
+	Mode  string   `json:"mode"`
+	// Paths restricts a scan-mode run to specific file/folder paths (partial rescan).
+	Paths []string `json:"paths"`
+}
+
 type triggerRunResponse struct {
 	RunID int64 `json:"run_id"`
 }
 
 func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
+	// Body is optional: an empty POST still triggers a full run.
+	var req triggerRunRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+			return
+		}
+	}
+
+	mode := engine.RunMode(req.Mode)
+	if mode == "" {
+		mode = engine.RunModeFull
+	}
+	switch mode {
+	case engine.RunModeFull, engine.RunModeScan, engine.RunModeUpload:
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown mode %q; use full, scan, or upload", mode))
+		return
+	}
+
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 	if s.currentRun != 0 {
@@ -114,7 +142,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	eng, err := s.deps.BuildEngine()
+	eng, err := s.deps.BuildEngine(mode, req.Paths)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("build engine: %w", err))
 		return

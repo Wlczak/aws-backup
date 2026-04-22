@@ -46,12 +46,11 @@
     if (pollTimer) clearInterval(pollTimer);
   });
 
-  async function triggerRun() {
+  async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
     triggering = true;
     err = '';
     try {
-      await api.triggerRun();
-      // Reset live counters for this run.
+      await api.triggerRun({ mode });
       uploads = { completed: 0, failed: 0, started: 0 };
       scanSeen = 0;
       logLines = [];
@@ -84,12 +83,20 @@
         run #{status.current.id} <StatusBadge status={status.current.status} />
       </div>
       <div class="muted">started {relativeTime(status.current.started_at)}</div>
-      <button on:click={cancel} type="button" style="margin-top: 0.5rem">Cancel</button>
+      <button onclick={cancel} type="button" style="margin-top: 0.5rem">Cancel</button>
     {:else}
       <div class="big muted">Idle</div>
-      <button class="primary" on:click={triggerRun} type="button" disabled={triggering}>
-        {triggering ? 'Starting…' : 'Run now'}
-      </button>
+      <div class="run-actions">
+        <button class="primary" onclick={() => triggerRun('full')} type="button" disabled={triggering}>
+          {triggering ? 'Starting…' : 'Run now'}
+        </button>
+        <button onclick={() => triggerRun('scan')} type="button" disabled={triggering} title="Scan source for changes without uploading">
+          Scan only
+        </button>
+        <button onclick={() => triggerRun('upload')} type="button" disabled={triggering} title="Upload all pending files without scanning">
+          Upload only
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -149,6 +156,7 @@
     gap: 1rem;
   }
   .label { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+  .run-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
   .big { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.3rem; }
   .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
   .pill { font-size: 0.85rem; display: inline-flex; gap: 0.4rem; align-items: center; }

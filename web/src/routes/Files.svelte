@@ -190,6 +190,17 @@
     go('restore');
   }
 
+  async function rescanSelected() {
+    const sel = paths();
+    if (sel.length === 0) return;
+    busy = true;
+    try {
+      await api.triggerRun({ mode: 'scan', paths: sel });
+      err = '';
+    } catch (e) { err = String(e); }
+    finally { busy = false; }
+  }
+
   let allVisibleSelected = $derived(
     data !== null && data.files.length > 0 && data.files.every((f) => selectedIDs.has(f.id))
   );
@@ -259,6 +270,7 @@
   <div class="card selectionbar">
     <span><strong>{$selection.length}</strong> selected</span>
     <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
+    <button onclick={rescanSelected} disabled={busy} type="button" title="Re-scan selected paths for changes">Rescan</button>
     <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
     <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
     <button onclick={clear} disabled={busy} type="button">Clear</button>

@@ -110,7 +110,11 @@ export const api = {
   status: () => request<Status>('/api/status'),
   runs: (page = 1, limit = 20) => request<RunsPage>(`/api/runs?page=${page}&limit=${limit}`),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
-  triggerRun: () => request<{ run_id: number }>('/api/runs', { method: 'POST' }),
+  triggerRun: (opts?: { mode?: 'full' | 'scan' | 'upload'; paths?: string[] }) =>
+    request<{ run_id: number }>('/api/runs', {
+      method: 'POST',
+      body: opts ? JSON.stringify(opts) : undefined,
+    }),
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
 
   files: (opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {}) => {

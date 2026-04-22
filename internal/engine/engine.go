@@ -17,6 +17,20 @@ import (
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
+// RunMode controls which phases of a backup cycle execute.
+type RunMode string
+
+const (
+	// RunModeFull runs scan then upload (default).
+	RunModeFull RunMode = "full"
+	// RunModeScan runs only the scan phase; pending files are written to DB
+	// but not uploaded. When ScanPaths is set, only matching files are
+	// re-scanned (partial rescan) and missing-detection is skipped.
+	RunModeScan RunMode = "scan"
+	// RunModeUpload skips the scan and uploads all currently pending files.
+	RunModeUpload RunMode = "upload"
+)
+
 // Options wires the engine to the outside world.
 type Options struct {
 	DB          *db.DB
@@ -27,6 +41,8 @@ type Options struct {
 	ChunkSize   int    // how many individual files to upload per batch
 	ZipThresh   int    // files in a top-dir group >= this -> zip
 	RetryFailed bool   // re-queue 'failed' rows alongside 'pending'
+	Mode        RunMode  // default: RunModeFull
+	ScanPaths   []string // when set with RunModeScan: partial rescan targets
 	Now         func() time.Time // injectable clock for tests
 	Emit        EventEmitter
 }
@@ -113,33 +129,44 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 }
 
 func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
-	// 1. scan
-	scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, func(msg string) {
-		e.log(ctx, runID, db.LogInfo, msg)
-	})
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return db.RunCancelled, err
-		}
-		return db.RunFailed, fmt.Errorf("scan: %w", err)
+	mode := e.opts.Mode
+	if mode == "" {
+		mode = RunModeFull
 	}
-	if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, 0, 0); err != nil {
-		return db.RunFailed, err
-	}
-	e.emit(Event{
-		Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
-		Data: map[string]any{
-			"seen": scanStats.Seen, "new": scanStats.New,
-			"changed": scanStats.Changed, "unchanged": scanStats.Unchanged,
-			"missing": scanStats.Missing,
-		},
-	})
-	e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
-		"scan: seen=%d new=%d changed=%d missing=%d",
-		scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing,
-	))
 
-	// 2. gather pending files
+	// Phase 1: scan (skipped for upload-only runs).
+	if mode == RunModeFull || mode == RunModeScan {
+		scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths, func(msg string) {
+			e.log(ctx, runID, db.LogInfo, msg)
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return db.RunCancelled, err
+			}
+			return db.RunFailed, fmt.Errorf("scan: %w", err)
+		}
+		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, 0, 0); err != nil {
+			return db.RunFailed, err
+		}
+		e.emit(Event{
+			Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"seen": scanStats.Seen, "new": scanStats.New,
+				"changed": scanStats.Changed, "unchanged": scanStats.Unchanged,
+				"missing": scanStats.Missing,
+			},
+		})
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"scan: seen=%d new=%d changed=%d missing=%d",
+			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing,
+		))
+		if mode == RunModeScan {
+			e.log(ctx, runID, db.LogInfo, "scan-only mode: skipping upload")
+			return db.RunCompleted, nil
+		}
+	}
+
+	// Phase 2: gather pending files (upload phase).
 	pending, err := e.listPending(ctx)
 	if err != nil {
 		return db.RunFailed, fmt.Errorf("list pending: %w", err)
@@ -176,7 +203,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		}
 		uploaded += up
 		bytesUploaded += bytes
-		_ = e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, uploaded, bytesUploaded)
+		_ = e.opts.DB.UpdateRunStats(ctx, runID, int64(len(pending)), uploaded, bytesUploaded)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err
