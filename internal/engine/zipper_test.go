@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Wlczak/aws-backup/internal/source"
 )
@@ -46,14 +45,50 @@ func TestGroupFiles(t *testing.T) {
 }
 
 func TestZipName(t *testing.T) {
-	ts := time.Date(2024, 1, 15, 14, 25, 30, 0, time.UTC)
-	if got := ZipName("photos", ts); got != "photos_20240115_142530.zip" {
-		t.Errorf("got %q", got)
+	// Files all in photos/ → label is "photos"
+	photosFiles := []PendingFile{
+		{RelPath: "photos/a.jpg"},
+		{RelPath: "photos/b.jpg"},
+		{RelPath: "photos/c.jpg"},
 	}
-	if got := ZipName("", ts); got != "_root_20240115_142530.zip" {
+	if got := ZipName(photosFiles, 1); got != "photos_1.zip" {
+		t.Errorf("photos: got %q", got)
+	}
+
+	// Files in a nested common dir → label reflects full hierarchy
+	nestedFiles := []PendingFile{
+		{RelPath: "backup/folder1/images/1.jpg"},
+		{RelPath: "backup/folder1/images/2.jpg"},
+		{RelPath: "backup/folder1/images/3.jpg"},
+	}
+	if got := ZipName(nestedFiles, 2); got != "backup_folder1_images_2.zip" {
+		t.Errorf("nested: got %q", got)
+	}
+
+	// Mixed sub-dirs under same parent → common dir is the parent
+	mixedFiles := []PendingFile{
+		{RelPath: "backup/folder1/images/1.jpg"},
+		{RelPath: "backup/folder1/docs/a.pdf"},
+	}
+	if got := ZipName(mixedFiles, 1); got != "backup_folder1_1.zip" {
+		t.Errorf("mixed: got %q", got)
+	}
+
+	// Root-level files → _root label
+	rootFiles := []PendingFile{
+		{RelPath: "a.txt"},
+		{RelPath: "b.txt"},
+	}
+	if got := ZipName(rootFiles, 3); got != "_root_3.zip" {
 		t.Errorf("root: got %q", got)
 	}
-	if got := ZipName("weird/name with spaces!", ts); got != "weird_name_with_spaces__20240115_142530.zip" {
+
+	// Names with unsafe characters → sanitized
+	uglyFiles := []PendingFile{
+		{RelPath: "weird name with spaces!/a.txt"},
+		{RelPath: "weird name with spaces!/b.txt"},
+	}
+	if got := ZipName(uglyFiles, 1); got != "weird_name_with_spaces__1.zip" {
 		t.Errorf("sanitized: got %q", got)
 	}
 }

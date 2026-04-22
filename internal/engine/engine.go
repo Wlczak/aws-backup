@@ -159,6 +159,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	// 3+4+5. process groups
 	var uploaded int64
 	var bytesUploaded int64
+	zipCounter := 0
 	for _, g := range groups {
 		if err := ctx.Err(); err != nil {
 			return db.RunCancelled, err
@@ -168,7 +169,8 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			bytes int64
 		)
 		if g.Zip {
-			up, bytes, err = e.processZipGroup(ctx, runID, g)
+			zipCounter++
+			up, bytes, err = e.processZipGroup(ctx, runID, g, zipCounter)
 		} else {
 			up, bytes, err = e.processIndividualGroup(ctx, runID, g)
 		}
@@ -198,8 +200,8 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 	return out, nil
 }
 
-func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group) (int64, int64, error) {
-	zipName := ZipName(g.TopDir, e.opts.Now())
+func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN int) (int64, int64, error) {
+	zipName := ZipName(g.Files, zipN)
 	zipPath := filepath.Join(e.opts.TmpDir, zipName)
 	defer os.Remove(zipPath)
 

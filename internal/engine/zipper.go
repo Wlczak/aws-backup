@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/Wlczak/aws-backup/internal/source"
 )
@@ -83,18 +82,54 @@ func topDir(p string) string {
 	return p[:i]
 }
 
-// ZipName returns the archive filename for a group's top directory and time:
-//   photos_20240115_142530.zip
+// ZipName derives an archive filename from the files' longest common
+// directory path and a per-run sequential index:
 //
-// Root-level groups get the "_root" prefix.
-func ZipName(topDir string, t time.Time) string {
-	d := topDir
-	if d == "" {
-		d = rootDirLabel
+//	backup_folder1_images_1.zip
+//
+// Slashes in the common directory are replaced with underscores so the
+// name reflects the full folder hierarchy. If files have no common
+// directory (or are at the root), the "_root" prefix is used.
+func ZipName(files []PendingFile, n int) string {
+	d := commonDirLabel(files)
+	return fmt.Sprintf("%s_%d.zip", d, n)
+}
+
+// commonDirLabel finds the longest directory path shared by all files,
+// sanitizes it (slashes → underscores), and returns it. Returns "_root"
+// when files share no common directory.
+func commonDirLabel(files []PendingFile) string {
+	if len(files) == 0 {
+		return rootDirLabel
 	}
-	// Replace any unsafe characters in the dir label.
-	d = sanitizeLabel(d)
-	return fmt.Sprintf("%s_%s.zip", d, t.UTC().Format("20060102_150405"))
+	dirParts := func(p string) []string {
+		segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+		if len(segs) <= 1 {
+			return nil // root-level file, no directory
+		}
+		return segs[:len(segs)-1]
+	}
+	common := dirParts(files[0].RelPath)
+	for _, f := range files[1:] {
+		d := dirParts(f.RelPath)
+		n := len(common)
+		if len(d) < n {
+			n = len(d)
+		}
+		keep := 0
+		for i := 0; i < n; i++ {
+			if common[i] == d[i] {
+				keep = i + 1
+			} else {
+				break
+			}
+		}
+		common = common[:keep]
+	}
+	if len(common) == 0 {
+		return rootDirLabel
+	}
+	return sanitizeLabel(strings.Join(common, "/"))
 }
 
 // sanitizeLabel keeps [A-Za-z0-9._-], replaces everything else with "_".
