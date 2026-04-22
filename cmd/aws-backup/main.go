@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/Wlczak/aws-backup/internal/config"
+	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/engine"
+	"github.com/Wlczak/aws-backup/internal/source"
+	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
 var version = "0.0.0-dev"
@@ -19,7 +25,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "commands:\n")
 		fmt.Fprintf(os.Stderr, "  config init     write a default config.json (won't overwrite existing)\n")
 		fmt.Fprintf(os.Stderr, "  config path     print the resolved config file path\n")
-		fmt.Fprintf(os.Stderr, "  config validate check the config is well-formed\n\n")
+		fmt.Fprintf(os.Stderr, "  config validate check the config is well-formed\n")
+		fmt.Fprintf(os.Stderr, "  run             execute one backup run against the configured source + storage\n\n")
 		fmt.Fprintf(os.Stderr, "flags:\n")
 		flag.PrintDefaults()
 	}
@@ -48,11 +55,78 @@ func main() {
 	switch args[0] {
 	case "config":
 		runConfig(path, args[1:])
+	case "run":
+		runBackup(path)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
 		flag.Usage()
 		os.Exit(2)
 	}
+}
+
+func runBackup(cfgPath string) {
+	ctx := context.Background()
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fatalf("load %s: %v", cfgPath, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		fatalf("invalid config:\n%v", err)
+	}
+
+	dir := filepath.Dir(cfgPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fatalf("mkdir %s: %v", dir, err)
+	}
+	dbPath := filepath.Join(dir, "index.db")
+	d, err := db.Open(ctx, dbPath)
+	if err != nil {
+		fatalf("open db %s: %v", dbPath, err)
+	}
+	defer d.Close()
+
+	if cfg.Source.Type != config.SourceLocalDir {
+		fatalf("only source.type=localdir is supported so far (got %q)", cfg.Source.Type)
+	}
+	src, err := source.NewLocalDir(cfg.Source.LocalDir.Root)
+	if err != nil {
+		fatalf("open source: %v", err)
+	}
+	defer src.Close()
+
+	store, err := storage.NewS3Storage(ctx, storage.S3Config{
+		Endpoint:        cfg.S3.Endpoint,
+		UsePathStyle:    cfg.S3.UsePathStyle,
+		Region:          cfg.S3.Region,
+		Bucket:          cfg.S3.Bucket,
+		AccessKeyID:     cfg.S3.AccessKeyID,
+		SecretAccessKey: cfg.S3.SecretAccessKey,
+		StorageClass:    cfg.S3.StorageClass,
+	})
+	if err != nil {
+		fatalf("init storage: %v", err)
+	}
+	defer store.Close()
+
+	eng := engine.New(engine.Options{
+		DB:        d,
+		Source:    src,
+		Storage:   store,
+		TmpDir:    cfg.Backup.TmpDir,
+		KeyPrefix: cfg.S3.KeyPrefix,
+		ChunkSize: cfg.Backup.ChunkSize,
+		ZipThresh: cfg.Backup.ZipThreshold,
+		Emit: func(ev engine.Event) {
+			fmt.Printf("[event] %s %+v\n", ev.Type, ev.Data)
+		},
+	})
+
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		fatalf("run %d failed: %v", runID, err)
+	}
+	fmt.Printf("run %d completed. db: %s\n", runID, dbPath)
 }
 
 func runConfig(path string, args []string) {
