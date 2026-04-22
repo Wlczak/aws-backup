@@ -17,6 +17,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          # Caches both $GOPATH/pkg/mod (modules) and ~/.cache/go-build
+          # (compiled packages) keyed on go.sum + go version.
           cache: true
 
       - name: Run tests
@@ -35,10 +37,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
+
+      - name: Cache node_modules
+        id: cache-nm
+        uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: node-modules-${{ hashFiles('web/package-lock.json') }}
 
       - name: Install dependencies
+        if: steps.cache-nm.outputs.cache-hit != 'true'
         run: npm ci
         working-directory: web
 
