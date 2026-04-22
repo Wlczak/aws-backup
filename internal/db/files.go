@@ -240,6 +240,106 @@ type FileStats struct {
 	TotalCount int64
 }
 
+// MarkPendingByIDs resets md5/zip_name/s3_key/uploaded_at and flips
+// status to 'pending' for the given ids — used when the user clicks
+// retry on a failed (or any) row so the next run picks it up.
+func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, StatusPending)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	r, err := db.ExecContext(ctx,
+		`UPDATE files
+		   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+		 WHERE id IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
+// MarkAllFailedPending is the bulk 'retry everything that failed' path.
+func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
+	r, err := db.ExecContext(ctx,
+		`UPDATE files
+		   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+		 WHERE status = ?`,
+		StatusPending, StatusFailed,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
+// DeleteFiles removes the given rows from the files table. Does not
+// touch S3 — the historical object stays where it is (Deep Archive
+// billing model means we never delete anyway).
+func (db *DB) DeleteFiles(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	r, err := db.ExecContext(ctx, `DELETE FROM files WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
+// ListPending returns every row the engine should attempt to upload on
+// the next run. Always includes 'pending'; when includeFailed is true
+// it also includes 'failed' rows so they get retried automatically.
+func (db *DB) ListPending(ctx context.Context, includeFailed bool) ([]File, error) {
+	query := `SELECT id, path, size, mtime, COALESCE(md5,''), status,
+		             COALESCE(zip_name,''), COALESCE(s3_key,''),
+		             COALESCE(uploaded_at,''), last_seen_at
+		        FROM files
+		       WHERE status = ?`
+	args := []any{StatusPending}
+	if includeFailed {
+		query += ` OR status = ?`
+		args = append(args, StatusFailed)
+	}
+	query += ` ORDER BY path`
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var (
+			f          File
+			mtimeStr   string
+			uploadedAt string
+			lastSeen   string
+		)
+		if err := rows.Scan(&f.ID, &f.Path, &f.Size, &mtimeStr, &f.MD5, &f.Status,
+			&f.ZipName, &f.S3Key, &uploadedAt, &lastSeen); err != nil {
+			return nil, err
+		}
+		f.MTime, _ = parseTime(mtimeStr)
+		f.UploadedAt, _ = parseTime(uploadedAt)
+		f.LastSeenAt, _ = parseTime(lastSeen)
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // Stats returns per-status counts plus total size/count across the index.
 func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	s := FileStats{ByStatus: map[string]int64{}}

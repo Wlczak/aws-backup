@@ -265,6 +265,114 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestListPending(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+
+	// seed: a.txt pending, b.txt failed, c.txt uploaded
+	ra, _ := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	rb, _ := d.UpsertFile(ctx, "b.txt", 1, now, now)
+	rc, _ := d.UpsertFile(ctx, "c.txt", 1, now, now)
+	_ = d.MarkFailed(ctx, rb.ID)
+	_ = d.MarkUploaded(ctx, rc.ID, "m", "k", now)
+
+	// includeFailed=false -> only 'a'
+	rows, err := d.ListPending(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Path != "a.txt" {
+		t.Fatalf("pending-only: %+v", rows)
+	}
+
+	// includeFailed=true -> 'a' + 'b'
+	rows, err = d.ListPending(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotPaths := map[string]bool{}
+	for _, r := range rows {
+		gotPaths[r.Path] = true
+	}
+	if !gotPaths["a.txt"] || !gotPaths["b.txt"] || gotPaths["c.txt"] {
+		t.Fatalf("includeFailed: %+v", gotPaths)
+	}
+	_ = ra
+}
+
+func TestMarkPendingByIDs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+	r, _ := d.UpsertFile(ctx, "a.txt", 10, now, now)
+	_ = d.MarkUploaded(ctx, r.ID, "m", "k", now)
+
+	n, err := d.MarkPendingByIDs(ctx, []int64{r.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("affected=%d want 1", n)
+	}
+	files, _, _ := d.ListFiles(ctx, FilesFilter{})
+	if files[0].Status != StatusPending || files[0].MD5 != "" || files[0].S3Key != "" {
+		t.Errorf("not fully reset: %+v", files[0])
+	}
+}
+
+func TestMarkAllFailedPending(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+	r1, _ := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	r2, _ := d.UpsertFile(ctx, "b.txt", 1, now, now)
+	r3, _ := d.UpsertFile(ctx, "c.txt", 1, now, now)
+	_ = d.MarkFailed(ctx, r1.ID)
+	_ = d.MarkFailed(ctx, r2.ID)
+	_ = d.MarkUploaded(ctx, r3.ID, "m", "k", now)
+
+	n, err := d.MarkAllFailedPending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("affected=%d want 2", n)
+	}
+	files, _, _ := d.ListFiles(ctx, FilesFilter{})
+	statuses := map[string]string{}
+	for _, f := range files {
+		statuses[f.Path] = f.Status
+	}
+	if statuses["a.txt"] != StatusPending || statuses["b.txt"] != StatusPending {
+		t.Errorf("failed rows not flipped: %+v", statuses)
+	}
+	if statuses["c.txt"] != StatusUploaded {
+		t.Errorf("uploaded row touched: %+v", statuses)
+	}
+}
+
+func TestDeleteFiles(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+	r1, _ := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	r2, _ := d.UpsertFile(ctx, "b.txt", 1, now, now)
+	_, _ = d.UpsertFile(ctx, "c.txt", 1, now, now)
+
+	n, err := d.DeleteFiles(ctx, []int64{r1.ID, r2.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("affected=%d want 2", n)
+	}
+	_, total, _ := d.ListFiles(ctx, FilesFilter{})
+	if total != 1 {
+		t.Errorf("total=%d want 1", total)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

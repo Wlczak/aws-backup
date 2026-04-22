@@ -1,8 +1,13 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 )
@@ -69,4 +74,98 @@ func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fileStatsResponse{
 		ByStatus: st.ByStatus, TotalCount: st.TotalCount, TotalSize: st.TotalSize,
 	})
+}
+
+type idsRequest struct {
+	IDs       []int64 `json:"ids"`
+	AllFailed bool    `json:"all_failed"`
+}
+
+type affectedResponse struct {
+	Affected int64 `json:"affected"`
+}
+
+// handleRetryFile flips a single file back to 'pending' so the next run
+// (or a manually triggered one) re-uploads it.
+func (s *Server) handleRetryFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid file id"))
+		return
+	}
+	n, err := s.deps.DB.MarkPendingByIDs(r.Context(), []int64{id})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n == 0 {
+		writeError(w, http.StatusNotFound, errors.New("no such file"))
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
+// handleRetryFiles is the bulk variant. Body: {ids: []} or {all_failed: true}.
+func (s *Server) handleRetryFiles(w http.ResponseWriter, r *http.Request) {
+	var req idsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	var (
+		affected int64
+		err      error
+	)
+	switch {
+	case req.AllFailed:
+		affected, err = s.deps.DB.MarkAllFailedPending(r.Context())
+	case len(req.IDs) > 0:
+		affected, err = s.deps.DB.MarkPendingByIDs(r.Context(), req.IDs)
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("provide ids or all_failed"))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: affected})
+}
+
+// handleDeleteFile removes a row from the index. Does not touch S3.
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid file id"))
+		return
+	}
+	n, err := s.deps.DB.DeleteFiles(r.Context(), []int64{id})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if n == 0 {
+		writeError(w, http.StatusNotFound, errors.New("no such file"))
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
+// handleDeleteFiles is the bulk variant. Body: {ids: []}.
+func (s *Server) handleDeleteFiles(w http.ResponseWriter, r *http.Request) {
+	var req idsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("ids is required"))
+		return
+	}
+	n, err := s.deps.DB.DeleteFiles(r.Context(), req.IDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
 }

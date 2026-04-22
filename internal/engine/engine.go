@@ -19,15 +19,16 @@ import (
 
 // Options wires the engine to the outside world.
 type Options struct {
-	DB         *db.DB
-	Source     source.Source
-	Storage    storage.Storage
-	TmpDir     string
-	KeyPrefix  string // e.g. "backups/"
-	ChunkSize  int    // how many individual files to upload per batch
-	ZipThresh  int    // files in a top-dir group >= this -> zip
-	Now        func() time.Time // injectable clock for tests
-	Emit       EventEmitter
+	DB          *db.DB
+	Source      source.Source
+	Storage     storage.Storage
+	TmpDir      string
+	KeyPrefix   string // e.g. "backups/"
+	ChunkSize   int    // how many individual files to upload per batch
+	ZipThresh   int    // files in a top-dir group >= this -> zip
+	RetryFailed bool   // re-queue 'failed' rows alongside 'pending'
+	Now         func() time.Time // injectable clock for tests
+	Emit        EventEmitter
 }
 
 // Engine owns a run's lifecycle.
@@ -186,26 +187,13 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 }
 
 func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
-	// Iterate pages until exhausted; page size 500 is plenty for a single run
-	// and keeps memory reasonable even with huge indexes.
-	const page = 500
-	var out []PendingFile
-	for p := 1; ; p++ {
-		rows, _, err := e.opts.DB.ListFiles(ctx, db.FilesFilter{
-			Status: db.StatusPending, Page: p, Limit: page,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(rows) == 0 {
-			break
-		}
-		for _, r := range rows {
-			out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size})
-		}
-		if len(rows) < page {
-			break
-		}
+	rows, err := e.opts.DB.ListPending(ctx, e.opts.RetryFailed)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PendingFile, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size})
 	}
 	return out, nil
 }

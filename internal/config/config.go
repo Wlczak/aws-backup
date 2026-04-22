@@ -66,6 +66,10 @@ type BackupConfig struct {
 	Schedule       string `json:"schedule"`
 	ZipThreshold   int    `json:"zip_threshold"`
 	MinZipDirFiles int    `json:"min_zip_dir_files"`
+	// RetryFailed controls whether the engine picks up rows with status
+	// 'failed' alongside 'pending' on each run. Manual retry via the API
+	// works regardless of this flag.
+	RetryFailed bool `json:"retry_failed"`
 }
 
 type ServerConfig struct {
@@ -98,6 +102,7 @@ func Default() Config {
 			Schedule:       "0 2 * * *",
 			ZipThreshold:   50,
 			MinZipDirFiles: 20,
+			RetryFailed:    true,
 		},
 		Server: ServerConfig{
 			Host: "127.0.0.1",

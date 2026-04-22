@@ -122,6 +122,25 @@ export const api = {
     return request<FilesPage>(`/api/files?${qs.toString()}`);
   },
   fileStats: () => request<FileStats>('/api/files/stats'),
+  retryFile: (id: number) =>
+    request<{ affected: number }>(`/api/files/${id}/retry`, { method: 'POST' }),
+  retryFiles: (ids: number[]) =>
+    request<{ affected: number }>(`/api/files/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  retryAllFailed: () =>
+    request<{ affected: number }>(`/api/files/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ all_failed: true }),
+    }),
+  deleteFile: (id: number) =>
+    request<{ affected: number }>(`/api/files/${id}`, { method: 'DELETE' }),
+  deleteFiles: (ids: number[]) =>
+    request<{ affected: number }>(`/api/files`, {
+      method: 'DELETE',
+      body: JSON.stringify({ ids }),
+    }),
 
   settings: () => request<Config>('/api/settings'),
   updateSettings: (cfg: Config) =>

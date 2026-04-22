@@ -68,6 +68,10 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/files", s.handleListFiles)
 		r.Get("/files/stats", s.handleFileStats)
+		r.Post("/files/retry", s.handleRetryFiles)
+		r.Delete("/files", s.handleDeleteFiles)
+		r.Post("/files/{id}/retry", s.handleRetryFile)
+		r.Delete("/files/{id}", s.handleDeleteFile)
 
 		r.Get("/settings", s.handleGetSettings)
 		r.Put("/settings", s.handlePutSettings)

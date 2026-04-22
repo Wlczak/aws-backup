@@ -293,6 +293,97 @@ func TestRestoreEstimate(t *testing.T) {
 	}
 }
 
+func TestRetryFile(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, _ := deps.DB.UpsertFile(ctx, "a.txt", 10, now, now)
+	_ = deps.DB.MarkFailed(ctx, r.ID)
+
+	resp, err := ts.Client().Post(fmt.Sprintf("%s/api/files/%d/retry", ts.URL, r.ID), "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	resp.Body.Close()
+
+	files, _, _ := deps.DB.ListFiles(ctx, db.FilesFilter{})
+	if files[0].Status != db.StatusPending {
+		t.Errorf("status=%q want pending", files[0].Status)
+	}
+}
+
+func TestRetryFilesBulkAllFailed(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r1, _ := deps.DB.UpsertFile(ctx, "a.txt", 1, now, now)
+	r2, _ := deps.DB.UpsertFile(ctx, "b.txt", 1, now, now)
+	_ = deps.DB.MarkFailed(ctx, r1.ID)
+	_ = deps.DB.MarkFailed(ctx, r2.ID)
+
+	resp, err := ts.Client().Post(ts.URL+"/api/files/retry", "application/json",
+		strings.NewReader(`{"all_failed":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body affectedResponse
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body.Affected != 2 {
+		t.Errorf("affected=%d want 2", body.Affected)
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, _ := deps.DB.UpsertFile(ctx, "a.txt", 10, now, now)
+
+	req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/files/%d", ts.URL, r.ID), nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	resp.Body.Close()
+
+	_, total, _ := deps.DB.ListFiles(ctx, db.FilesFilter{})
+	if total != 0 {
+		t.Errorf("total=%d want 0", total)
+	}
+}
+
+func TestDeleteFilesBulk(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r1, _ := deps.DB.UpsertFile(ctx, "a.txt", 1, now, now)
+	r2, _ := deps.DB.UpsertFile(ctx, "b.txt", 1, now, now)
+	_, _ = deps.DB.UpsertFile(ctx, "c.txt", 1, now, now)
+
+	body := fmt.Sprintf(`{"ids":[%d,%d]}`, r1.ID, r2.ID)
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/files", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res affectedResponse
+	_ = json.NewDecoder(resp.Body).Decode(&res)
+	resp.Body.Close()
+	if res.Affected != 2 {
+		t.Errorf("affected=%d", res.Affected)
+	}
+}
+
 func TestRestoreTriggerGated(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger", "application/json",

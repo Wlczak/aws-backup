@@ -139,14 +139,15 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 
 func (a *appState) buildEngine() (*engine.Engine, error) {
 	return engine.New(engine.Options{
-		DB:        a.db,
-		Source:    a.src,
-		Storage:   a.store,
-		TmpDir:    a.cfg.Backup.TmpDir,
-		KeyPrefix: a.cfg.S3.KeyPrefix,
-		ChunkSize: a.cfg.Backup.ChunkSize,
-		ZipThresh: a.cfg.Backup.ZipThreshold,
-		Emit:      a.bus.Publish,
+		DB:          a.db,
+		Source:      a.src,
+		Storage:     a.store,
+		TmpDir:      a.cfg.Backup.TmpDir,
+		KeyPrefix:   a.cfg.S3.KeyPrefix,
+		ChunkSize:   a.cfg.Backup.ChunkSize,
+		ZipThresh:   a.cfg.Backup.ZipThreshold,
+		RetryFailed: a.cfg.Backup.RetryFailed,
+		Emit:        a.bus.Publish,
 	}), nil
 }
 
@@ -166,13 +167,14 @@ func runBackup(cfgPath string) {
 
 	eng, _ := app.buildEngine()
 	eng = engine.New(engine.Options{
-		DB:        app.db,
-		Source:    app.src,
-		Storage:   app.store,
-		TmpDir:    app.cfg.Backup.TmpDir,
-		KeyPrefix: app.cfg.S3.KeyPrefix,
-		ChunkSize: app.cfg.Backup.ChunkSize,
-		ZipThresh: app.cfg.Backup.ZipThreshold,
+		DB:          app.db,
+		Source:      app.src,
+		Storage:     app.store,
+		TmpDir:      app.cfg.Backup.TmpDir,
+		KeyPrefix:   app.cfg.S3.KeyPrefix,
+		ChunkSize:   app.cfg.Backup.ChunkSize,
+		ZipThresh:   app.cfg.Backup.ZipThreshold,
+		RetryFailed: app.cfg.Backup.RetryFailed,
 		Emit: func(ev engine.Event) {
 			fmt.Printf("[event] %s %+v\n", ev.Type, ev.Data)
 		},
