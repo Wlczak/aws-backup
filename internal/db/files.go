@@ -378,3 +378,47 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	}
 	return s, nil
 }
+
+// ListS3Keys returns every distinct non-empty s3_key present in the index.
+// Used by the sync operation to compare against what is actually in S3.
+func (db *DB) ListS3Keys(ctx context.Context) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT DISTINCT s3_key FROM files WHERE s3_key != '' ORDER BY s3_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// MarkPendingByS3Keys resets all files whose s3_key is in keys to pending,
+// clearing upload-related fields. Returns the number of rows affected.
+// Used by the sync operation to re-queue files whose S3 objects are missing.
+func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(keys))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = k
+	}
+	res, err := db.ExecContext(ctx,
+		`UPDATE files SET status = ?, md5 = '', zip_name = '', s3_key = '', uploaded_at = ''
+		 WHERE s3_key IN (`+placeholders+`)`,
+		append([]any{StatusPending}, args...)...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

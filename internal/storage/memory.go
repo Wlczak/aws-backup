@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -57,6 +59,20 @@ func (m *MemStorage) Head(_ context.Context, key string) (HeadResult, error) {
 		return HeadResult{}, ErrNotFound
 	}
 	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: "DEEP_ARCHIVE"}, nil
+}
+
+// List returns keys matching prefix, sorted, satisfying the Storage interface.
+func (m *MemStorage) List(_ context.Context, prefix string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for k := range m.objects {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Restore is a no-op for the in-memory fake.

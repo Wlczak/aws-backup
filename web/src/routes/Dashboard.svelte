@@ -69,6 +69,28 @@
       err = String(e);
     }
   }
+
+  let syncing = $state(false);
+  let syncInfo = $state('');
+
+  async function syncWithS3() {
+    syncing = true;
+    syncInfo = '';
+    err = '';
+    try {
+      const r = await api.sync();
+      if (r.missing_in_s3 === 0) {
+        syncInfo = `Index in sync — ${r.keys_in_db} keys checked.`;
+      } else {
+        syncInfo = `Sync complete: ${r.missing_in_s3} key(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
+      }
+      await refresh();
+    } catch (e) {
+      err = String(e);
+    } finally {
+      syncing = false;
+    }
+  }
 </script>
 
 <h1>Dashboard</h1>
@@ -129,6 +151,17 @@
       </div>
     {/if}
   </div>
+
+  <div class="card">
+    <div class="label">S3 sync</div>
+    <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
+      Check that every recorded S3 key still exists. Missing objects are reset to pending for re-upload.
+    </div>
+    {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
+    <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
+      {syncing ? 'Syncing…' : 'Sync with S3'}
+    </button>
+  </div>
 </div>
 
 {#if status?.current || logLines.length}
@@ -157,6 +190,7 @@
   }
   .label { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
   .run-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+  .sync-info { font-size: 0.85rem; margin-bottom: 0.5rem; color: var(--fg); }
   .big { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.3rem; }
   .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
   .pill { font-size: 0.85rem; display: inline-flex; gap: 0.4rem; align-items: center; }

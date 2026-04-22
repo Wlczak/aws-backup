@@ -280,11 +280,13 @@ func runServe(cfgPath string) {
 	defer app.close()
 
 	srv := api.NewServer(api.Deps{
-		DB:          app.db,
-		Bus:         app.bus,
-		Config:      &app.cfg,
-		ConfigPath:  app.cfgPath,
-		BuildEngine: app.buildEngine,
+		DB:            app.db,
+		Bus:           app.bus,
+		Config:        &app.cfg,
+		ConfigPath:    app.cfgPath,
+		BuildEngine:   app.buildEngine,
+		Storage:       app.store,
+		StoragePrefix: app.cfg.S3.KeyPrefix,
 		ApplySettings: func(prev, next config.Config) error {
 			return app.applySettings(context.Background(), prev, next)
 		},

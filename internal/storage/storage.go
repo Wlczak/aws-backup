@@ -41,6 +41,10 @@ type Storage interface {
 	// ErrUnsupported on storage classes that don't need restoration.
 	Restore(ctx context.Context, key string, days int) error
 
+	// List returns every object key in the bucket whose key starts with
+	// prefix. Pass "" to list everything. Used by the index-sync operation.
+	List(ctx context.Context, prefix string) ([]string, error)
+
 	// Close releases any underlying client resources.
 	Close() error
 }

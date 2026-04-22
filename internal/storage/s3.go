@@ -149,6 +149,28 @@ func (s *S3Storage) Restore(ctx context.Context, key string, days int) error {
 	return err
 }
 
+// List returns every object key in the bucket with the given prefix.
+// Pass "" to list all keys. Pages through ListObjectsV2 automatically.
+func (s *S3Storage) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+	}
+	return keys, nil
+}
+
 // Close is a no-op; the SDK's HTTP client doesn't require teardown.
 func (s *S3Storage) Close() error { return nil }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
+	"github.com/Wlczak/aws-backup/internal/storage"
 	webassets "github.com/Wlczak/aws-backup/web"
 )
 
@@ -35,6 +36,10 @@ type Deps struct {
 	// caller can hot-swap source/storage/scheduler. Returning an error
 	// rolls back the save. nil means "nothing to apply" (tests).
 	ApplySettings func(prev, next config.Config) error
+	// Storage and StoragePrefix are used by the sync handler to list S3
+	// objects and compare them against the DB index.
+	Storage       storage.Storage
+	StoragePrefix string
 	Logger        *slog.Logger
 }
 
@@ -86,6 +91,8 @@ func (s *Server) Router() http.Handler {
 
 		r.Post("/restore/estimate", s.handleRestoreEstimate)
 		r.Post("/restore/trigger", s.handleRestoreTrigger)
+
+		r.Post("/sync", s.handleSync)
 
 		r.Mount("/events", sseHandler(s.deps.Bus))
 	})
