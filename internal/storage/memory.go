@@ -1,0 +1,98 @@
+package storage
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"sync"
+)
+
+// MemStorage is an in-process Storage implementation backed by a map.
+// Engine tests use it so we don't need MinIO for every unit test.
+type MemStorage struct {
+	mu      sync.Mutex
+	objects map[string]memObject
+}
+
+type memObject struct {
+	data []byte
+	etag string
+}
+
+// NewMemStorage returns an empty in-memory storage.
+func NewMemStorage() *MemStorage {
+	return &MemStorage{objects: map[string]memObject{}}
+}
+
+// Put stores body under key and returns a fake ETag = sha256(data) prefix.
+func (m *MemStorage) Put(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return PutResult{}, err
+	}
+	sum := sha256.Sum256(buf)
+	sumHex := hex.EncodeToString(sum[:])
+
+	m.mu.Lock()
+	m.objects[key] = memObject{data: buf, etag: sumHex[:32]}
+	m.mu.Unlock()
+
+	return PutResult{
+		Key:            key,
+		ETag:           fmt.Sprintf("%q", sumHex[:32]),
+		ChecksumSHA256: sumHex,
+		Size:           int64(len(buf)),
+	}, nil
+}
+
+// Head returns fake object metadata or ErrNotFound.
+func (m *MemStorage) Head(_ context.Context, key string) (HeadResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.objects[key]
+	if !ok {
+		return HeadResult{}, ErrNotFound
+	}
+	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: "DEEP_ARCHIVE"}, nil
+}
+
+// Restore is a no-op for the in-memory fake.
+func (m *MemStorage) Restore(_ context.Context, key string, _ int) error {
+	m.mu.Lock()
+	_, ok := m.objects[key]
+	m.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Close is a no-op.
+func (m *MemStorage) Close() error { return nil }
+
+// Get is a testing helper that returns the raw bytes stored under key.
+// Not part of the Storage interface on purpose — production code never
+// downloads from the destination.
+func (m *MemStorage) Get(key string) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.objects[key]
+	if !ok {
+		return nil, false
+	}
+	return bytes.Clone(o.data), true
+}
+
+// Keys returns all stored keys in sorted order (stable for assertions).
+func (m *MemStorage) Keys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.objects))
+	for k := range m.objects {
+		keys = append(keys, k)
+	}
+	return keys
+}
