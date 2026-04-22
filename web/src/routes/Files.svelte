@@ -42,7 +42,7 @@
   }
 </script>
 
-<h1>File index</h1>
+<h1>Files</h1>
 {#if err}<div class="card err">{err}</div>{/if}
 
 <div class="toolbar card">

@@ -1,14 +1,14 @@
 <script lang="ts">
   import { route, go } from './lib/router';
   import Dashboard from './routes/Dashboard.svelte';
-  import Index from './routes/Index.svelte';
+  import Files from './routes/Files.svelte';
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
-    { id: 'index', label: 'Index' },
+    { id: 'files', label: 'Files' },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings' },
     { id: 'restore', label: 'Restore' },
@@ -31,7 +31,7 @@
 
   <main>
     {#if $route === 'dashboard'}<Dashboard />
-    {:else if $route === 'index'}<Index />
+    {:else if $route === 'files' || $route === 'index'}<Files />
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings'}<Settings />
     {:else if $route === 'restore'}<Restore />
