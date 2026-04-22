@@ -1,4 +1,29 @@
+# Build output
+/aws-backup
+/aws-backup.exe
+/aws-backup-*-amd64
+/aws-backup-*-amd64.exe
+/dist/
+/bin/
 
-.env
-yourfile.txt
+# Frontend
+/web/node_modules/
+/web/dist/
+
+# Runtime
+/config.json
+/*.db
+/*.db-shm
+/*.db-wal
+/tmp/
 /test-upload
+yourfile.txt
+
+# Environment
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
