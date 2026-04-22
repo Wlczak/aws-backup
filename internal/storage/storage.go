@@ -45,6 +45,10 @@ type Storage interface {
 	// prefix. Pass "" to list everything. Used by the index-sync operation.
 	List(ctx context.Context, prefix string) ([]string, error)
 
+	// Get downloads the object at key and returns a ReadCloser. Caller must
+	// close the body. Returns ErrNotFound when the key is absent.
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
+
 	// Close releases any underlying client resources.
 	Close() error
 }

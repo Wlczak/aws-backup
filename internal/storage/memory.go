@@ -89,10 +89,19 @@ func (m *MemStorage) Restore(_ context.Context, key string, _ int) error {
 // Close is a no-op.
 func (m *MemStorage) Close() error { return nil }
 
-// Get is a testing helper that returns the raw bytes stored under key.
-// Not part of the Storage interface on purpose — production code never
-// downloads from the destination.
-func (m *MemStorage) Get(key string) ([]byte, bool) {
+// Get returns an io.ReadCloser over the stored object, satisfying Storage.
+func (m *MemStorage) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.objects[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(bytes.Clone(o.data))), nil
+}
+
+// GetBytes is a testing helper that returns the raw bytes stored under key.
+func (m *MemStorage) GetBytes(key string) ([]byte, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	o, ok := m.objects[key]

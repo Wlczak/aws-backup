@@ -171,6 +171,26 @@ func (s *S3Storage) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// Get downloads the object at key and returns the response body.
+// The caller must close the returned ReadCloser.
+func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "NotFound", "NoSuchKey":
+				return nil, ErrNotFound
+			}
+		}
+		return nil, err
+	}
+	return out.Body, nil
+}
+
 // Close is a no-op; the SDK's HTTP client doesn't require teardown.
 func (s *S3Storage) Close() error { return nil }
 

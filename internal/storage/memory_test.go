@@ -36,7 +36,7 @@ func TestMemStorageRoundTrip(t *testing.T) {
 		t.Errorf("head size=%d", h.Size)
 	}
 
-	got, ok := m.Get("backups/x.zip")
+	got, ok := m.GetBytes("backups/x.zip")
 	if !ok {
 		t.Fatal("Get: not found")
 	}

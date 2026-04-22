@@ -53,6 +53,14 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	return &DB{DB: sqldb}, nil
 }
 
+// Checkpoint flushes the WAL file into the main database file so the
+// .db can be uploaded to S3 as a consistent snapshot. Safe to call while
+// the database is open; other connections continue to work normally.
+func (db *DB) Checkpoint(ctx context.Context) error {
+	_, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE);")
+	return err
+}
+
 // isoTime formats t in RFC3339Nano so it sorts lexicographically.
 func isoTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)

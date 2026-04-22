@@ -152,7 +152,7 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 			break
 		}
 	}
-	data, _ := store.Get(zipKey)
+	data, _ := store.GetBytes(zipKey)
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatal(err)

@@ -40,7 +40,10 @@ type Deps struct {
 	// objects and compare them against the DB index.
 	Storage       storage.Storage
 	StoragePrefix string
-	Logger        *slog.Logger
+	// SyncDBToS3, when non-nil, is called after each successful backup run
+	// to upload the local index.db to S3 as a remote backup.
+	SyncDBToS3 func(ctx context.Context) error
+	Logger     *slog.Logger
 }
 
 // Server exposes the Router for tests and for the CLI to Serve() from.

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -105,17 +107,6 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	dbPath := filepath.Join(dir, "index.db")
-	d, err := db.Open(ctx, dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open db %s: %w", dbPath, err)
-	}
-
-	src, err := source.FromConfig(cfg.Source)
-	if err != nil {
-		d.Close()
-		return nil, fmt.Errorf("open source: %w", err)
-	}
 
 	store, err := storage.NewS3Storage(ctx, storage.S3Config{
 		Endpoint:        cfg.S3.Endpoint,
@@ -127,9 +118,30 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 		StorageClass:    cfg.S3.StorageClass,
 	})
 	if err != nil {
-		d.Close()
-		src.Close()
 		return nil, fmt.Errorf("init storage: %w", err)
+	}
+
+	dbPath := filepath.Join(dir, "index.db")
+	// If the DB doesn't exist locally, try to pull it from S3 so a fresh
+	// install on a new machine picks up the existing index.
+	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+		if dlErr := downloadDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath); dlErr != nil {
+			// Best-effort: if S3 doesn't have it yet, start with a fresh DB.
+			_ = os.Remove(dbPath)
+		}
+	}
+
+	d, err := db.Open(ctx, dbPath)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("open db %s: %w", dbPath, err)
+	}
+
+	src, err := source.FromConfig(cfg.Source)
+	if err != nil {
+		d.Close()
+		store.Close()
+		return nil, fmt.Errorf("open source: %w", err)
 	}
 
 	return &appState{
@@ -141,6 +153,51 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 		bus:     events.NewBus(128),
 		dbPath:  dbPath,
 	}, nil
+}
+
+// downloadDBFromS3 downloads the index.db object from S3 and writes it to dst.
+func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
+	key := dbS3Key(prefix)
+	body, err := store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	f, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, body)
+	if closeErr := f.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// syncDBToS3 checkpoints the WAL and uploads the DB file to S3.
+func (a *appState) syncDBToS3(ctx context.Context) error {
+	if err := a.db.Checkpoint(ctx); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	f, err := os.Open(a.dbPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	_, err = a.store.Put(ctx, dbS3Key(a.cfg.S3.KeyPrefix), f, fi.Size())
+	return err
+}
+
+// dbS3Key returns the S3 key used to store the index database.
+func dbS3Key(prefix string) string {
+	if prefix == "" {
+		return "index.db"
+	}
+	return strings.TrimRight(prefix, "/") + "/index.db"
 }
 
 func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
@@ -287,6 +344,7 @@ func runServe(cfgPath string) {
 		BuildEngine:   app.buildEngine,
 		Storage:       app.store,
 		StoragePrefix: app.cfg.S3.KeyPrefix,
+		SyncDBToS3:    app.syncDBToS3,
 		ApplySettings: func(prev, next config.Config) error {
 			return app.applySettings(context.Background(), prev, next)
 		},

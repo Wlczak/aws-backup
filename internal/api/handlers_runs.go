@@ -160,12 +160,19 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	s.currentRun = runID
 	s.currentRunCancel = cancel
 
+	syncDBToS3 := s.deps.SyncDBToS3
+	logger := s.deps.Logger
 	go func() {
-		_ = eng.RunWithID(runCtx, runID)
+		runErr := eng.RunWithID(runCtx, runID)
 		s.runMu.Lock()
 		s.currentRun = 0
 		s.currentRunCancel = nil
 		s.runMu.Unlock()
+		if runErr == nil && syncDBToS3 != nil {
+			if err := syncDBToS3(context.Background()); err != nil && logger != nil {
+				logger.Warn("db sync to s3 failed", "error", err)
+			}
+		}
 	}()
 
 	writeJSON(w, http.StatusAccepted, triggerRunResponse{RunID: runID})
