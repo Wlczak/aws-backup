@@ -79,10 +79,12 @@
     err = '';
     try {
       const r = await api.sync();
-      if (r.missing_in_s3 === 0) {
-        syncInfo = `Index in sync — ${r.keys_in_db} keys checked.`;
+      const total = r.missing_zips + r.missing_individual;
+      if (total === 0) {
+        const checked = r.zip_names_in_db + r.individual_keys_in_db;
+        syncInfo = `Index in sync — ${checked} object(s) checked.`;
       } else {
-        syncInfo = `Sync complete: ${r.missing_in_s3} key(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
+        syncInfo = `Sync complete: ${r.missing_zips} zip(s) + ${r.missing_individual} individual file(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
       }
       await refresh();
     } catch (e) {

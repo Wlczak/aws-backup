@@ -379,29 +379,65 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	return s, nil
 }
 
-// ListS3Keys returns every distinct non-empty s3_key present in the index.
-// Used by the sync operation to compare against what is actually in S3.
-func (db *DB) ListS3Keys(ctx context.Context) ([]string, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT DISTINCT s3_key FROM files WHERE s3_key != '' ORDER BY s3_key`)
+// ListZipNames returns every distinct non-empty zip_name in the index.
+// Each name represents one zip object in S3 that may cover many files.
+func (db *DB) ListZipNames(ctx context.Context) ([]string, error) {
+	return listDistinctStrings(ctx, db.DB,
+		`SELECT DISTINCT zip_name FROM files WHERE zip_name != '' ORDER BY zip_name`)
+}
+
+// ListIndividualS3Keys returns distinct s3_key values for files that were
+// uploaded individually (zip_name is empty). Zipped files are excluded
+// because their S3 object is identified by zip_name, not s3_key.
+func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
+	return listDistinctStrings(ctx, db.DB,
+		`SELECT DISTINCT s3_key FROM files WHERE zip_name = '' AND s3_key != '' ORDER BY s3_key`)
+}
+
+func listDistinctStrings(ctx context.Context, db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, query string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
+		var s string
+		if err := rows.Scan(&s); err != nil {
 			return nil, err
 		}
-		out = append(out, k)
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }
 
-// MarkPendingByS3Keys resets all files whose s3_key is in keys to pending,
-// clearing upload-related fields. Returns the number of rows affected.
-// Used by the sync operation to re-queue files whose S3 objects are missing.
+// MarkPendingByZipNames resets all files whose zip_name is in the list.
+// Used when a zip object is confirmed missing from S3.
+func (db *DB) MarkPendingByZipNames(ctx context.Context, zipNames []string) (int64, error) {
+	if len(zipNames) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(zipNames))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(zipNames))
+	for i, k := range zipNames {
+		args[i] = k
+	}
+	res, err := db.ExecContext(ctx,
+		`UPDATE files SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+		 WHERE zip_name IN (`+placeholders+`)`,
+		append([]any{StatusPending}, args...)...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// MarkPendingByS3Keys resets individually-uploaded files whose s3_key is in
+// the list. Used when a directly-uploaded object is missing from S3.
 func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
@@ -413,8 +449,8 @@ func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, er
 		args[i] = k
 	}
 	res, err := db.ExecContext(ctx,
-		`UPDATE files SET status = ?, md5 = '', zip_name = '', s3_key = '', uploaded_at = ''
-		 WHERE s3_key IN (`+placeholders+`)`,
+		`UPDATE files SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+		 WHERE zip_name = '' AND s3_key IN (`+placeholders+`)`,
 		append([]any{StatusPending}, args...)...,
 	)
 	if err != nil {

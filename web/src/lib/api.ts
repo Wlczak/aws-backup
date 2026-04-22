@@ -155,7 +155,14 @@ export const api = {
   testStorage: () => request<TestResult>('/api/s3/test'),
 
   sync: () =>
-    request<{ keys_in_db: number; keys_in_s3: number; missing_in_s3: number; files_reset: number }>('/api/sync', { method: 'POST' }),
+    request<{
+      zip_names_in_db: number;
+      individual_keys_in_db: number;
+      keys_in_s3: number;
+      missing_zips: number;
+      missing_individual: number;
+      files_reset: number;
+    }>('/api/sync', { method: 'POST' }),
 
   restoreEstimate: (paths: string[]) =>
     request<RestoreEstimate>('/api/restore/estimate', {
