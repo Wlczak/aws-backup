@@ -165,6 +165,9 @@ type FilesFilter struct {
 	Search string // substring match on path
 	Page   int    // 1-based
 	Limit  int
+	// All disables pagination so the tree view can build a full hierarchy
+	// without the caller having to fetch every page manually.
+	All bool
 }
 
 // ListFiles returns a page of file rows matching filter, plus the total row count.
@@ -200,14 +203,19 @@ func (db *DB) ListFiles(ctx context.Context, f FilesFilter) ([]File, int64, erro
 		return nil, 0, err
 	}
 
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+	query := fmt.Sprintf(
 		`SELECT id, path, size, mtime, COALESCE(md5,''), status,
 		        COALESCE(zip_name,''), COALESCE(s3_key,''),
 		        COALESCE(uploaded_at,''), last_seen_at
 		   FROM files %s
-		 ORDER BY path
-		 LIMIT ? OFFSET ?`, whereSQL,
-	), append(args, f.Limit, (f.Page-1)*f.Limit)...)
+		 ORDER BY path`, whereSQL,
+	)
+	qargs := args
+	if !f.All {
+		query += ` LIMIT ? OFFSET ?`
+		qargs = append(qargs, f.Limit, (f.Page-1)*f.Limit)
+	}
+	rows, err := db.QueryContext(ctx, query, qargs...)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -5,7 +5,15 @@
   import { selection, toggle, clear, ids, paths } from '../lib/selection';
   import { go } from '../lib/router';
   import StatusBadge from '../components/StatusBadge.svelte';
+  import FileTreeNode from '../components/FileTreeNode.svelte';
+  import { buildTree, collectFiles, type TreeNode } from '../lib/tree';
 
+  type ViewMode = 'tree' | 'flat';
+  const VIEW_KEY = 'aws-backup:files-view';
+
+  let viewMode = $state<ViewMode>(
+    (typeof localStorage !== 'undefined' && (localStorage.getItem(VIEW_KEY) as ViewMode)) || 'tree',
+  );
   let page = $state(1);
   let limit = $state(50);
   let status = $state('');
@@ -14,15 +22,34 @@
   let err = $state('');
   let detail = $state<FileRow | null>(null);
   let busy = $state(false);
+  let expanded = $state<Set<string>>(new Set(['']));
 
-  let totalPages = $derived(data ? Math.max(1, Math.ceil(data.total / limit)) : 1);
+  let totalPages = $derived(
+    data && viewMode === 'flat' ? Math.max(1, Math.ceil(data.total / limit)) : 1,
+  );
   let selectedIDs = $derived(new Set($selection.map((f) => f.id)));
+  let tree = $derived<TreeNode | null>(
+    viewMode === 'tree' && data ? buildTree(data.files) : null,
+  );
 
   let searchTimer: number | undefined;
 
   async function load() {
     try {
-      data = await api.files({ page, limit, status: status || undefined, search: search || undefined });
+      if (viewMode === 'tree') {
+        data = await api.files({
+          all: true,
+          status: status || undefined,
+          search: search || undefined,
+        });
+      } else {
+        data = await api.files({
+          page,
+          limit,
+          status: status || undefined,
+          search: search || undefined,
+        });
+      }
       err = '';
     } catch (e) {
       err = String(e);
@@ -30,6 +57,14 @@
   }
 
   onMount(load);
+
+  function setView(m: ViewMode) {
+    if (m === viewMode) return;
+    viewMode = m;
+    page = 1;
+    try { localStorage.setItem(VIEW_KEY, m); } catch { /* private mode */ }
+    load();
+  }
 
   function onFilter() {
     page = 1;
@@ -57,6 +92,40 @@
         if (selectedIDs.has(f.id)) toggle({ id: f.id, path: f.path });
       }
     }
+  }
+
+  function toggleFolder(node: TreeNode, select: boolean) {
+    const files = collectFiles(node);
+    for (const f of files) {
+      const has = selectedIDs.has(f.id);
+      if (select && !has) toggle({ id: f.id, path: f.path });
+      else if (!select && has) toggle({ id: f.id, path: f.path });
+    }
+  }
+
+  function toggleExpand(path: string) {
+    const next = new Set(expanded);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    expanded = next;
+  }
+
+  function expandAll() {
+    if (!tree) return;
+    const next = new Set<string>();
+    const stack: TreeNode[] = [tree];
+    while (stack.length) {
+      const n = stack.pop()!;
+      if (n.isFolder) {
+        next.add(n.path);
+        for (const c of n.children) stack.push(c);
+      }
+    }
+    expanded = next;
+  }
+
+  function collapseAll() {
+    expanded = new Set(['']);
   }
 
   async function retryRow(f: FileRow) {
@@ -97,7 +166,7 @@
     try {
       await api.deleteFile(f.id);
       if (detail?.id === f.id) detail = null;
-      toggle({ id: f.id, path: f.path }); // remove from selection if present
+      if (selectedIDs.has(f.id)) toggle({ id: f.id, path: f.path });
       await load();
     } catch (e) { err = String(e); }
     finally { busy = false; }
@@ -130,9 +199,26 @@
 {#if err}<div class="card err">{err}</div>{/if}
 
 <div class="toolbar card">
+  <div class="viewswitch" role="tablist" aria-label="View mode">
+    <button
+      type="button"
+      role="tab"
+      class:active={viewMode === 'tree'}
+      aria-selected={viewMode === 'tree'}
+      onclick={() => setView('tree')}
+    >Tree</button>
+    <button
+      type="button"
+      role="tab"
+      class:active={viewMode === 'flat'}
+      aria-selected={viewMode === 'flat'}
+      onclick={() => setView('flat')}
+    >Flat</button>
+  </div>
+
   <label>
     Status
-    <select bind:value={status} on:change={onFilter}>
+    <select bind:value={status} onchange={onFilter}>
       <option value="">all</option>
       <option value="pending">pending</option>
       <option value="zipped">zipped</option>
@@ -144,89 +230,125 @@
 
   <label class="grow">
     Search
-    <input type="text" placeholder="path contains…" bind:value={search} on:input={onSearch} />
+    <input type="text" placeholder="path contains…" bind:value={search} oninput={onSearch} />
   </label>
 
-  <label>
-    Per page
-    <select bind:value={limit} on:change={onFilter}>
-      <option value={25}>25</option>
-      <option value={50}>50</option>
-      <option value={100}>100</option>
-      <option value={250}>250</option>
-    </select>
-  </label>
+  {#if viewMode === 'flat'}
+    <label>
+      Per page
+      <select bind:value={limit} onchange={onFilter}>
+        <option value={25}>25</option>
+        <option value={50}>50</option>
+        <option value={100}>100</option>
+        <option value={250}>250</option>
+      </select>
+    </label>
+  {/if}
+
+  {#if viewMode === 'tree'}
+    <button type="button" onclick={expandAll}>Expand all</button>
+    <button type="button" onclick={collapseAll}>Collapse all</button>
+  {/if}
 
   {#if status === 'failed'}
-    <button on:click={retryAllFailed} disabled={busy} type="button">Retry all failed</button>
+    <button onclick={retryAllFailed} disabled={busy} type="button">Retry all failed</button>
   {/if}
 </div>
 
 {#if $selection.length > 0}
   <div class="card selectionbar">
     <span><strong>{$selection.length}</strong> selected</span>
-    <button on:click={restoreSelected} disabled={busy} type="button">Restore selected</button>
-    <button on:click={retrySelected} disabled={busy} type="button">Retry</button>
-    <button on:click={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
-    <button on:click={clear} disabled={busy} type="button">Clear</button>
+    <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
+    <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
+    <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
+    <button onclick={clear} disabled={busy} type="button">Clear</button>
   </div>
 {/if}
 
-<div class="card nopad">
-  <table>
-    <thead>
-      <tr>
-        <th class="check">
-          <input type="checkbox" checked={allVisibleSelected} on:change={toggleAllVisible} aria-label="Select all visible" />
-        </th>
-        <th>Path</th>
-        <th>Size</th>
-        <th>Modified</th>
-        <th>Status</th>
-        <th>Zip</th>
-        <th>Uploaded</th>
-        <th class="actions-col"></th>
-      </tr>
-    </thead>
-    <tbody>
-      {#if data}
-        {#each data.files as f (f.id)}
-          <tr class:picked={selectedIDs.has(f.id)}>
-            <td class="check">
-              <input
-                type="checkbox"
-                checked={selectedIDs.has(f.id)}
-                on:change={() => toggle({ id: f.id, path: f.path })}
-                aria-label={`Select ${f.path}`}
-              />
-            </td>
-            <td class="mono path" on:click={() => (detail = f)}>{f.path}</td>
-            <td class="mono" on:click={() => (detail = f)}>{bytes(f.size)}</td>
-            <td on:click={() => (detail = f)}>{formatDate(f.mtime)}</td>
-            <td on:click={() => (detail = f)}><StatusBadge status={f.status} /></td>
-            <td class="mono muted" on:click={() => (detail = f)}>{f.zip_name ?? ''}</td>
-            <td on:click={() => (detail = f)}>{f.uploaded_at ? formatDate(f.uploaded_at) : '—'}</td>
-            <td class="actions-col">
-              {#if f.status === 'failed' || f.status === 'missing'}
-                <button class="row-action" on:click|stopPropagation={() => retryRow(f)} disabled={busy} title="Retry">↻</button>
-              {/if}
-              <button class="row-action danger" on:click|stopPropagation={() => deleteRow(f)} disabled={busy} title="Delete">×</button>
-            </td>
-          </tr>
-        {/each}
-        {#if data.files.length === 0}
-          <tr><td colspan="8" class="muted" style="text-align: center; padding: 1.5rem">No files match</td></tr>
+{#if viewMode === 'tree'}
+  <div class="card nopad">
+    {#if tree && tree.children.length > 0}
+      {#each tree.children as child (child.path)}
+        <FileTreeNode
+          node={child}
+          depth={0}
+          {expanded}
+          {selectedIDs}
+          onToggleExpand={toggleExpand}
+          onToggleFile={(f) => toggle({ id: f.id, path: f.path })}
+          onToggleFolder={toggleFolder}
+          onOpenDetail={(f) => (detail = f)}
+          onRetry={retryRow}
+          onDelete={deleteRow}
+          {busy}
+        />
+      {/each}
+    {:else if data}
+      <div class="muted empty">No files match</div>
+    {/if}
+  </div>
+  {#if data}
+    <div class="pager">
+      <span class="muted">{data.total.toLocaleString()} files</span>
+    </div>
+  {/if}
+{:else}
+  <div class="card nopad">
+    <table>
+      <thead>
+        <tr>
+          <th class="check">
+            <input type="checkbox" checked={allVisibleSelected} onchange={toggleAllVisible} aria-label="Select all visible" />
+          </th>
+          <th>Path</th>
+          <th>Size</th>
+          <th>Modified</th>
+          <th>Status</th>
+          <th>Zip</th>
+          <th>Uploaded</th>
+          <th class="actions-col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {#if data}
+          {#each data.files as f (f.id)}
+            <tr class:picked={selectedIDs.has(f.id)}>
+              <td class="check">
+                <input
+                  type="checkbox"
+                  checked={selectedIDs.has(f.id)}
+                  onchange={() => toggle({ id: f.id, path: f.path })}
+                  aria-label={`Select ${f.path}`}
+                />
+              </td>
+              <td class="mono path" onclick={() => (detail = f)}>{f.path}</td>
+              <td class="mono" onclick={() => (detail = f)}>{bytes(f.size)}</td>
+              <td onclick={() => (detail = f)}>{formatDate(f.mtime)}</td>
+              <td onclick={() => (detail = f)}><StatusBadge status={f.status} /></td>
+              <td class="mono muted" onclick={() => (detail = f)}>{f.zip_name ?? ''}</td>
+              <td onclick={() => (detail = f)}>{f.uploaded_at ? formatDate(f.uploaded_at) : '—'}</td>
+              <td class="actions-col">
+                {#if f.status === 'failed' || f.status === 'missing'}
+                  <button class="row-action" onclick={(e) => { e.stopPropagation(); retryRow(f); }} disabled={busy} title="Retry">↻</button>
+                {/if}
+                <button class="row-action danger" onclick={(e) => { e.stopPropagation(); deleteRow(f); }} disabled={busy} title="Delete">×</button>
+              </td>
+            </tr>
+          {/each}
+          {#if data.files.length === 0}
+            <tr><td colspan="8" class="muted" style="text-align: center; padding: 1.5rem">No files match</td></tr>
+          {/if}
         {/if}
-      {/if}
-    </tbody>
-  </table>
-</div>
+      </tbody>
+    </table>
+  </div>
 
-<div class="pager">
-  <button on:click={() => gotoPage(page - 1)} disabled={page <= 1} type="button">← Prev</button>
-  <span class="muted">Page {page} of {totalPages} · {data?.total.toLocaleString() ?? 0} files</span>
-  <button on:click={() => gotoPage(page + 1)} disabled={page >= totalPages} type="button">Next →</button>
-</div>
+  <div class="pager">
+    <button onclick={() => gotoPage(page - 1)} disabled={page <= 1} type="button">← Prev</button>
+    <span class="muted">Page {page} of {totalPages} · {data?.total.toLocaleString() ?? 0} files</span>
+    <button onclick={() => gotoPage(page + 1)} disabled={page >= totalPages} type="button">Next →</button>
+  </div>
+{/if}
 
 {#if detail}
   <div class="card">
@@ -239,7 +361,7 @@
     {#if detail.s3_key}<div class="row"><span class="label">S3 key</span><span class="mono">{detail.s3_key}</span></div>{/if}
     {#if detail.zip_name}<div class="row"><span class="label">Zip</span><span class="mono">{detail.zip_name}</span></div>{/if}
     {#if detail.uploaded_at}<div class="row"><span class="label">Uploaded at</span><span>{formatDate(detail.uploaded_at)}</span></div>{/if}
-    <button on:click={() => (detail = null)} type="button" style="margin-top: 0.5rem">Close</button>
+    <button onclick={() => (detail = null)} type="button" style="margin-top: 0.5rem">Close</button>
   </div>
 {/if}
 
@@ -269,4 +391,24 @@
   .row-action.danger:hover:not(:disabled), button.danger:hover:not(:disabled) {
     background: rgba(239, 80, 80, 0.1);
   }
+  .viewswitch {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .viewswitch button {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .viewswitch button.active {
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .viewswitch button + button { border-left: 1px solid var(--border); }
+  .empty { padding: 1.5rem; text-align: center; }
 </style>

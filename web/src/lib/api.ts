@@ -113,12 +113,13 @@ export const api = {
   triggerRun: () => request<{ run_id: number }>('/api/runs', { method: 'POST' }),
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
 
-  files: (opts: { page?: number; limit?: number; status?: string; search?: string } = {}) => {
+  files: (opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {}) => {
     const qs = new URLSearchParams();
     if (opts.page) qs.set('page', String(opts.page));
     if (opts.limit) qs.set('limit', String(opts.limit));
     if (opts.status) qs.set('status', opts.status);
     if (opts.search) qs.set('search', opts.search);
+    if (opts.all) qs.set('all', 'true');
     return request<FilesPage>(`/api/files?${qs.toString()}`);
   },
   fileStats: () => request<FileStats>('/api/files/stats'),

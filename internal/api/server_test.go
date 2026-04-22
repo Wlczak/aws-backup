@@ -253,6 +253,23 @@ func TestFilesList(t *testing.T) {
 	}
 }
 
+func TestFilesListAll(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	// Insert more rows than the default page size to prove all=true
+	// really bypasses pagination.
+	for i := 0; i < 75; i++ {
+		_, _ = deps.DB.UpsertFile(ctx, fmt.Sprintf("dir/f%02d.txt", i), 10, now, now)
+	}
+
+	var got filesListResponse
+	getJSON(t, ts, "/api/files?all=true", &got)
+	if got.Total != 75 || len(got.Files) != 75 {
+		t.Errorf("total=%d len=%d want 75/75", got.Total, len(got.Files))
+	}
+}
+
 func TestRunsList(t *testing.T) {
 	ts, deps := newTestServer(t)
 	ctx := context.Background()

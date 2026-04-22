@@ -34,11 +34,15 @@ type fileEntry struct {
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	all := q.Get("all") == "true" || q.Get("all") == "1"
+	page := intParam(r, "page", 1)
+	limit := intParam(r, "limit", 50)
 	files, total, err := s.deps.DB.ListFiles(r.Context(), db.FilesFilter{
 		Status: q.Get("status"),
 		Search: q.Get("search"),
-		Page:   intParam(r, "page", 1),
-		Limit:  intParam(r, "limit", 50),
+		Page:   page,
+		Limit:  limit,
+		All:    all,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -52,10 +56,16 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
 		})
 	}
+	if all {
+		// Report the real count so the client can page in tree mode if
+		// it chooses, but the payload already contains everything.
+		page = 1
+		limit = len(out)
+	}
 	writeJSON(w, http.StatusOK, filesListResponse{
 		Files: out, Total: total,
-		Page:  intParam(r, "page", 1),
-		Limit: intParam(r, "limit", 50),
+		Page:  page,
+		Limit: limit,
 	})
 }
 
