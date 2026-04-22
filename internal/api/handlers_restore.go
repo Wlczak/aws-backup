@@ -49,6 +49,15 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// "/" (or "") is a special sentinel meaning "all files".
+	allFiles := false
+	for _, p := range req.Paths {
+		if p == "/" || p == "" {
+			allFiles = true
+			break
+		}
+	}
+
 	want := make(map[string]struct{}, len(req.Paths))
 	for _, p := range req.Paths {
 		want[p] = struct{}{}
@@ -74,12 +83,17 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		for _, f := range rows {
-			for req := range want {
-				if f.Path == req || hasPrefixPath(f.Path, req) {
-					count++
-					bytes += f.Size
-					matched[req] = true
-					break
+			if allFiles {
+				count++
+				bytes += f.Size
+			} else {
+				for req := range want {
+					if f.Path == req || hasPrefixPath(f.Path, req) {
+						count++
+						bytes += f.Size
+						matched[req] = true
+						break
+					}
 				}
 			}
 		}
@@ -87,9 +101,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	for req := range want {
-		if !matched[req] {
-			unknown = append(unknown, req)
+	if !allFiles {
+		for req := range want {
+			if !matched[req] {
+				unknown = append(unknown, req)
+			}
 		}
 	}
 

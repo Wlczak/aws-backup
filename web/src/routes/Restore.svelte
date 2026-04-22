@@ -71,14 +71,21 @@
 
 <div class="card">
   <div class="label">Paths (one per line)</div>
-  <p class="muted">Enter top-level directories or full file paths. Prefix match is applied — e.g. <code class="mono">photos</code> selects every file under <code class="mono">photos/</code>.</p>
+  <p class="muted">
+    Enter top-level directories or full file paths. Prefix match is applied — e.g.
+    <code class="mono">photos</code> selects every file under <code class="mono">photos/</code>.
+    Enter <code class="mono">/</code> to select <strong>all files</strong>.
+  </p>
   <textarea bind:value={raw} placeholder={"photos\ndocs/2024\nfamily-archive.zip"}></textarea>
   <div class="actions">
-    <button class="primary" on:click={doEstimate} disabled={loading} type="button">
+    <button class="primary" onclick={doEstimate} disabled={loading} type="button">
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
-    <button on:click={doTrigger} disabled={loading || !estimate} type="button">
+    <button onclick={doTrigger} disabled={loading || !estimate} type="button">
       {confirmTrigger ? 'Click again to confirm' : 'Initiate restore'}
+    </button>
+    <button type="button" onclick={() => { raw = '/'; estimate = null; }} title="Select all files">
+      Select all
     </button>
   </div>
 </div>
