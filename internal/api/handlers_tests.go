@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/Wlczak/aws-backup/internal/config"
+	"github.com/Wlczak/aws-backup/internal/source"
 )
 
 type testResult struct {
@@ -35,7 +36,13 @@ func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "localdir root reachable"})
 	case config.SourceSMB:
-		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "SMB source adapter not wired yet (feature 18)"})
+		smb, err := source.FromConfig(s.deps.Config.Source)
+		if err != nil {
+			writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
+			return
+		}
+		_ = smb.Close()
+		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "smb share reachable"})
 	default:
 		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "unknown source type"})
 	}

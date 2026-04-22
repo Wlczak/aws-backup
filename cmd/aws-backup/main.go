@@ -105,11 +105,7 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 		return nil, fmt.Errorf("open db %s: %w", dbPath, err)
 	}
 
-	if cfg.Source.Type != config.SourceLocalDir {
-		d.Close()
-		return nil, fmt.Errorf("only source.type=localdir is supported so far (got %q)", cfg.Source.Type)
-	}
-	src, err := source.NewLocalDir(cfg.Source.LocalDir.Root)
+	src, err := source.FromConfig(cfg.Source)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("open source: %w", err)
