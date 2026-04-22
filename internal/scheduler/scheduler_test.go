@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,12 +129,21 @@ func TestNextReportsFireTime(t *testing.T) {
 }
 
 type testSink struct {
-	b []byte
+	mu sync.Mutex
+	b  []byte
 }
 
-func (s *testSink) Write(p []byte) (int, error) { s.b = append(s.b, p...); return len(p), nil }
+func (s *testSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	s.b = append(s.b, p...)
+	s.mu.Unlock()
+	return len(p), nil
+}
 func (s *testSink) contains(sub string) bool {
-	return contains(string(s.b), sub)
+	s.mu.Lock()
+	str := string(s.b)
+	s.mu.Unlock()
+	return contains(str, sub)
 }
 
 func contains(s, sub string) bool {
