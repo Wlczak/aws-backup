@@ -1,0 +1,97 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"sync"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/Wlczak/aws-backup/internal/config"
+	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/engine"
+	"github.com/Wlczak/aws-backup/internal/events"
+)
+
+// Deps holds everything the HTTP handlers need.
+type Deps struct {
+	DB         *db.DB
+	Bus        *events.Bus
+	Config     *config.Config
+	ConfigPath string
+	// BuildEngine constructs an Engine for a new backup run with the
+	// current config. Kept as a callback so feature 9 doesn't need to
+	// know how to wire S3 / Source. The caller supplies a wired Engine
+	// whose Source/Storage are already bound to the live config.
+	BuildEngine func() (*engine.Engine, error)
+	Logger      *slog.Logger
+}
+
+// Server exposes the Router for tests and for the CLI to Serve() from.
+type Server struct {
+	deps Deps
+
+	// runMu guards currentRun + currentRunCancel so we can expose "is a
+	// run in progress?" to /api/status and allow /api/runs/:id/cancel.
+	runMu             sync.Mutex
+	currentRun        int64 // 0 when idle
+	currentRunCancel  context.CancelFunc
+}
+
+// NewServer wires up a *Server with validated Deps.
+func NewServer(d Deps) *Server {
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
+	return &Server{deps: d}
+}
+
+// Router builds the chi router with all /api/* routes mounted.
+func (s *Server) Router() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.RealIP)
+
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/status", s.handleStatus)
+
+		r.Get("/runs", s.handleListRuns)
+		r.Post("/runs", s.handleTriggerRun)
+		r.Get("/runs/{id}", s.handleGetRun)
+		r.Post("/runs/{id}/cancel", s.handleCancelRun)
+
+		r.Get("/files", s.handleListFiles)
+		r.Get("/files/stats", s.handleFileStats)
+
+		r.Get("/settings", s.handleGetSettings)
+		r.Put("/settings", s.handlePutSettings)
+
+		r.Get("/smb/test", s.handleTestSource)
+		r.Get("/s3/test", s.handleTestStorage)
+
+		r.Post("/restore/estimate", s.handleRestoreEstimate)
+		r.Post("/restore/trigger", s.handleRestoreTrigger)
+
+		r.Mount("/events", sseHandler(s.deps.Bus))
+	})
+	return r
+}
+
+// writeJSON writes v as JSON with the given status.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes a simple {"error":"..."} body.
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// errBadJSON and errMissingBody help return consistent 400s.
+var errBadJSON = errors.New("invalid JSON body")

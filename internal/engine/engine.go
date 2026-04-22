@@ -62,6 +62,18 @@ func (e *Engine) Run(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("create run: %w", err)
 	}
+	return e.runWithID(ctx, runID, start)
+}
+
+// RunWithID executes a backup cycle against an already-created run row.
+// Used by the HTTP layer so it can return the run id synchronously and
+// let the actual work run in a goroutine.
+func (e *Engine) RunWithID(ctx context.Context, runID int64) error {
+	_, err := e.runWithID(ctx, runID, e.opts.Now())
+	return err
+}
+
+func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (int64, error) {
 	e.emit(Event{Type: EventRunStart, RunID: runID, At: start})
 	e.log(ctx, runID, db.LogInfo, "run started")
 
