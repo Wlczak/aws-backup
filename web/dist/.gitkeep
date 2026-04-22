@@ -1,0 +1,4 @@
+# Keeps the dist/ directory present in git so go:embed in
+# web/embed.go always finds at least one file, even before a Vite
+# build has populated it. Remove this after the first real build if
+# it gets tidied by the bundler.

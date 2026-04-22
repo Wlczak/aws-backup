@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
+	webassets "github.com/Wlczak/aws-backup/web"
 )
 
 // Deps holds everything the HTTP handlers need.
@@ -78,6 +80,14 @@ func (s *Server) Router() http.Handler {
 
 		r.Mount("/events", sseHandler(s.deps.Bus))
 	})
+
+	// Serve the embedded Svelte SPA at "/". Any path that doesn't resolve
+	// under web/dist falls back to index.html so Vite's hash router keeps
+	// working across refreshes and deep links.
+	if sub, err := fs.Sub(webassets.Dist, "dist"); err == nil {
+		r.Mount("/", spaHandler(sub))
+	}
+
 	return r
 }
 
