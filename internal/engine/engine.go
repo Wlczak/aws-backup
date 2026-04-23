@@ -47,6 +47,11 @@ type Options struct {
 	KeyPrefix   string // e.g. "backups/"
 	ChunkSize   int    // how many individual files to upload per batch
 	ZipThresh   int    // files in a top-dir group >= this -> zip
+	// ZipMaxBytes caps the uncompressed byte total of a single zip
+	// group. Subtrees larger than this are split along subdirectory
+	// boundaries; only loose files at one directory level that still
+	// exceed the cap get chunked into numbered parts. <= 0 disables.
+	ZipMaxBytes int64
 	RetryFailed bool   // re-queue 'failed' rows alongside 'pending'
 	Mode        RunMode  // default: RunModeFull
 	ScanPaths   []string // when set with RunModeScan: partial rescan targets
@@ -79,6 +84,9 @@ func New(opts Options) *Engine {
 	}
 	if opts.ZipThresh <= 0 {
 		opts.ZipThresh = 50
+	}
+	if opts.ZipMaxBytes <= 0 {
+		opts.ZipMaxBytes = 2 << 30 // 2 GiB per zip
 	}
 	return &Engine{opts: opts}
 }
@@ -199,7 +207,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		return db.RunCompleted, nil
 	}
 
-	groups := GroupFiles(pending, e.opts.ZipThresh)
+	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.ZipMaxBytes)
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("grouped %d files into %d top-level groups", len(pending), len(groups)))
 
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {

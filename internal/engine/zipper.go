@@ -37,42 +37,198 @@ type Group struct {
 // contain root-level files.
 const rootDirLabel = "_root"
 
-// GroupFiles splits pending files by their top-level directory and decides
-// per-group whether to zip. A group is zipped when its file count is
-// >= zipThreshold. Groups below the threshold upload each file individually.
+// dirNode is one level of the path tree built by GroupFiles. Each node
+// tracks the files directly in it (not in subdirectories) plus a sorted
+// map of child subdirectories. size/count are the cumulative totals for
+// the subtree, used to decide whether the subtree can become a single
+// zip or has to be split.
+type dirNode struct {
+	files    []PendingFile
+	children map[string]*dirNode
+	size     int64
+	count    int
+}
+
+// GroupFiles splits pending files into upload groups, preferring
+// subdirectory boundaries over arbitrary numbered slices.
 //
-// Groups are returned in alphabetical TopDir order so output is deterministic.
-func GroupFiles(files []PendingFile, zipThreshold int) []Group {
+// Algorithm:
+//  1. Build a path tree from all RelPaths.
+//  2. Walk the tree: if a subtree's cumulative size fits in maxBytes,
+//     emit it as one group (zipped if count >= zipThreshold, otherwise
+//     individual uploads).
+//  3. If a subtree is too big, recurse into each child subdirectory —
+//     so `photos/2024/` and `photos/2025/` become separate zips instead
+//     of one monolithic `photos_1.zip`.
+//  4. Files sitting directly at a splitting level ("loose files") are
+//     their own group; if they collectively still exceed maxBytes they
+//     are chunked by size — this only happens when a single directory
+//     holds more than maxBytes of loose files.
+//
+// maxBytes <= 0 disables the size cap (subtrees at any depth can form
+// one group). Groups are returned in deterministic path order.
+func GroupFiles(files []PendingFile, zipThreshold int, maxBytes int64) []Group {
 	if zipThreshold <= 0 {
-		zipThreshold = 1 // treat 0 as "always zip"; 1 means any non-empty group
+		zipThreshold = 1
 	}
-	byDir := map[string][]PendingFile{}
-	for _, f := range files {
-		top := topDir(f.RelPath)
-		byDir[top] = append(byDir[top], f)
+	if len(files) == 0 {
+		return nil
 	}
 
-	dirs := make([]string, 0, len(byDir))
-	for d := range byDir {
-		dirs = append(dirs, d)
-	}
-	sort.Strings(dirs)
-
-	out := make([]Group, 0, len(dirs))
-	for _, d := range dirs {
-		group := byDir[d]
-		sort.Slice(group, func(i, j int) bool { return group[i].RelPath < group[j].RelPath })
-		out = append(out, Group{
-			TopDir: d,
-			Zip:    len(group) >= zipThreshold,
-			Files:  group,
-		})
-	}
+	root := buildTree(files)
+	var out []Group
+	// Root always descends into its children so each top-level directory
+	// is a natural group boundary, independent of the size cap. The cap
+	// only drives further splits inside a top-level subtree.
+	walkTree(root, "", zipThreshold, maxBytes, true, &out)
 	return out
 }
 
+// buildTree organises files into a dirNode tree keyed by path components.
+// Files at "" RelPath level sit directly under root.
+func buildTree(files []PendingFile) *dirNode {
+	root := &dirNode{children: map[string]*dirNode{}}
+	for _, f := range files {
+		parts := splitPath(f.RelPath)
+		node := root
+		// Walk down to the parent of the file, creating nodes as needed.
+		for i := 0; i < len(parts)-1; i++ {
+			name := parts[i]
+			child, ok := node.children[name]
+			if !ok {
+				child = &dirNode{children: map[string]*dirNode{}}
+				node.children[name] = child
+			}
+			node = child
+		}
+		node.files = append(node.files, f)
+		// Propagate size/count to every ancestor.
+		n := root
+		n.size += f.Size
+		n.count++
+		for i := 0; i < len(parts)-1; i++ {
+			n = n.children[parts[i]]
+			n.size += f.Size
+			n.count++
+		}
+	}
+	return root
+}
+
+// walkTree decides how to split a subtree into groups, writing them into
+// *out. pathPrefix is the slash-joined directory path from the tree root
+// to this node ("" for root). mustDescend forces the split at this level
+// even if the subtree would fit in the cap — set at root so top-level
+// directories are always their own groups regardless of cap settings.
+func walkTree(n *dirNode, pathPrefix string, zipThreshold int, maxBytes int64, mustDescend bool, out *[]Group) {
+	// Subtree fits in the cap — emit the whole thing as one group.
+	if !mustDescend && (maxBytes <= 0 || n.size <= maxBytes) {
+		files := collectSubtree(n)
+		if len(files) == 0 {
+			return
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
+		*out = append(*out, Group{
+			TopDir: pathPrefix,
+			Zip:    len(files) >= zipThreshold,
+			Files:  files,
+		})
+		return
+	}
+
+	// Descend into each child subdir so subfolders become the group
+	// boundary (e.g. photos/2024/ vs photos/2025/) instead of numbered
+	// slices of a flat top-dir.
+	childNames := make([]string, 0, len(n.children))
+	for name := range n.children {
+		childNames = append(childNames, name)
+	}
+	sort.Strings(childNames)
+	for _, name := range childNames {
+		child := n.children[name]
+		childPrefix := name
+		if pathPrefix != "" {
+			childPrefix = pathPrefix + "/" + name
+		}
+		walkTree(child, childPrefix, zipThreshold, maxBytes, false, out)
+	}
+
+	// Loose files at this level (not in any subdir) form their own
+	// group. If they alone exceed the cap, chunk them by size.
+	if len(n.files) == 0 {
+		return
+	}
+	loose := append([]PendingFile(nil), n.files...)
+	sort.Slice(loose, func(i, j int) bool { return loose[i].RelPath < loose[j].RelPath })
+
+	var looseSize int64
+	for _, f := range loose {
+		looseSize += f.Size
+	}
+	if looseSize <= maxBytes {
+		*out = append(*out, Group{
+			TopDir: pathPrefix,
+			Zip:    len(loose) >= zipThreshold,
+			Files:  loose,
+		})
+		return
+	}
+
+	// Chunker: accumulate files until adding the next would exceed cap,
+	// then flush. A single file larger than maxBytes becomes its own
+	// individual-upload group (zipping it alone saves nothing).
+	var cur []PendingFile
+	var curSize int64
+	flush := func(zip bool) {
+		if len(cur) == 0 {
+			return
+		}
+		*out = append(*out, Group{TopDir: pathPrefix, Zip: zip, Files: cur})
+		cur = nil
+		curSize = 0
+	}
+	for _, f := range loose {
+		if f.Size > maxBytes {
+			flush(true)
+			*out = append(*out, Group{TopDir: pathPrefix, Zip: false, Files: []PendingFile{f}})
+			continue
+		}
+		if curSize+f.Size > maxBytes && len(cur) > 0 {
+			flush(true)
+		}
+		cur = append(cur, f)
+		curSize += f.Size
+	}
+	flush(true)
+}
+
+// collectSubtree returns every file under n in no particular order; the
+// caller sorts.
+func collectSubtree(n *dirNode) []PendingFile {
+	out := make([]PendingFile, 0, n.count)
+	var walk func(*dirNode)
+	walk = func(m *dirNode) {
+		out = append(out, m.files...)
+		for _, c := range m.children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return out
+}
+
+// splitPath turns "a/b/c.txt" into ["a","b","c.txt"]; a leading slash is
+// ignored so absolute-looking relpaths group the same way.
+func splitPath(p string) []string {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
 // topDir returns the first forward-slash-separated component of p, or ""
-// for root-level files.
+// for root-level files. Kept for callers outside the grouping path.
 func topDir(p string) string {
 	p = strings.TrimPrefix(p, "/")
 	i := strings.IndexByte(p, '/')
