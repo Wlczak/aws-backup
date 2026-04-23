@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -55,7 +56,19 @@ type Server struct {
 	runMu             sync.Mutex
 	currentRun        int64 // 0 when idle
 	currentRunCancel  context.CancelFunc
+
+	// statsCache coalesces /api/files/stats across poll-heavy UI clients
+	// so a full-table COUNT/SUM doesn't hit the DB more than once every
+	// statsCacheTTL.
+	statsMu     sync.Mutex
+	statsValue  db.FileStats
+	statsExpiry time.Time
 }
+
+// statsCacheTTL bounds staleness of the cached /api/files/stats response.
+// Short enough that the dashboard feels live, long enough that a tight
+// poll loop can't pin a 300k-row index in scan.
+const statsCacheTTL = 2 * time.Second
 
 // NewServer wires up a *Server with validated Deps.
 func NewServer(d Deps) *Server {

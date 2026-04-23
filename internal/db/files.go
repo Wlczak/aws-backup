@@ -207,6 +207,61 @@ func (db *DB) MarkUploaded(ctx context.Context, id int64, md5, s3Key string, upl
 	return err
 }
 
+// MarkUploadedBatch flips many ids to 'uploaded' sharing a single md5 /
+// s3_key / uploaded_at — used for zip groups where every file lands in
+// the same S3 object. One UPDATE replaces N separate transactions.
+func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key string, uploadedAt time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids)+4)
+	args = append(args, md5, s3Key, isoTime(uploadedAt), StatusUploaded)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := db.ExecContext(ctx,
+		`UPDATE files SET md5 = ?, s3_key = ?, uploaded_at = ?, status = ?
+		 WHERE id IN (`+placeholders+`)`,
+		args...,
+	)
+	return err
+}
+
+// UploadedRow describes one individual-upload outcome to flush in a batch.
+type UploadedRow struct {
+	ID         int64
+	MD5        string
+	S3Key      string
+	UploadedAt time.Time
+}
+
+// MarkUploadedMany applies per-file uploaded state in a single transaction.
+// Used by the engine to drain a buffer of individual uploads, replacing N
+// separate WAL fsyncs with one commit.
+func (db *DB) MarkUploadedMany(ctx context.Context, rows []UploadedRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, r := range rows {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE files
+			   SET md5 = ?, s3_key = ?, uploaded_at = ?, status = ?
+			 WHERE id = ?`,
+			r.MD5, r.S3Key, isoTime(r.UploadedAt), StatusUploaded, r.ID,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // MarkFailed sets the file status to failed (engine records the reason in run_logs).
 func (db *DB) MarkFailed(ctx context.Context, id int64) error {
 	_, err := db.ExecContext(ctx,

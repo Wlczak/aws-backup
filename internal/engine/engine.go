@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -56,6 +57,12 @@ type Options struct {
 // Engine owns a run's lifecycle.
 type Engine struct {
 	opts Options
+
+	// buf is the per-run write buffer that coalesces MarkUploaded and
+	// AppendLog writes. Set by runWithID at the start of a run and
+	// cleared on exit — Engine is not safe for concurrent runs (the API
+	// server's runMu enforces this upstream).
+	buf *writeBuffer
 }
 
 // New returns an Engine configured with opts. The caller is responsible
@@ -97,6 +104,16 @@ func (e *Engine) RunWithID(ctx context.Context, runID int64) error {
 }
 
 func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (int64, error) {
+	buf := newWriteBuffer(e.opts.DB)
+	buf.start(ctx)
+	e.buf = buf
+	defer func() {
+		e.buf = nil
+		if err := buf.close(); err != nil {
+			slog.Warn("engine write buffer final flush failed", "err", err)
+		}
+	}()
+
 	e.emit(Event{Type: EventRunStart, RunID: runID, At: start})
 	e.log(ctx, runID, db.LogInfo, "run started")
 
@@ -277,10 +294,8 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	if err := e.opts.DB.SetZipName(ctx, ids, zipName); err != nil {
 		return 0, 0, fmt.Errorf("set zip name: %w", err)
 	}
-	for _, id := range ids {
-		if err := e.opts.DB.MarkUploaded(ctx, id, md5hex, key, now); err != nil {
-			return 0, 0, fmt.Errorf("mark uploaded %d: %w", id, err)
-		}
+	if err := e.opts.DB.MarkUploadedBatch(ctx, ids, md5hex, key, now); err != nil {
+		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipName, err)
 	}
 
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded %s (%d bytes, etag=%s)", key, size, res.ETag))
@@ -360,9 +375,9 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	}
 
 	now := e.opts.Now()
-	if err := e.opts.DB.MarkUploaded(ctx, pf.ID, md5hex, key, now); err != nil {
-		return 0, err
-	}
+	// Buffered: the flusher goroutine (or writeBuffer.close on run end)
+	// commits this in a batch alongside the other individual uploads.
+	e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
 
 	e.emit(Event{
 		Type: EventUploadComplete, RunID: runID, At: now,
@@ -378,6 +393,10 @@ func (e *Engine) emit(ev Event) {
 }
 
 func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {
+	if e.buf != nil {
+		e.buf.appendLog(ctx, runID, level, msg, e.opts.Now())
+		return
+	}
 	_ = e.opts.DB.AppendLog(ctx, runID, level, msg, e.opts.Now())
 }
 
