@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,18 +117,25 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 		t.Errorf("want 4 starts/4 completes, got %d/%d", len(starts), len(completes))
 	}
 
-	// Exactly one zip object in storage; the rest are per-file keys.
+	// Exactly one zip object in storage, one matching .index.txt sidecar,
+	// and the rest are per-file keys.
 	keys := store.Keys()
-	var zipCount, indCount int
+	var zipCount, idxCount, indCount int
 	for _, k := range keys {
-		if filepath.Ext(k) == ".zip" {
+		switch {
+		case filepath.Ext(k) == ".zip":
 			zipCount++
-		} else {
+		case strings.HasSuffix(k, ".zip.index.txt"):
+			idxCount++
+		default:
 			indCount++
 		}
 	}
 	if zipCount != 1 {
 		t.Errorf("want 1 zip, got %d", zipCount)
+	}
+	if idxCount != 1 {
+		t.Errorf("want 1 zip index sidecar, got %d", idxCount)
 	}
 	if indCount != 3 { // docs/x, docs/y, top.txt
 		t.Errorf("want 3 individual uploads, got %d", indCount)
@@ -169,6 +177,30 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 		if zipEntries[k] != v {
 			t.Errorf("zip entry %s=%q want %q", k, zipEntries[k], v)
 		}
+	}
+
+	// Sidecar index lists every entry in the zip, newline-separated, and
+	// was uploaded to STANDARD so it can be read without a Glacier restore.
+	indexKey := zipKey + ".index.txt"
+	indexBytes, ok := store.GetBytes(indexKey)
+	if !ok {
+		t.Fatalf("missing zip index sidecar at %s", indexKey)
+	}
+	gotEntries := map[string]struct{}{}
+	for _, line := range strings.Split(strings.TrimRight(string(indexBytes), "\n"), "\n") {
+		gotEntries[line] = struct{}{}
+	}
+	for k := range want {
+		if _, present := gotEntries[k]; !present {
+			t.Errorf("zip index missing entry %q (body=%q)", k, string(indexBytes))
+		}
+	}
+	head, err := store.Head(ctx, indexKey)
+	if err != nil {
+		t.Fatalf("head index: %v", err)
+	}
+	if head.StorageClass != "STANDARD" {
+		t.Errorf("index storage class=%q want STANDARD", head.StorageClass)
 	}
 }
 

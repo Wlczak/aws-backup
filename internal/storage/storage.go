@@ -34,6 +34,12 @@ type Storage interface {
 	// that need it can buffer or error out.
 	Put(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error)
 
+	// PutStandard uploads body under key with the STANDARD storage class
+	// regardless of the configured default. Used for small sidecar objects
+	// (zip index files) that must stay instantly retrievable while the
+	// main payload sits in a cold tier like DEEP_ARCHIVE.
+	PutStandard(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error)
+
 	// Head returns metadata or ErrNotFound.
 	Head(ctx context.Context, key string) (HeadResult, error)
 
