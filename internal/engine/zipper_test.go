@@ -21,8 +21,8 @@ func TestGroupFiles(t *testing.T) {
 		{ID: 6, RelPath: "docs/sub/y.pdf"},
 	}
 
-	// Threshold 3 -> photos qualifies, docs does not, root does not.
-	groups := GroupFiles(files, 3)
+	// Threshold 3, no size cap -> photos qualifies, docs does not, root does not.
+	groups := GroupFiles(files, 3, 0)
 	if len(groups) != 3 {
 		t.Fatalf("want 3 groups, got %d", len(groups))
 	}
@@ -41,6 +41,81 @@ func TestGroupFiles(t *testing.T) {
 	}
 	if len(byTop["photos"].Files) != 3 || len(byTop["docs"].Files) != 2 {
 		t.Errorf("unexpected file counts: %+v", byTop)
+	}
+}
+
+func TestGroupFilesSizeCap(t *testing.T) {
+	// Two subdirs under "media/", each well under the cap individually
+	// but over the cap together. Expect one group per subdir, not one
+	// monolithic "media" group.
+	files := []PendingFile{
+		{ID: 1, RelPath: "media/2024/a.mov", Size: 800},
+		{ID: 2, RelPath: "media/2024/b.mov", Size: 800},
+		{ID: 3, RelPath: "media/2025/c.mov", Size: 800},
+		{ID: 4, RelPath: "media/2025/d.mov", Size: 800},
+	}
+	// threshold 2, cap 2000 bytes -> 2024 = 1600B, 2025 = 1600B, both
+	// under cap as subtrees; media/ together = 3200B, over cap.
+	groups := GroupFiles(files, 2, 2000)
+	if len(groups) != 2 {
+		t.Fatalf("want 2 groups (one per year), got %d: %+v", len(groups), groups)
+	}
+	for _, g := range groups {
+		if !g.Zip {
+			t.Errorf("group %q should be zipped", g.TopDir)
+		}
+		if g.TopDir != "media/2024" && g.TopDir != "media/2025" {
+			t.Errorf("unexpected TopDir %q — grouping should descend into subdirs", g.TopDir)
+		}
+	}
+}
+
+func TestGroupFilesSizeCapChunksLooseFiles(t *testing.T) {
+	// All files directly under one directory, collectively over the cap.
+	// Cannot split by subdir (there are none), so chunk loose files by
+	// cumulative size. 6 × 500B under a 1200B cap -> 3 chunks of ~1000B.
+	files := []PendingFile{
+		{ID: 1, RelPath: "bulk/a", Size: 500},
+		{ID: 2, RelPath: "bulk/b", Size: 500},
+		{ID: 3, RelPath: "bulk/c", Size: 500},
+		{ID: 4, RelPath: "bulk/d", Size: 500},
+		{ID: 5, RelPath: "bulk/e", Size: 500},
+		{ID: 6, RelPath: "bulk/f", Size: 500},
+	}
+	groups := GroupFiles(files, 2, 1200)
+	if len(groups) != 3 {
+		t.Fatalf("want 3 chunks, got %d", len(groups))
+	}
+	total := 0
+	for _, g := range groups {
+		if !g.Zip {
+			t.Errorf("chunked group should be zipped: %+v", g)
+		}
+		total += len(g.Files)
+	}
+	if total != len(files) {
+		t.Errorf("chunks lost files: covered=%d want=%d", total, len(files))
+	}
+}
+
+func TestGroupFilesSingleFileOverCap(t *testing.T) {
+	// A single file larger than the cap cannot be split — should fall
+	// back to individual upload, not a solo-zip wrapper.
+	files := []PendingFile{
+		{ID: 1, RelPath: "huge/one.bin", Size: 10_000_000_000}, // 10 GB
+		{ID: 2, RelPath: "huge/two.bin", Size: 100},
+	}
+	groups := GroupFiles(files, 2, 1<<30) // 1 GB cap
+	var haveIndividual bool
+	for _, g := range groups {
+		for _, f := range g.Files {
+			if f.ID == 1 && !g.Zip {
+				haveIndividual = true
+			}
+		}
+	}
+	if !haveIndividual {
+		t.Errorf("oversized file should land in an individual (non-zipped) group: %+v", groups)
 	}
 }
 
