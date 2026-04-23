@@ -66,6 +66,14 @@ type BackupConfig struct {
 	Schedule       string `json:"schedule"`
 	ZipThreshold   int    `json:"zip_threshold"`
 	MinZipDirFiles int    `json:"min_zip_dir_files"`
+	// ZipMaxBytes caps one zip's uncompressed byte total; the engine
+	// splits larger subtrees at subdirectory boundaries. 0 = default
+	// (2 GiB per zip, applied by the engine).
+	ZipMaxBytes int64 `json:"zip_max_bytes"`
+	// EnableZipIndex uploads a STANDARD-tier `.zip.index.txt` sidecar
+	// next to each zip listing its contents, so files in a Deep
+	// Archive zip can be listed without a Glacier restore.
+	EnableZipIndex bool `json:"enable_zip_index"`
 	// RetryFailed controls whether the engine picks up rows with status
 	// 'failed' alongside 'pending' on each run. Manual retry via the API
 	// works regardless of this flag.
@@ -102,6 +110,8 @@ func Default() Config {
 			Schedule:       "0 2 * * *",
 			ZipThreshold:   50,
 			MinZipDirFiles: 20,
+			ZipMaxBytes:    0, // engine default (2 GiB)
+			EnableZipIndex: true,
 			RetryFailed:    true,
 		},
 		Server: ServerConfig{
@@ -121,7 +131,24 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse %s: %w", path, err)
 	}
+	applyBackfills(data, &cfg)
 	return cfg, nil
+}
+
+// applyBackfills sets sensible defaults for fields that were added in a
+// later version and are therefore absent from older config.json files.
+// Matters because Go can't distinguish "explicit false" from "unmarshal
+// zero value" on a bool, so we probe the raw JSON to check presence.
+func applyBackfills(data []byte, cfg *Config) {
+	var probe struct {
+		Backup struct {
+			EnableZipIndex *bool `json:"enable_zip_index"`
+		} `json:"backup"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	if probe.Backup.EnableZipIndex == nil {
+		cfg.Backup.EnableZipIndex = true
+	}
 }
 
 // Save atomically writes cfg to path (creates parent dir as needed).
@@ -183,6 +210,9 @@ func (c Config) Validate() error {
 	}
 	if c.Backup.MinZipDirFiles < 0 {
 		errs = append(errs, fmt.Errorf("backup.min_zip_dir_files must be >= 0 (got %d)", c.Backup.MinZipDirFiles))
+	}
+	if c.Backup.ZipMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf("backup.zip_max_bytes must be >= 0 (got %d)", c.Backup.ZipMaxBytes))
 	}
 	if c.Backup.TmpDir == "" {
 		errs = append(errs, errors.New("backup.tmp_dir is required"))

@@ -52,7 +52,11 @@ type Options struct {
 	// boundaries; only loose files at one directory level that still
 	// exceed the cap get chunked into numbered parts. <= 0 disables.
 	ZipMaxBytes int64
-	RetryFailed bool   // re-queue 'failed' rows alongside 'pending'
+	// EnableZipIndex, when true, uploads a STANDARD-tier
+	// `{zipKey}.index.txt` sidecar next to each zip listing its
+	// entries. Default: true (set by New()).
+	EnableZipIndex bool
+	RetryFailed    bool // re-queue 'failed' rows alongside 'pending'
 	Mode        RunMode  // default: RunModeFull
 	ScanPaths   []string // when set with RunModeScan: partial rescan targets
 	Now         func() time.Time // injectable clock for tests
@@ -315,13 +319,16 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	// Upload a plain-text index of the zip's contents to STANDARD so we can
 	// list files in a Deep Archive zip without restoring it. A failure here
 	// leaves the zip intact — log a warning and move on rather than failing
-	// the whole run.
-	indexKey := key + zipIndexSuffix
-	indexBody := strings.Join(entries, "\n") + "\n"
-	if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
-		e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload zip index %s: %v", indexKey, err))
-	} else {
-		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
+	// the whole run. Gated so users who don't need remote listing can skip
+	// the extra STANDARD-tier objects.
+	if e.opts.EnableZipIndex {
+		indexKey := key + zipIndexSuffix
+		indexBody := strings.Join(entries, "\n") + "\n"
+		if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload zip index %s: %v", indexKey, err))
+		} else {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
+		}
 	}
 
 	return int64(len(g.Files)), size, nil

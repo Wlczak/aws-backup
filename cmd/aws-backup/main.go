@@ -204,17 +204,19 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return engine.New(engine.Options{
-		DB:          a.db,
-		Source:      a.src,
-		Storage:     a.store,
-		TmpDir:      a.cfg.Backup.TmpDir,
-		KeyPrefix:   a.cfg.S3.KeyPrefix,
-		ChunkSize:   a.cfg.Backup.ChunkSize,
-		ZipThresh:   a.cfg.Backup.ZipThreshold,
-		RetryFailed: a.cfg.Backup.RetryFailed,
-		Mode:        mode,
-		ScanPaths:   scanPaths,
-		Emit:        a.bus.Publish,
+		DB:             a.db,
+		Source:         a.src,
+		Storage:        a.store,
+		TmpDir:         a.cfg.Backup.TmpDir,
+		KeyPrefix:      a.cfg.S3.KeyPrefix,
+		ChunkSize:      a.cfg.Backup.ChunkSize,
+		ZipThresh:      a.cfg.Backup.ZipThreshold,
+		ZipMaxBytes:    a.cfg.Backup.ZipMaxBytes,
+		EnableZipIndex: a.cfg.Backup.EnableZipIndex,
+		RetryFailed:    a.cfg.Backup.RetryFailed,
+		Mode:           mode,
+		ScanPaths:      scanPaths,
+		Emit:           a.bus.Publish,
 	}), nil
 }
 
@@ -303,14 +305,16 @@ func runBackup(cfgPath string) {
 
 	eng, _ := app.buildEngine(engine.RunModeFull, nil)
 	eng = engine.New(engine.Options{
-		DB:          app.db,
-		Source:      app.src,
-		Storage:     app.store,
-		TmpDir:      app.cfg.Backup.TmpDir,
-		KeyPrefix:   app.cfg.S3.KeyPrefix,
-		ChunkSize:   app.cfg.Backup.ChunkSize,
-		ZipThresh:   app.cfg.Backup.ZipThreshold,
-		RetryFailed: app.cfg.Backup.RetryFailed,
+		DB:             app.db,
+		Source:         app.src,
+		Storage:        app.store,
+		TmpDir:         app.cfg.Backup.TmpDir,
+		KeyPrefix:      app.cfg.S3.KeyPrefix,
+		ChunkSize:      app.cfg.Backup.ChunkSize,
+		ZipThresh:      app.cfg.Backup.ZipThreshold,
+		ZipMaxBytes:    app.cfg.Backup.ZipMaxBytes,
+		EnableZipIndex: app.cfg.Backup.EnableZipIndex,
+		RetryFailed:    app.cfg.Backup.RetryFailed,
 		Emit: func(ev engine.Event) {
 			fmt.Printf("[event] %s %+v\n", ev.Type, ev.Data)
 		},

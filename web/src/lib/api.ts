@@ -82,9 +82,47 @@ export interface TestResult {
   message?: string;
 }
 
-// Reuse the server's Config shape loosely — the Settings page works
-// with opaque JSON so changes don't require frontend updates.
-export type Config = Record<string, unknown>;
+// Mirror of the Go `config.Config` tree exposed by /api/settings.
+// Credential-like fields are returned as "***" by the server and, if
+// sent back unchanged, are preserved by its mergeSecrets step.
+export interface SourceLocalDirConfig { root: string }
+export interface SourceSMBConfig {
+  host: string; port: number;
+  username: string; password: string;
+  domain: string; share: string; path: string;
+}
+export interface SourceConfig {
+  type: 'localdir' | 'smb' | '';
+  localdir: SourceLocalDirConfig;
+  smb: SourceSMBConfig;
+}
+export interface S3Config {
+  endpoint: string;
+  use_path_style: boolean;
+  bucket: string;
+  region: string;
+  access_key_id: string;
+  secret_access_key: string;
+  storage_class: 'DEEP_ARCHIVE' | 'STANDARD' | '';
+  key_prefix: string;
+}
+export interface BackupConfig {
+  chunk_size: number;
+  tmp_dir: string;
+  schedule: string;
+  zip_threshold: number;
+  min_zip_dir_files: number;
+  zip_max_bytes: number;
+  enable_zip_index: boolean;
+  retry_failed: boolean;
+}
+export interface ServerConfig { host: string; port: number }
+export interface Config {
+  source: SourceConfig;
+  s3: S3Config;
+  backup: BackupConfig;
+  server: ServerConfig;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
