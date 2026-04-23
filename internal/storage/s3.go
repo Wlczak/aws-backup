@@ -80,12 +80,22 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 // server-verified SHA256 checksum. Returns the ETag, size, and checksum
 // echoed by the service.
 func (s *S3Storage) Put(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return s.putWithClass(ctx, key, body, s.storageClass)
+}
+
+// PutStandard uploads body under key with STANDARD storage class, bypassing
+// the configured default so zip index sidecars remain instantly readable.
+func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return s.putWithClass(ctx, key, body, s3types.StorageClassStandard)
+}
+
+func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, class s3types.StorageClass) (PutResult, error) {
 	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		Body:              body,
 		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
-		StorageClass:      s.storageClass,
+		StorageClass:      class,
 	})
 	if err != nil {
 		return PutResult{}, err

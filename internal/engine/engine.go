@@ -10,12 +10,18 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
+
+// zipIndexSuffix is appended to a zip's S3 key to form the sidecar key
+// that lists the archive's contents. The sidecar is uploaded to STANDARD
+// storage so listing a zip doesn't require restoring it from Deep Archive.
+const zipIndexSuffix = ".index.txt"
 
 // RunMode controls which phases of a backup cycle execute.
 type RunMode string
@@ -233,7 +239,7 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	defer os.Remove(zipPath)
 
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipName))
-	size, _, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath)
+	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("create zip %s: %w", zipName, err)
 	}
@@ -282,6 +288,19 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 		Type: EventUploadComplete, RunID: runID, At: now,
 		Data: map[string]any{"key": key, "size": size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256, "files": len(g.Files)},
 	})
+
+	// Upload a plain-text index of the zip's contents to STANDARD so we can
+	// list files in a Deep Archive zip without restoring it. A failure here
+	// leaves the zip intact — log a warning and move on rather than failing
+	// the whole run.
+	indexKey := key + zipIndexSuffix
+	indexBody := strings.Join(entries, "\n") + "\n"
+	if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
+		e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload zip index %s: %v", indexKey, err))
+	} else {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
+	}
+
 	return int64(len(g.Files)), size, nil
 }
 

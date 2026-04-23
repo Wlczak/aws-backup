@@ -20,8 +20,9 @@ type MemStorage struct {
 }
 
 type memObject struct {
-	data []byte
-	etag string
+	data         []byte
+	etag         string
+	storageClass string
 }
 
 // NewMemStorage returns an empty in-memory storage.
@@ -31,6 +32,16 @@ func NewMemStorage() *MemStorage {
 
 // Put stores body under key and returns a fake ETag = sha256(data) prefix.
 func (m *MemStorage) Put(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return m.put(key, body, "DEEP_ARCHIVE")
+}
+
+// PutStandard stores body under key, tagging it STANDARD so tests can
+// verify that index sidecars bypass the cold-tier default.
+func (m *MemStorage) PutStandard(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return m.put(key, body, "STANDARD")
+}
+
+func (m *MemStorage) put(key string, body io.Reader, class string) (PutResult, error) {
 	buf, err := io.ReadAll(body)
 	if err != nil {
 		return PutResult{}, err
@@ -39,7 +50,7 @@ func (m *MemStorage) Put(_ context.Context, key string, body io.Reader, _ int64)
 	sumHex := hex.EncodeToString(sum[:])
 
 	m.mu.Lock()
-	m.objects[key] = memObject{data: buf, etag: sumHex[:32]}
+	m.objects[key] = memObject{data: buf, etag: sumHex[:32], storageClass: class}
 	m.mu.Unlock()
 
 	return PutResult{
@@ -58,7 +69,11 @@ func (m *MemStorage) Head(_ context.Context, key string) (HeadResult, error) {
 	if !ok {
 		return HeadResult{}, ErrNotFound
 	}
-	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: "DEEP_ARCHIVE"}, nil
+	class := o.storageClass
+	if class == "" {
+		class = "DEEP_ARCHIVE"
+	}
+	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: class}, nil
 }
 
 // List returns keys matching prefix, sorted, satisfying the Storage interface.
