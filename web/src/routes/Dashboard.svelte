@@ -208,5 +208,10 @@
     overflow: auto;
     font-size: 0.82rem;
     color: var(--muted);
+    /* Long JSON event lines were pushing the page wider than the
+       1200px shell; wrap them inside the log pane instead. */
+    min-width: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 </style>
