@@ -160,6 +160,40 @@ func (db *DB) AppendLog(ctx context.Context, runID int64, level, message string,
 	return err
 }
 
+// LogEntry is one buffered log line for AppendLogMany.
+type LogEntry struct {
+	RunID   int64
+	At      time.Time
+	Level   string
+	Message string
+}
+
+// AppendLogMany inserts many log rows in a single transaction. The engine
+// buffers log entries in memory and calls this periodically so per-file
+// log spam doesn't generate one WAL fsync per line.
+func (db *DB) AppendLogMany(ctx context.Context, entries []LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO run_logs (run_id, timestamp, level, message) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, e := range entries {
+		if _, err := stmt.ExecContext(ctx, e.RunID, isoTime(e.At), e.Level, e.Message); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ListLogs returns all log lines for a run in chronological order.
 func (db *DB) ListLogs(ctx context.Context, runID int64) ([]RunLog, error) {
 	rows, err := db.QueryContext(ctx,

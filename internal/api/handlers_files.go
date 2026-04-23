@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -76,7 +77,7 @@ type fileStatsResponse struct {
 }
 
 func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
-	st, err := s.deps.DB.Stats(r.Context())
+	st, err := s.cachedStats(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -84,6 +85,28 @@ func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fileStatsResponse{
 		ByStatus: st.ByStatus, TotalCount: st.TotalCount, TotalSize: st.TotalSize,
 	})
+}
+
+// cachedStats serves /api/files/stats from a short TTL cache so tight
+// dashboard polls don't rescan the whole files table per request.
+func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
+	s.statsMu.Lock()
+	if time.Now().Before(s.statsExpiry) {
+		v := s.statsValue
+		s.statsMu.Unlock()
+		return v, nil
+	}
+	s.statsMu.Unlock()
+
+	st, err := s.deps.DB.Stats(ctx)
+	if err != nil {
+		return db.FileStats{}, err
+	}
+	s.statsMu.Lock()
+	s.statsValue = st
+	s.statsExpiry = time.Now().Add(statsCacheTTL)
+	s.statsMu.Unlock()
+	return st, nil
 }
 
 type idsRequest struct {
