@@ -59,14 +59,15 @@ func newTestEngine(t *testing.T, threshold int) (*Engine, *db.DB, *source.LocalD
 
 	col := &collector{}
 	eng := New(Options{
-		DB:        d,
-		Source:    src,
-		Storage:   store,
-		TmpDir:    tmp,
-		KeyPrefix: "backups",
-		ChunkSize: 2,
-		ZipThresh: threshold,
-		Emit:      col.emit,
+		DB:             d,
+		Source:         src,
+		Storage:        store,
+		TmpDir:         tmp,
+		KeyPrefix:      "backups",
+		ChunkSize:      2,
+		ZipThresh:      threshold,
+		EnableZipIndex: true,
+		Emit:           col.emit,
 	})
 	return eng, d, src, store, root, col
 }
