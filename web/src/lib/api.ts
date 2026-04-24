@@ -182,6 +182,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths }),
     }),
+  purgeMissing: () =>
+    request<{ affected: number }>('/api/files/purge-missing', { method: 'POST' }),
   deleteFile: (id: number) =>
     request<{ affected: number }>(`/api/files/${id}`, { method: 'DELETE' }),
   deleteFiles: (ids: number[]) =>

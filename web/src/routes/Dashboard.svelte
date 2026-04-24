@@ -82,6 +82,21 @@
     zip_indexes_consumed: number;
   } | null>(null);
 
+  let purging = $state(false);
+  async function purgeMissing() {
+    purging = true;
+    err = '';
+    try {
+      const r = await api.purgeMissing();
+      await refresh();
+      if (r.affected === 0) err = 'No missing-status entries found.';
+    } catch (e) {
+      err = String(e);
+    } finally {
+      purging = false;
+    }
+  }
+
   // --- fix-action state ---
   let backingUp = $state(false);
   let backupStarted = $state(false);
@@ -250,6 +265,18 @@
           <span class="pill"><StatusBadge status={k} /> {v.toLocaleString()}</span>
         {/each}
       </div>
+      {#if (stats.by_status['missing'] ?? 0) > 0}
+        <button
+          class="danger fix-btn"
+          style="margin-top: 0.5rem"
+          onclick={purgeMissing}
+          type="button"
+          disabled={purging}
+          title="Remove DB entries for files deleted from local disk. Does not affect S3."
+        >
+          {purging ? 'Removing…' : `Remove ${stats.by_status['missing'].toLocaleString()} missing entr${stats.by_status['missing'] === 1 ? 'y' : 'ies'}`}
+        </button>
+      {/if}
     {/if}
   </div>
 

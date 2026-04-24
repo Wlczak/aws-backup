@@ -95,6 +95,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/files", s.handleListFiles)
 		r.Get("/files/stats", s.handleFileStats)
 		r.Post("/files/retry", s.handleRetryFiles)
+		r.Post("/files/purge-missing", s.handlePurgeMissingFiles)
 		r.Delete("/files", s.handleDeleteFiles)
 		r.Post("/files/{id}/retry", s.handleRetryFile)
 		r.Delete("/files/{id}", s.handleDeleteFile)

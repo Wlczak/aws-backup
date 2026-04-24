@@ -433,6 +433,17 @@ func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) 
 	return total, nil
 }
 
+// PurgeMissingFiles deletes every row whose status is 'missing'. These
+// are files that were on disk when first scanned but later removed; once
+// they are also gone from S3 there is nothing left to track.
+func (db *DB) PurgeMissingFiles(ctx context.Context) (int64, error) {
+	r, err := db.ExecContext(ctx, `DELETE FROM files WHERE status = ?`, StatusMissing)
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
 // MarkAllFailedPending is the bulk 'retry everything that failed' path.
 func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 	r, err := db.ExecContext(ctx,
