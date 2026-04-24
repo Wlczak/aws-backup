@@ -303,8 +303,7 @@ func runBackup(cfgPath string) {
 	}
 	defer app.close()
 
-	eng, _ := app.buildEngine(engine.RunModeFull, nil)
-	eng = engine.New(engine.Options{
+	eng := engine.New(engine.Options{
 		DB:             app.db,
 		Source:         app.src,
 		Storage:        app.store,

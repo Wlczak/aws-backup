@@ -340,7 +340,6 @@ func TestTriggerRunConflict(t *testing.T) {
 
 func TestTestEndpoints(t *testing.T) {
 	ts, deps := newTestServer(t)
-	deps.Config.Source.LocalDir.Root = deps.Config.Source.LocalDir.Root // existing dir
 
 	var res testResult
 	getJSON(t, ts, "/api/smb/test", &res)
