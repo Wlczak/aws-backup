@@ -227,17 +227,6 @@ func splitPath(p string) []string {
 	return strings.Split(p, "/")
 }
 
-// topDir returns the first forward-slash-separated component of p, or ""
-// for root-level files. Kept for callers outside the grouping path.
-func topDir(p string) string {
-	p = strings.TrimPrefix(p, "/")
-	i := strings.IndexByte(p, '/')
-	if i < 0 {
-		return ""
-	}
-	return p[:i]
-}
-
 // ZipName derives an archive filename from the files' longest common
 // directory path and a per-run sequential index:
 //
