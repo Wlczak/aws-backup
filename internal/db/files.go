@@ -211,22 +211,27 @@ func (db *DB) MarkUploaded(ctx context.Context, id int64, md5, s3Key string, upl
 // s3_key / uploaded_at — used for zip groups where every file lands in
 // the same S3 object. One UPDATE replaces N separate transactions.
 func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key string, uploadedAt time.Time) error {
-	if len(ids) == 0 {
-		return nil
+	for len(ids) > 0 {
+		chunk := ids
+		if len(chunk) > sqlChunkSize {
+			chunk = ids[:sqlChunkSize]
+		}
+		ids = ids[len(chunk):]
+
+		args := make([]any, 0, len(chunk)+4)
+		args = append(args, md5, s3Key, isoTime(uploadedAt), StatusUploaded)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE files SET md5 = ?, s3_key = ?, uploaded_at = ?, status = ?
+			 WHERE id IN `+inPlaceholders(len(chunk)),
+			args...,
+		); err != nil {
+			return err
+		}
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+4)
-	args = append(args, md5, s3Key, isoTime(uploadedAt), StatusUploaded)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	_, err := db.ExecContext(ctx,
-		`UPDATE files SET md5 = ?, s3_key = ?, uploaded_at = ?, status = ?
-		 WHERE id IN (`+placeholders+`)`,
-		args...,
-	)
-	return err
+	return nil
 }
 
 // UploadedRow describes one individual-upload outcome to flush in a batch.
@@ -270,24 +275,41 @@ func (db *DB) MarkFailed(ctx context.Context, id int64) error {
 	return err
 }
 
+// sqlChunkSize is the maximum number of values we put in a single
+// IN (?, …) clause. SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999;
+// we stay well under it to leave room for the other bound parameters.
+const sqlChunkSize = 500
+
+// inPlaceholders builds a "(?,?,…)" string of n question marks.
+func inPlaceholders(n int) string {
+	s := strings.Repeat("?,", n)
+	return "(" + s[:len(s)-1] + ")"
+}
+
 // SetZipName attaches a zip manifest name to a batch of file IDs and
-// flips their status to zipped.
+// flips their status to zipped. IDs are processed in chunks to stay
+// under SQLite's bound-variable limit.
 func (db *DB) SetZipName(ctx context.Context, ids []int64, zipName string) error {
-	if len(ids) == 0 {
-		return nil
+	for len(ids) > 0 {
+		chunk := ids
+		if len(chunk) > sqlChunkSize {
+			chunk = ids[:sqlChunkSize]
+		}
+		ids = ids[len(chunk):]
+
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, zipName, StatusZipped)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE files SET zip_name = ?, status = ? WHERE id IN `+inPlaceholders(len(chunk)),
+			args...,
+		); err != nil {
+			return err
+		}
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+2)
-	args = append(args, zipName, StatusZipped)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	_, err := db.ExecContext(ctx,
-		`UPDATE files SET zip_name = ?, status = ? WHERE id IN (`+placeholders+`)`,
-		args...,
-	)
-	return err
+	return nil
 }
 
 // FilesFilter describes a ListFiles query.
@@ -383,26 +405,32 @@ type FileStats struct {
 // status to 'pending' for the given ids — used when the user clicks
 // retry on a failed (or any) row so the next run picks it up.
 func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
+	var total int64
+	for len(ids) > 0 {
+		chunk := ids
+		if len(chunk) > sqlChunkSize {
+			chunk = ids[:sqlChunkSize]
+		}
+		ids = ids[len(chunk):]
+
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, StatusPending)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		r, err := db.ExecContext(ctx,
+			`UPDATE files
+			   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+			 WHERE id IN `+inPlaceholders(len(chunk)),
+			args...,
+		)
+		if err != nil {
+			return total, err
+		}
+		n, _ := r.RowsAffected()
+		total += n
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, StatusPending)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	r, err := db.ExecContext(ctx,
-		`UPDATE files
-		   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
-		 WHERE id IN (`+placeholders+`)`,
-		args...,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return r.RowsAffected()
+	return total, nil
 }
 
 // MarkAllFailedPending is the bulk 'retry everything that failed' path.
@@ -423,20 +451,26 @@ func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 // touch S3 — the historical object stays where it is (Deep Archive
 // billing model means we never delete anyway).
 func (db *DB) DeleteFiles(ctx context.Context, ids []int64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
+	var total int64
+	for len(ids) > 0 {
+		chunk := ids
+		if len(chunk) > sqlChunkSize {
+			chunk = ids[:sqlChunkSize]
+		}
+		ids = ids[len(chunk):]
+
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		r, err := db.ExecContext(ctx, `DELETE FROM files WHERE id IN `+inPlaceholders(len(chunk)), args...)
+		if err != nil {
+			return total, err
+		}
+		n, _ := r.RowsAffected()
+		total += n
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids))
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	r, err := db.ExecContext(ctx, `DELETE FROM files WHERE id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return 0, err
-	}
-	return r.RowsAffected()
+	return total, nil
 }
 
 // ListPending returns every row the engine should attempt to upload on
@@ -552,70 +586,51 @@ func listDistinctStrings(ctx context.Context, db interface {
 // regardless of their current status. Used to force re-upload of files
 // that are present locally but absent from the cloud index.
 func (db *DB) MarkPendingByPaths(ctx context.Context, paths []string) (int64, error) {
-	if len(paths) == 0 {
-		return 0, nil
-	}
-	placeholders := strings.Repeat("?,", len(paths))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(paths)+1)
-	args = append(args, StatusPending)
-	for _, p := range paths {
-		args = append(args, p)
-	}
-	res, err := db.ExecContext(ctx,
-		`UPDATE files
-		   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
-		 WHERE path IN (`+placeholders+`)`,
-		args...,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return markPendingByStrings(ctx, db, "path", paths)
 }
 
 // MarkPendingByZipNames resets all files whose zip_name is in the list.
 // Used when a zip object is confirmed missing from S3.
 func (db *DB) MarkPendingByZipNames(ctx context.Context, zipNames []string) (int64, error) {
-	if len(zipNames) == 0 {
-		return 0, nil
-	}
-	placeholders := strings.Repeat("?,", len(zipNames))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(zipNames))
-	for i, k := range zipNames {
-		args[i] = k
-	}
-	res, err := db.ExecContext(ctx,
-		`UPDATE files SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
-		 WHERE zip_name IN (`+placeholders+`)`,
-		append([]any{StatusPending}, args...)...,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return markPendingByStrings(ctx, db, "zip_name", zipNames)
 }
 
 // MarkPendingByS3Keys resets individually-uploaded files whose s3_key is in
 // the list. Used when a directly-uploaded object is missing from S3.
 func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, error) {
-	if len(keys) == 0 {
-		return 0, nil
+	return markPendingByStrings(ctx, db, "s3_key", keys)
+}
+
+// markPendingByStrings is the shared implementation for the three
+// MarkPendingBy* functions. It processes values in chunks so we never
+// exceed SQLite's bound-variable limit.
+// Files with status='missing' are excluded: they no longer exist on
+// disk and cannot be re-uploaded.
+func markPendingByStrings(ctx context.Context, db *DB, column string, values []string) (int64, error) {
+	var total int64
+	for len(values) > 0 {
+		chunk := values
+		if len(chunk) > sqlChunkSize {
+			chunk = values[:sqlChunkSize]
+		}
+		values = values[len(chunk):]
+
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, StatusPending, StatusMissing)
+		for _, v := range chunk {
+			args = append(args, v)
+		}
+		res, err := db.ExecContext(ctx,
+			`UPDATE files
+			   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+			 WHERE status != ? AND `+column+` IN `+inPlaceholders(len(chunk)),
+			args...,
+		)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
 	}
-	placeholders := strings.Repeat("?,", len(keys))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(keys))
-	for i, k := range keys {
-		args[i] = k
-	}
-	res, err := db.ExecContext(ctx,
-		`UPDATE files SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
-		 WHERE zip_name = '' AND s3_key IN (`+placeholders+`)`,
-		append([]any{StatusPending}, args...)...,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return total, nil
 }
