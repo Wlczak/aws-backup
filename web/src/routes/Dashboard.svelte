@@ -72,10 +72,20 @@
 
   let syncing = $state(false);
   let syncInfo = $state('');
+  let fullSyncResult = $state<{
+    local_missing_count: number;
+    local_missing_from_cloud?: string[];
+    cloud_missing_count: number;
+    cloud_missing_from_local?: string[];
+    cloud_file_count: number;
+    local_file_count: number;
+    zip_indexes_consumed: number;
+  } | null>(null);
 
   async function syncWithS3() {
     syncing = true;
     syncInfo = '';
+    fullSyncResult = null;
     err = '';
     try {
       const r = await api.sync();
@@ -86,6 +96,29 @@
       } else {
         syncInfo = `Sync complete: ${r.missing_zips} zip(s) + ${r.missing_individual} individual file(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
       }
+      await refresh();
+    } catch (e) {
+      err = String(e);
+    } finally {
+      syncing = false;
+    }
+  }
+
+  async function fullSync() {
+    syncing = true;
+    syncInfo = '';
+    fullSyncResult = null;
+    err = '';
+    try {
+      const r = await api.syncFull();
+      fullSyncResult = r;
+      const existence = r.missing_zips + r.missing_individual;
+      const parts = [
+        `${r.zip_indexes_consumed} zip index(es) consumed`,
+        `${r.cloud_file_count} cloud file(s) / ${r.local_file_count} local file(s)`,
+      ];
+      if (existence > 0) parts.push(`${existence} S3 object(s) missing`);
+      syncInfo = `Full sync: ${parts.join(' · ')}.`;
       await refresh();
     } catch (e) {
       err = String(e);
@@ -157,14 +190,55 @@
   <div class="card">
     <div class="label">S3 sync</div>
     <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
-      Check that every recorded S3 key still exists. Missing objects are reset to pending for re-upload.
+      Quick: existence check by S3 key — missing objects reset to pending.<br />
+      Full: also downloads every zip index and diffs local vs cloud file sets.
     </div>
     {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
-    <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
-      {syncing ? 'Syncing…' : 'Sync with S3'}
-    </button>
+    <div class="run-actions">
+      <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
+        {syncing ? 'Syncing…' : 'Sync with S3'}
+      </button>
+      <button onclick={fullSync} type="button" disabled={syncing || !!status?.current}
+              title="Heavier: downloads every .index.txt sidecar and compares file contents">
+        Full sync
+      </button>
+    </div>
   </div>
 </div>
+
+{#if fullSyncResult}
+  <div class="card">
+    <div class="label">Full sync result</div>
+    <div class="sync-grid">
+      <details open={fullSyncResult.local_missing_count > 0}>
+        <summary>
+          <strong>{fullSyncResult.local_missing_count}</strong> local file(s) missing from cloud
+          {#if fullSyncResult.local_missing_count > (fullSyncResult.local_missing_from_cloud?.length ?? 0)}
+            (showing first {fullSyncResult.local_missing_from_cloud?.length})
+          {/if}
+        </summary>
+        {#if fullSyncResult.local_missing_from_cloud?.length}
+          <ul class="mono small">
+            {#each fullSyncResult.local_missing_from_cloud as p}<li>{p}</li>{/each}
+          </ul>
+        {/if}
+      </details>
+      <details open={fullSyncResult.cloud_missing_count > 0}>
+        <summary>
+          <strong>{fullSyncResult.cloud_missing_count}</strong> cloud file(s) missing locally
+          {#if fullSyncResult.cloud_missing_count > (fullSyncResult.cloud_missing_from_local?.length ?? 0)}
+            (showing first {fullSyncResult.cloud_missing_from_local?.length})
+          {/if}
+        </summary>
+        {#if fullSyncResult.cloud_missing_from_local?.length}
+          <ul class="mono small">
+            {#each fullSyncResult.cloud_missing_from_local as p}<li>{p}</li>{/each}
+          </ul>
+        {/if}
+      </details>
+    </div>
+  </div>
+{/if}
 
 {#if status?.current || logLines.length}
   <div class="card">
@@ -198,6 +272,12 @@
   .pill { font-size: 0.85rem; display: inline-flex; gap: 0.4rem; align-items: center; }
   .err { color: var(--err); border-color: var(--err); }
   .live-stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+  .sync-grid { display: flex; flex-direction: column; gap: 0.75rem; }
+  .small { font-size: 0.85rem; }
+  details { border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem 0.75rem; }
+  details[open] { background: var(--bg); }
+  details summary { cursor: pointer; }
+  details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
   .log {
     background: var(--bg);
     border: 1px solid var(--border);

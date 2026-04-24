@@ -40,13 +40,13 @@ const (
 
 // Options wires the engine to the outside world.
 type Options struct {
-	DB          *db.DB
-	Source      source.Source
-	Storage     storage.Storage
-	TmpDir      string
-	KeyPrefix   string // e.g. "backups/"
-	ChunkSize   int    // how many individual files to upload per batch
-	ZipThresh   int    // files in a top-dir group >= this -> zip
+	DB        *db.DB
+	Source    source.Source
+	Storage   storage.Storage
+	TmpDir    string
+	KeyPrefix string // e.g. "backups/"
+	ChunkSize int    // how many individual files to upload per batch
+	ZipThresh int    // files in a top-dir group >= this -> zip
 	// ZipMaxBytes caps the uncompressed byte total of a single zip
 	// group. Subtrees larger than this are split along subdirectory
 	// boundaries; only loose files at one directory level that still
@@ -56,11 +56,11 @@ type Options struct {
 	// `{zipKey}.index.txt` sidecar next to each zip listing its
 	// entries. Default: true (set by New()).
 	EnableZipIndex bool
-	RetryFailed    bool // re-queue 'failed' rows alongside 'pending'
-	Mode        RunMode  // default: RunModeFull
-	ScanPaths   []string // when set with RunModeScan: partial rescan targets
-	Now         func() time.Time // injectable clock for tests
-	Emit        EventEmitter
+	RetryFailed    bool             // re-queue 'failed' rows alongside 'pending'
+	Mode           RunMode          // default: RunModeFull
+	ScanPaths      []string         // when set with RunModeScan: partial rescan targets
+	Now            func() time.Time // injectable clock for tests
+	Emit           EventEmitter
 }
 
 // Engine owns a run's lifecycle.
@@ -153,11 +153,11 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 		RunID: runID,
 		At:    finished,
 		Data: map[string]any{
-			"status":          finalStatus,
-			"files_scanned":   stats.FilesScanned,
-			"files_uploaded":  stats.FilesUploaded,
-			"bytes_uploaded":  stats.BytesUploaded,
-			"error_message":   errMsg,
+			"status":         finalStatus,
+			"files_scanned":  stats.FilesScanned,
+			"files_uploaded": stats.FilesUploaded,
+			"bytes_uploaded": stats.BytesUploaded,
+			"error_message":  errMsg,
 		},
 	})
 	return runID, runErr
@@ -263,21 +263,26 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 }
 
 func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN int) (int64, int64, error) {
-	zipName := ZipName(g.Files, zipN)
-	zipPath := filepath.Join(e.opts.TmpDir, zipName)
+	// zipRel mirrors the source directory hierarchy under the key prefix —
+	// stored as `files.zip_name` so joinKey(prefix, zip_name) still resolves
+	// the full S3 key for sync/restore lookups. The temp file stays flat
+	// (basename only) so we don't have to mkdir nested temp subtrees.
+	zipRel := ZipRelPath(g.Files, zipN)
+	zipBase := path.Base(zipRel)
+	zipPath := filepath.Join(e.opts.TmpDir, zipBase)
 	defer os.Remove(zipPath)
 
-	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipName))
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipRel))
 	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create zip %s: %w", zipName, err)
+		return 0, 0, fmt.Errorf("create zip %s: %w", zipRel, err)
 	}
 
 	md5hex, err := md5File(zipPath)
 	if err != nil {
 		return 0, 0, err
 	}
-	key := path.Join(e.opts.KeyPrefix, zipName)
+	key := path.Join(e.opts.KeyPrefix, zipRel)
 
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
@@ -303,11 +308,11 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	for _, f := range g.Files {
 		ids = append(ids, f.ID)
 	}
-	if err := e.opts.DB.SetZipName(ctx, ids, zipName); err != nil {
+	if err := e.opts.DB.SetZipName(ctx, ids, zipRel); err != nil {
 		return 0, 0, fmt.Errorf("set zip name: %w", err)
 	}
 	if err := e.opts.DB.MarkUploadedBatch(ctx, ids, md5hex, key, now); err != nil {
-		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipName, err)
+		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipRel, err)
 	}
 
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded %s (%d bytes, etag=%s)", key, size, res.ETag))

@@ -19,16 +19,16 @@ const (
 
 // File is the typed row for the `files` table.
 type File struct {
-	ID          int64
-	Path        string
-	Size        int64
-	MTime       time.Time
-	MD5         string
-	Status      string
-	ZipName     string
-	S3Key       string
-	UploadedAt  time.Time
-	LastSeenAt  time.Time
+	ID         int64
+	Path       string
+	Size       int64
+	MTime      time.Time
+	MD5        string
+	Status     string
+	ZipName    string
+	S3Key      string
+	UploadedAt time.Time
+	LastSeenAt time.Time
 }
 
 // UpsertResult captures what changed during UpsertFile — the engine uses it
@@ -518,11 +518,15 @@ func (db *DB) ListZipNames(ctx context.Context) ([]string, error) {
 }
 
 // ListIndividualS3Keys returns distinct s3_key values for files that were
-// uploaded individually (zip_name is empty). Zipped files are excluded
-// because their S3 object is identified by zip_name, not s3_key.
+// uploaded individually (zip_name is empty or NULL). Zipped files are
+// excluded because their S3 object is identified by zip_name, not s3_key.
+// COALESCE is required because UpsertFileBatch inserts with zip_name left
+// at its NULL default, and SQLite's `= ”` does not match NULL.
 func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 	return listDistinctStrings(ctx, db.DB,
-		`SELECT DISTINCT s3_key FROM files WHERE zip_name = '' AND s3_key != '' ORDER BY s3_key`)
+		`SELECT DISTINCT s3_key FROM files
+		  WHERE COALESCE(zip_name,'') = '' AND COALESCE(s3_key,'') != ''
+		  ORDER BY s3_key`)
 }
 
 func listDistinctStrings(ctx context.Context, db interface {

@@ -202,15 +202,37 @@ export const api = {
       files_reset: number;
     }>('/api/sync', { method: 'POST' }),
 
+  syncFull: () =>
+    request<{
+      zip_names_in_db: number;
+      individual_keys_in_db: number;
+      keys_in_s3: number;
+      missing_zips: number;
+      missing_individual: number;
+      files_reset: number;
+      cloud_file_count: number;
+      local_file_count: number;
+      zip_indexes_consumed: number;
+      local_missing_count: number;
+      local_missing_from_cloud?: string[];
+      cloud_missing_count: number;
+      cloud_missing_from_local?: string[];
+    }>('/api/sync/full', { method: 'POST' }),
+
   restoreEstimate: (paths: string[]) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',
       body: JSON.stringify({ paths }),
     }),
-  restoreTrigger: (paths: string[]) =>
-    request<{ error?: string }>('/api/restore/trigger', {
+  restoreTrigger: (paths: string[], targetDir: string) =>
+    request<{
+      files_written: number;
+      bytes_written: number;
+      skipped?: string[];
+      errors?: string[];
+    }>('/api/restore/trigger', {
       method: 'POST',
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ paths, target_dir: targetDir }),
     }),
 };
 

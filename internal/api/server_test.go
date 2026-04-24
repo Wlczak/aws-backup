@@ -476,10 +476,12 @@ func TestDeleteFilesBulk(t *testing.T) {
 	}
 }
 
-func TestRestoreTriggerGated(t *testing.T) {
+func TestRestoreTriggerWithoutStorage(t *testing.T) {
+	// newTestServer doesn't wire Deps.Storage, so the handler should
+	// refuse the request rather than attempt a download.
 	ts, _ := newTestServer(t)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger", "application/json",
-		strings.NewReader(`{"paths":["photos"]}`))
+		strings.NewReader(`{"paths":["photos"],"target_dir":"/tmp/restore"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

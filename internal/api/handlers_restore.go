@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/engine"
 )
 
 // Deep Archive pricing the estimator uses. Kept in code (not config) so
@@ -133,11 +135,68 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestoreTrigger is stubbed until feature 19 — actually calling
-// s3:RestoreObject is part of the real-AWS-enabled path.
-func (s *Server) handleRestoreTrigger(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-		"error": "restore trigger is gated behind feature 19 (real AWS enablement)",
+type restoreTriggerRequest struct {
+	Paths     []string `json:"paths"`
+	TargetDir string   `json:"target_dir"`
+}
+
+type restoreTriggerResponse struct {
+	FilesWritten int64    `json:"files_written"`
+	BytesWritten int64    `json:"bytes_written"`
+	Skipped      []string `json:"skipped,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
+}
+
+// handleRestoreTrigger downloads each selected file from S3 and writes
+// it under target_dir. Files stored individually are streamed directly
+// from their s3_key; files stored inside a zip archive are downloaded
+// once per archive and extracted selectively.
+//
+// This path assumes the S3 objects are already retrievable. If the
+// bucket stores them in DEEP_ARCHIVE and they haven't been restored out
+// of band, Storage.Get will fail and the per-file error is reported in
+// the response. Wiring s3:RestoreObject + readiness polling is a
+// follow-up (see the "feature 19" note).
+func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Storage == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+		return
+	}
+
+	var req restoreTriggerRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+	if req.TargetDir == "" {
+		writeError(w, http.StatusBadRequest, errors.New("target_dir is required"))
+		return
+	}
+	if !filepath.IsAbs(req.TargetDir) {
+		writeError(w, http.StatusBadRequest, errors.New("target_dir must be an absolute path"))
+		return
+	}
+
+	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
+		DB:        s.deps.DB,
+		Storage:   s.deps.Storage,
+		KeyPrefix: s.deps.StoragePrefix,
+		TargetDir: req.TargetDir,
+		Paths:     req.Paths,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, restoreTriggerResponse{
+		FilesWritten: stats.FilesWritten,
+		BytesWritten: stats.BytesWritten,
+		Skipped:      stats.Skipped,
+		Errors:       stats.Errors,
 	})
 }
 

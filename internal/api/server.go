@@ -53,9 +53,9 @@ type Server struct {
 
 	// runMu guards currentRun + currentRunCancel so we can expose "is a
 	// run in progress?" to /api/status and allow /api/runs/:id/cancel.
-	runMu             sync.Mutex
-	currentRun        int64 // 0 when idle
-	currentRunCancel  context.CancelFunc
+	runMu            sync.Mutex
+	currentRun       int64 // 0 when idle
+	currentRunCancel context.CancelFunc
 
 	// statsCache coalesces /api/files/stats across poll-heavy UI clients
 	// so a full-table COUNT/SUM doesn't hit the DB more than once every
@@ -109,6 +109,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/restore/trigger", s.handleRestoreTrigger)
 
 		r.Post("/sync", s.handleSync)
+		r.Post("/sync/full", s.handleSyncFull)
 
 		r.Mount("/events", sseHandler(s.deps.Bus))
 	})

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -240,17 +241,53 @@ func ZipName(files []PendingFile, n int) string {
 	return fmt.Sprintf("%s_%d.zip", d, n)
 }
 
-// commonDirLabel finds the longest directory path shared by all files,
-// sanitizes it (slashes → underscores), and returns it. Returns "_root"
-// when files share no common directory.
-func commonDirLabel(files []PendingFile) string {
+// ZipRelPath returns the zip's path relative to the configured S3 key
+// prefix. The directory portion mirrors the files' longest common source
+// directory (slashes preserved, one sanitized segment per component); the
+// filename portion is ZipName's existing "<label>_N.zip". Callers combine
+// this with the key prefix via path.Join to get the final S3 key, and also
+// store it as `files.zip_name` in the DB so lookups keep working.
+//
+// Example: files under "photos/2024/" with prefix "backups/" produce
+//
+//	zip_name = "photos/2024/photos_2024_1.zip"
+//	S3 key   = "backups/photos/2024/photos_2024_1.zip"
+func ZipRelPath(files []PendingFile, n int) string {
+	name := ZipName(files, n)
+	dir := commonDirPath(files)
+	if dir == "" {
+		return name
+	}
+	return path.Join(dir, name)
+}
+
+// commonDirPath finds the longest directory shared by all files and
+// returns it as a slash-joined path with each segment sanitized
+// individually (slashes preserved). Returns "" when files share no
+// common directory.
+func commonDirPath(files []PendingFile) string {
+	segs := commonDirSegments(files)
+	if len(segs) == 0 {
+		return ""
+	}
+	out := make([]string, len(segs))
+	for i, s := range segs {
+		out[i] = sanitizeLabel(s)
+	}
+	return strings.Join(out, "/")
+}
+
+// commonDirSegments returns the unsanitized path segments of the longest
+// directory shared by all files. Returns nil when files share no common
+// directory or when any file is at the root.
+func commonDirSegments(files []PendingFile) []string {
 	if len(files) == 0 {
-		return rootDirLabel
+		return nil
 	}
 	dirParts := func(p string) []string {
 		segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
 		if len(segs) <= 1 {
-			return nil // root-level file, no directory
+			return nil
 		}
 		return segs[:len(segs)-1]
 	}
@@ -271,6 +308,14 @@ func commonDirLabel(files []PendingFile) string {
 		}
 		common = common[:keep]
 	}
+	return common
+}
+
+// commonDirLabel finds the longest directory path shared by all files,
+// sanitizes it (slashes → underscores), and returns it. Returns "_root"
+// when files share no common directory.
+func commonDirLabel(files []PendingFile) string {
+	common := commonDirSegments(files)
 	if len(common) == 0 {
 		return rootDirLabel
 	}

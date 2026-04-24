@@ -5,7 +5,14 @@
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
+  let targetDir = $state('');
   let estimate = $state<RestoreEstimate | null>(null);
+  let triggerResult = $state<{
+    files_written: number;
+    bytes_written: number;
+    skipped?: string[];
+    errors?: string[];
+  } | null>(null);
   let err = $state('');
   let info = $state('');
   let loading = $state(false);
@@ -48,6 +55,11 @@
 
   async function doTrigger() {
     const p = paths();
+    if (!targetDir.trim()) {
+      err = 'target directory is required';
+      confirmTrigger = false;
+      return;
+    }
     if (!confirmTrigger) {
       confirmTrigger = true;
       return;
@@ -55,9 +67,10 @@
     loading = true;
     err = '';
     info = '';
+    triggerResult = null;
     try {
-      const res = await api.restoreTrigger(p);
-      info = res?.error ?? 'restore requested';
+      triggerResult = await api.restoreTrigger(p, targetDir.trim());
+      info = `Restored ${triggerResult.files_written.toLocaleString()} file(s) (${bytes(triggerResult.bytes_written)}).`;
     } catch (e) {
       err = String(e);
     } finally {
@@ -77,18 +90,45 @@
     Enter <code class="mono">/</code> to select <strong>all files</strong>.
   </p>
   <textarea bind:value={raw} placeholder={"photos\ndocs/2024\nfamily-archive.zip"}></textarea>
+
+  <div class="label" style="margin-top: 0.75rem">Target directory (absolute path)</div>
+  <p class="muted">Restored files are written here, preserving their source-relative paths.</p>
+  <input type="text" bind:value={targetDir} placeholder="/home/me/restored" class="mono targetdir" />
+
   <div class="actions">
     <button class="primary" onclick={doEstimate} disabled={loading} type="button">
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
     <button onclick={doTrigger} disabled={loading || !estimate} type="button">
-      {confirmTrigger ? 'Click again to confirm' : 'Initiate restore'}
+      {confirmTrigger ? 'Click again to confirm' : 'Download & restore'}
     </button>
     <button type="button" onclick={() => { raw = '/'; estimate = null; }} title="Select all files">
       Select all
     </button>
   </div>
 </div>
+
+{#if triggerResult}
+  <div class="card">
+    <div class="label">Restore result</div>
+    <div class="stats">
+      <div><div class="muted">Files written</div><div class="big">{triggerResult.files_written.toLocaleString()}</div></div>
+      <div><div class="muted">Bytes</div><div class="big">{bytes(triggerResult.bytes_written)}</div></div>
+    </div>
+    {#if triggerResult.skipped?.length}
+      <details style="margin-top: 0.75rem">
+        <summary>{triggerResult.skipped.length} skipped</summary>
+        <ul class="mono small">{#each triggerResult.skipped as p}<li>{p}</li>{/each}</ul>
+      </details>
+    {/if}
+    {#if triggerResult.errors?.length}
+      <details open style="margin-top: 0.5rem" class="err">
+        <summary>{triggerResult.errors.length} error(s)</summary>
+        <ul class="mono small">{#each triggerResult.errors as p}<li>{p}</li>{/each}</ul>
+      </details>
+    {/if}
+  </div>
+{/if}
 
 {#if err}<div class="card err">{err}</div>{/if}
 {#if info}<div class="card info">{info}</div>{/if}
@@ -150,6 +190,13 @@
     font-size: 0.9rem;
     margin-top: 0.5rem;
   }
+  .targetdir {
+    width: 100%;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.9rem;
+  }
+  .small { font-size: 0.85rem; }
+  details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
   .stats {
     display: grid;

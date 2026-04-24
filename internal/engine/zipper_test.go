@@ -168,12 +168,83 @@ func TestZipName(t *testing.T) {
 	}
 }
 
+func TestZipRelPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []PendingFile
+		n     int
+		want  string
+	}{
+		{
+			name: "single common dir",
+			files: []PendingFile{
+				{RelPath: "photos/a.jpg"},
+				{RelPath: "photos/b.jpg"},
+			},
+			n:    1,
+			want: "photos/photos_1.zip",
+		},
+		{
+			name: "nested common dir",
+			files: []PendingFile{
+				{RelPath: "backup/folder1/images/1.jpg"},
+				{RelPath: "backup/folder1/images/2.jpg"},
+			},
+			n:    2,
+			want: "backup/folder1/images/backup_folder1_images_2.zip",
+		},
+		{
+			name: "mixed siblings share parent",
+			files: []PendingFile{
+				{RelPath: "backup/folder1/images/1.jpg"},
+				{RelPath: "backup/folder1/docs/a.pdf"},
+			},
+			n:    1,
+			want: "backup/folder1/backup_folder1_1.zip",
+		},
+		{
+			name: "root-level files have no prefix",
+			files: []PendingFile{
+				{RelPath: "a.txt"},
+				{RelPath: "b.txt"},
+			},
+			n:    3,
+			want: "_root_3.zip",
+		},
+		{
+			name: "no common ancestor → root",
+			files: []PendingFile{
+				{RelPath: "alpha/a.txt"},
+				{RelPath: "beta/b.txt"},
+			},
+			n:    1,
+			want: "_root_1.zip",
+		},
+		{
+			name: "unsafe chars sanitized per-segment (slashes preserved)",
+			files: []PendingFile{
+				{RelPath: "weird name!/sub/a.txt"},
+				{RelPath: "weird name!/sub/b.txt"},
+			},
+			n:    1,
+			want: "weird_name_/sub/weird_name__sub_1.zip",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ZipRelPath(tc.files, tc.n); got != tc.want {
+				t.Errorf("ZipRelPath: got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreateZipRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	payload := map[string]string{
-		"photos/a.jpg":      "alphaalphaalpha",
-		"photos/b.jpg":      "bravo",
-		"photos/sub/c.jpg":  "charlie-deepcontent",
+		"photos/a.jpg":     "alphaalphaalpha",
+		"photos/b.jpg":     "bravo",
+		"photos/sub/c.jpg": "charlie-deepcontent",
 	}
 	for rel, body := range payload {
 		full := filepath.Join(root, filepath.FromSlash(rel))
