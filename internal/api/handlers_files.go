@@ -110,8 +110,9 @@ func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 }
 
 type idsRequest struct {
-	IDs       []int64 `json:"ids"`
-	AllFailed bool    `json:"all_failed"`
+	IDs       []int64  `json:"ids"`
+	AllFailed bool     `json:"all_failed"`
+	Paths     []string `json:"paths"`
 }
 
 type affectedResponse struct {
@@ -154,8 +155,10 @@ func (s *Server) handleRetryFiles(w http.ResponseWriter, r *http.Request) {
 		affected, err = s.deps.DB.MarkAllFailedPending(r.Context())
 	case len(req.IDs) > 0:
 		affected, err = s.deps.DB.MarkPendingByIDs(r.Context(), req.IDs)
+	case len(req.Paths) > 0:
+		affected, err = s.deps.DB.MarkPendingByPaths(r.Context(), req.Paths)
 	default:
-		writeError(w, http.StatusBadRequest, errors.New("provide ids or all_failed"))
+		writeError(w, http.StatusBadRequest, errors.New("provide ids, paths, or all_failed"))
 		return
 	}
 	if err != nil {

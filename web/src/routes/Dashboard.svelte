@@ -105,8 +105,13 @@
   }
 
   async function backUpMissing() {
+    if (!fullSyncResult?.local_missing_from_cloud?.length) return;
     backingUp = true; backupStarted = false; backupErr = '';
     try {
+      // Force-reset these paths to pending regardless of their current DB
+      // status — files may be marked uploaded/zipped even though they're
+      // absent from the cloud index (e.g. zip exists but has no .index.txt).
+      await api.retryByPaths(fullSyncResult.local_missing_from_cloud);
       await api.triggerRun({ mode: 'upload' });
       backupStarted = true;
       await refresh();

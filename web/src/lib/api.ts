@@ -177,6 +177,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ all_failed: true }),
     }),
+  retryByPaths: (paths: string[]) =>
+    request<{ affected: number }>(`/api/files/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
   deleteFile: (id: number) =>
     request<{ affected: number }>(`/api/files/${id}`, { method: 'DELETE' }),
   deleteFiles: (ids: number[]) =>

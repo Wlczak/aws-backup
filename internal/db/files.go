@@ -548,6 +548,32 @@ func listDistinctStrings(ctx context.Context, db interface {
 	return out, rows.Err()
 }
 
+// MarkPendingByPaths resets files to pending by exact path match,
+// regardless of their current status. Used to force re-upload of files
+// that are present locally but absent from the cloud index.
+func (db *DB) MarkPendingByPaths(ctx context.Context, paths []string) (int64, error) {
+	if len(paths) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.Repeat("?,", len(paths))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, StatusPending)
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	res, err := db.ExecContext(ctx,
+		`UPDATE files
+		   SET status = ?, md5 = NULL, zip_name = NULL, s3_key = NULL, uploaded_at = NULL
+		 WHERE path IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // MarkPendingByZipNames resets all files whose zip_name is in the list.
 // Used when a zip object is confirmed missing from S3.
 func (db *DB) MarkPendingByZipNames(ctx context.Context, zipNames []string) (int64, error) {
