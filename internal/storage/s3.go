@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -33,7 +32,6 @@ type S3Config struct {
 // S3Storage is the real S3 / MinIO backend.
 type S3Storage struct {
 	client       *s3.Client
-	uploader     *manager.Uploader
 	bucket       string
 	storageClass s3types.StorageClass
 }
@@ -70,7 +68,6 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 
 	return &S3Storage{
 		client:       client,
-		uploader:     manager.NewUploader(client),
 		bucket:       cfg.Bucket,
 		storageClass: s3types.StorageClass(cfg.StorageClass),
 	}, nil
@@ -79,18 +76,18 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 // Put uploads body under key via the SDK's multipart uploader with a
 // server-verified SHA256 checksum. Returns the ETag, size, and checksum
 // echoed by the service.
-func (s *S3Storage) Put(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
-	return s.putWithClass(ctx, key, body, s.storageClass)
+func (s *S3Storage) Put(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error) {
+	return s.putWithClass(ctx, key, body, size, s.storageClass)
 }
 
 // PutStandard uploads body under key with STANDARD storage class, bypassing
 // the configured default so zip index sidecars remain instantly readable.
-func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
-	return s.putWithClass(ctx, key, body, s3types.StorageClassStandard)
+func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error) {
+	return s.putWithClass(ctx, key, body, size, s3types.StorageClassStandard)
 }
 
-func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, class s3types.StorageClass) (PutResult, error) {
-	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
+func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, _ int64, class s3types.StorageClass) (PutResult, error) {
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		Body:              body,
@@ -114,8 +111,6 @@ func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader
 			res.ChecksumSHA256 = *out.ChecksumSHA256
 		}
 	}
-	// Size isn't returned by the uploader directly; leave 0 — engine knows
-	// the local size and passes it forward.
 	return res, nil
 }
 
