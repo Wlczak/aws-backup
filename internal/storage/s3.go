@@ -196,6 +196,15 @@ func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 	return out.Body, nil
 }
 
+// Delete removes the object at key. It is a no-op if the key does not exist.
+func (s *S3Storage) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}
+
 // Close is a no-op; the SDK's HTTP client doesn't require teardown.
 func (s *S3Storage) Close() error { return nil }
 

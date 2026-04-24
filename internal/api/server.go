@@ -110,6 +110,7 @@ func (s *Server) Router() http.Handler {
 
 		r.Post("/sync", s.handleSync)
 		r.Post("/sync/full", s.handleSyncFull)
+		r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
 
 		r.Mount("/events", sseHandler(s.deps.Bus))
 	})

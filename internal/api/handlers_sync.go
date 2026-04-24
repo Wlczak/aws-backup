@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -146,6 +147,114 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 				resp.CloudMissingFromLocal = append(resp.CloudMissingFromLocal, p)
 			}
 		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type deleteCloudPathsRequest struct {
+	Paths []string `json:"paths"`
+}
+
+type deleteCloudPathsResponse struct {
+	DeletedStandalone int      `json:"deleted_standalone"`
+	DeletedZips       int      `json:"deleted_zips"`
+	SkippedPartialZip int      `json:"skipped_partial_zip"`
+	Errors            []string `json:"errors,omitempty"`
+}
+
+// handleDeleteCloudPaths removes cloud-only objects identified by source-relative
+// paths. Standalone S3 objects are deleted immediately. Zip archives are deleted
+// only when every file they contain is listed in the request (safe whole-zip
+// removal); zips that contain a mix of targeted and non-targeted files are
+// skipped and reported in skipped_partial_zip.
+func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Storage == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+		return
+	}
+	var req deleteCloudPathsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+
+	ctx := r.Context()
+
+	indivKeys, err := s.deps.DB.ListIndividualS3Keys(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("list individual keys: %w", err))
+		return
+	}
+	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, s.deps.StoragePrefix, indivKeys)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
+		return
+	}
+
+	targeted := make(map[string]struct{}, len(req.Paths))
+	for _, p := range req.Paths {
+		targeted[p] = struct{}{}
+	}
+
+	// Build a reverse map: zipKey → all paths in that zip (from the full index).
+	zipContents := map[string][]string{}
+	for path, cf := range idx.Files {
+		if cf.ZipKey != "" {
+			zipContents[cf.ZipKey] = append(zipContents[cf.ZipKey], path)
+		}
+	}
+
+	resp := deleteCloudPathsResponse{}
+
+	// Delete standalone objects.
+	for _, p := range req.Paths {
+		cf, ok := idx.Files[p]
+		if !ok || cf.S3Key == "" {
+			continue
+		}
+		if err := s.deps.Storage.Delete(ctx, cf.S3Key); err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("delete %s: %v", cf.S3Key, err))
+		} else {
+			resp.DeletedStandalone++
+		}
+	}
+
+	// Determine which zips can be safely deleted in full.
+	// A zip is safe to delete only when every path it contains is targeted.
+	deletedZips := map[string]struct{}{}
+	for _, p := range req.Paths {
+		cf, ok := idx.Files[p]
+		if !ok || cf.ZipKey == "" {
+			continue
+		}
+		if _, done := deletedZips[cf.ZipKey]; done {
+			continue
+		}
+		allTargeted := true
+		for _, zipPath := range zipContents[cf.ZipKey] {
+			if _, ok := targeted[zipPath]; !ok {
+				allTargeted = false
+				break
+			}
+		}
+		if !allTargeted {
+			resp.SkippedPartialZip++
+			continue
+		}
+		// Delete the zip and its .index.txt sidecar.
+		zipS3Key := joinKey(s.deps.StoragePrefix, cf.ZipKey)
+		if err := s.deps.Storage.Delete(ctx, zipS3Key); err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("delete zip %s: %v", zipS3Key, err))
+			continue
+		}
+		_ = s.deps.Storage.Delete(ctx, zipS3Key+engine.ZipIndexSuffix) // best-effort
+		deletedZips[cf.ZipKey] = struct{}{}
+		resp.DeletedZips++
 	}
 
 	writeJSON(w, http.StatusOK, resp)

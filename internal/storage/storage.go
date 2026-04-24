@@ -55,6 +55,9 @@ type Storage interface {
 	// close the body. Returns ErrNotFound when the key is absent.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 
+	// Delete removes the object at key. A no-op if the key does not exist.
+	Delete(ctx context.Context, key string) error
+
 	// Close releases any underlying client resources.
 	Close() error
 }

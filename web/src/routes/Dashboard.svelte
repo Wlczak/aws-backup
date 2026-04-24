@@ -82,6 +82,66 @@
     zip_indexes_consumed: number;
   } | null>(null);
 
+  // --- fix-action state ---
+  let backingUp = $state(false);
+  let backupStarted = $state(false);
+  let backupErr = $state('');
+
+  let showRestoreForm = $state(false);
+  let restoreTargetDir = $state('');
+  let restoring = $state(false);
+  let restoreResult = $state<{ files_written: number; bytes_written: number; skipped?: string[]; errors?: string[] } | null>(null);
+  let restoreErr = $state('');
+
+  let showDeleteConfirm = $state(false);
+  let deleting = $state(false);
+  let deleteResult = $state<{ deleted_standalone: number; deleted_zips: number; skipped_partial_zip: number; errors?: string[] } | null>(null);
+  let deleteErr = $state('');
+
+  function resetFixState() {
+    backupStarted = false; backupErr = '';
+    showRestoreForm = false; restoreResult = null; restoreErr = '';
+    showDeleteConfirm = false; deleteResult = null; deleteErr = '';
+  }
+
+  async function backUpMissing() {
+    backingUp = true; backupStarted = false; backupErr = '';
+    try {
+      await api.triggerRun({ mode: 'upload' });
+      backupStarted = true;
+      await refresh();
+    } catch (e) {
+      backupErr = String(e);
+    } finally {
+      backingUp = false;
+    }
+  }
+
+  async function restoreMissing() {
+    if (!restoreTargetDir || !fullSyncResult?.cloud_missing_from_local?.length) return;
+    restoring = true; restoreResult = null; restoreErr = '';
+    try {
+      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreTargetDir);
+    } catch (e) {
+      restoreErr = String(e);
+    } finally {
+      restoring = false;
+    }
+  }
+
+  async function deleteCloudMissing() {
+    if (!fullSyncResult?.cloud_missing_from_local?.length) return;
+    deleting = true; deleteResult = null; deleteErr = '';
+    try {
+      deleteResult = await api.deleteCloudPaths(fullSyncResult.cloud_missing_from_local);
+    } catch (e) {
+      deleteErr = String(e);
+    } finally {
+      deleting = false;
+      showDeleteConfirm = false;
+    }
+  }
+
   async function syncWithS3() {
     syncing = true;
     syncInfo = '';
@@ -109,6 +169,7 @@
     syncInfo = '';
     fullSyncResult = null;
     err = '';
+    resetFixState();
     try {
       const r = await api.syncFull();
       fullSyncResult = r;
@@ -210,6 +271,8 @@
   <div class="card">
     <div class="label">Full sync result</div>
     <div class="sync-grid">
+
+      <!-- Local files not in cloud -->
       <details open={fullSyncResult.local_missing_count > 0}>
         <summary>
           <strong>{fullSyncResult.local_missing_count}</strong> local file(s) missing from cloud
@@ -222,7 +285,28 @@
             {#each fullSyncResult.local_missing_from_cloud as p}<li>{p}</li>{/each}
           </ul>
         {/if}
+        {#if fullSyncResult.local_missing_count > 0}
+          <div class="fix-row">
+            {#if backupStarted}
+              <span class="ok-text">Upload run started — watch Live progress below.</span>
+            {:else}
+              <button
+                class="primary fix-btn"
+                onclick={backUpMissing}
+                type="button"
+                disabled={backingUp || !!status?.current}
+                title={status?.current ? 'A run is already in progress' : ''}
+              >
+                {backingUp ? 'Starting…' : `Back up ${fullSyncResult.local_missing_count} missing file(s)`}
+              </button>
+              {#if status?.current}<span class="muted small">run in progress</span>{/if}
+            {/if}
+            {#if backupErr}<span class="err small">{backupErr}</span>{/if}
+          </div>
+        {/if}
       </details>
+
+      <!-- Cloud files not in local -->
       <details open={fullSyncResult.cloud_missing_count > 0}>
         <summary>
           <strong>{fullSyncResult.cloud_missing_count}</strong> cloud file(s) missing locally
@@ -235,7 +319,68 @@
             {#each fullSyncResult.cloud_missing_from_local as p}<li>{p}</li>{/each}
           </ul>
         {/if}
+        {#if fullSyncResult.cloud_missing_count > 0}
+          <div class="fix-row">
+            {#if restoreResult}
+              <span class="ok-text">
+                Restored {restoreResult.files_written} file(s) · {bytes(restoreResult.bytes_written)}
+                {#if restoreResult.skipped?.length} · {restoreResult.skipped.length} skipped{/if}
+                {#if restoreResult.errors?.length} · {restoreResult.errors.length} error(s){/if}
+              </span>
+            {:else if deleteResult}
+              <span class="ok-text">
+                Deleted {deleteResult.deleted_standalone} standalone + {deleteResult.deleted_zips} zip(s)
+                {#if deleteResult.skipped_partial_zip > 0} · {deleteResult.skipped_partial_zip} partial zip(s) skipped{/if}
+                {#if deleteResult.errors?.length} · {deleteResult.errors.length} error(s){/if}
+              </span>
+            {:else if showRestoreForm}
+              <div class="fix-form">
+                <input
+                  type="text"
+                  bind:value={restoreTargetDir}
+                  placeholder="/absolute/path/to/restore/into"
+                  class="path-input"
+                />
+                <button
+                  class="primary fix-btn"
+                  onclick={restoreMissing}
+                  type="button"
+                  disabled={restoring || !restoreTargetDir}
+                >
+                  {restoring ? 'Restoring…' : `Restore ${fullSyncResult.cloud_missing_from_local?.length ?? fullSyncResult.cloud_missing_count} file(s)`}
+                </button>
+                <button onclick={() => showRestoreForm = false} type="button">Cancel</button>
+              </div>
+              {#if restoreErr}<span class="err small">{restoreErr}</span>{/if}
+            {:else if showDeleteConfirm}
+              <div class="fix-form">
+                <span class="warn-text small">
+                  Delete {fullSyncResult.cloud_missing_from_local?.length ?? fullSyncResult.cloud_missing_count} cloud object(s)?
+                  Standalone files are removed immediately; zips are only deleted when all their contents are targeted.
+                </span>
+                <button
+                  class="danger fix-btn"
+                  onclick={deleteCloudMissing}
+                  type="button"
+                  disabled={deleting}
+                >
+                  {deleting ? 'Deleting…' : 'Confirm delete'}
+                </button>
+                <button onclick={() => showDeleteConfirm = false} type="button">Cancel</button>
+              </div>
+              {#if deleteErr}<span class="err small">{deleteErr}</span>{/if}
+            {:else}
+              <button class="fix-btn" onclick={() => showRestoreForm = true} type="button">
+                Restore to directory…
+              </button>
+              <button class="fix-btn danger" onclick={() => showDeleteConfirm = true} type="button">
+                Delete from cloud…
+              </button>
+            {/if}
+          </div>
+        {/if}
       </details>
+
     </div>
   </div>
 {/if}
@@ -278,6 +423,14 @@
   details[open] { background: var(--bg); }
   details summary { cursor: pointer; }
   details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
+  .fix-row { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  .fix-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; width: 100%; }
+  .fix-btn { font-size: 0.85rem; }
+  .danger { border-color: var(--err); color: var(--err); }
+  .danger:hover:not(:disabled) { background: var(--err); color: #fff; }
+  .path-input { flex: 1 1 240px; min-width: 0; padding: 0.3rem 0.6rem; font-size: 0.85rem; font-family: var(--mono, monospace); border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 4px; }
+  .ok-text { color: var(--ok, #22c55e); font-size: 0.85rem; }
+  .warn-text { color: var(--warn, #f59e0b); }
   .log {
     background: var(--bg);
     border: 1px solid var(--border);

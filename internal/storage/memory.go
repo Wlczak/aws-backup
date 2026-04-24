@@ -101,6 +101,14 @@ func (m *MemStorage) Restore(_ context.Context, key string, _ int) error {
 	return nil
 }
 
+// Delete removes the object at key. No-op if absent.
+func (m *MemStorage) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	delete(m.objects, key)
+	m.mu.Unlock()
+	return nil
+}
+
 // Close is a no-op.
 func (m *MemStorage) Close() error { return nil }
 

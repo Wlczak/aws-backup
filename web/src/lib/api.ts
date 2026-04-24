@@ -219,6 +219,17 @@ export const api = {
       cloud_missing_from_local?: string[];
     }>('/api/sync/full', { method: 'POST' }),
 
+  deleteCloudPaths: (paths: string[]) =>
+    request<{
+      deleted_standalone: number;
+      deleted_zips: number;
+      skipped_partial_zip: number;
+      errors?: string[];
+    }>('/api/sync/delete-cloud-paths', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    }),
+
   restoreEstimate: (paths: string[]) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',

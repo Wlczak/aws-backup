@@ -19,10 +19,12 @@ import (
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
-// zipIndexSuffix is appended to a zip's S3 key to form the sidecar key
-// that lists the archive's contents. The sidecar is uploaded to STANDARD
-// storage so listing a zip doesn't require restoring it from Deep Archive.
-const zipIndexSuffix = ".index.txt"
+// ZipIndexSuffix is the suffix appended to a zip's S3 key to form the
+// sidecar that lists the archive's contents. STANDARD-tier so listing
+// doesn't require a Glacier restore.
+const ZipIndexSuffix = ".index.txt"
+
+const zipIndexSuffix = ZipIndexSuffix
 
 // RunMode controls which phases of a backup cycle execute.
 type RunMode string
