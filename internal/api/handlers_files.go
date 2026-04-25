@@ -89,23 +89,20 @@ func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
 
 // cachedStats serves /api/files/stats from a short TTL cache so tight
 // dashboard polls don't rescan the whole files table per request.
+// The mutex is held for the duration of the DB call to prevent a stampede
+// where many goroutines all observe a stale expiry and fire concurrent queries.
 func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
 	if time.Now().Before(s.statsExpiry) {
-		v := s.statsValue
-		s.statsMu.Unlock()
-		return v, nil
+		return s.statsValue, nil
 	}
-	s.statsMu.Unlock()
-
 	st, err := s.deps.DB.Stats(ctx)
 	if err != nil {
 		return db.FileStats{}, err
 	}
-	s.statsMu.Lock()
 	s.statsValue = st
 	s.statsExpiry = time.Now().Add(statsCacheTTL)
-	s.statsMu.Unlock()
 	return st, nil
 }
 
