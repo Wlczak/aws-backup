@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -228,6 +229,8 @@ func (c Config) Validate() error {
 	}
 	if c.Server.Host == "" {
 		errs = append(errs, errors.New("server.host is required"))
+	} else if ip := net.ParseIP(c.Server.Host); c.Server.Host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		errs = append(errs, fmt.Errorf("server.host %q must be a loopback address (127.0.0.1 or ::1); binding to external interfaces is not supported", c.Server.Host))
 	}
 
 	return errors.Join(errs...)
