@@ -99,18 +99,22 @@ func TestMarkMissing(t *testing.T) {
 	r2, _ := d.UpsertFile(ctx, "b.txt", 1, old, new)
 	_ = d.MarkUploaded(ctx, r2.ID, "m", "k", new)
 
-	// Pending, old — should NOT be flipped (only uploaded rows).
+	// Pending, old — should NOT be flipped (only uploaded/zipped rows).
 	_, _ = d.UpsertFile(ctx, "c.txt", 1, old, old)
+
+	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should be marked missing.
+	r3, _ := d.UpsertFile(ctx, "d.txt", 1, old, old)
+	_ = d.SetZipName(ctx, []int64{r3.ID}, "z.zip")
 
 	affected, err := d.MarkMissing(ctx, new)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if affected != 1 {
-		t.Errorf("want 1 affected, got %d", affected)
+	if affected != 2 {
+		t.Errorf("want 2 affected, got %d", affected)
 	}
 
-	files, _, _ := d.ListFiles(ctx, FilesFilter{})
+	files, _, _ := d.ListFiles(ctx, FilesFilter{All: true})
 	got := map[string]string{}
 	for _, f := range files {
 		got[f.Path] = f.Status
@@ -123,6 +127,9 @@ func TestMarkMissing(t *testing.T) {
 	}
 	if got["c.txt"] != StatusPending {
 		t.Errorf("c.txt want pending, got %q", got["c.txt"])
+	}
+	if got["d.txt"] != StatusMissing {
+		t.Errorf("d.txt want missing, got %q", got["d.txt"])
 	}
 }
 

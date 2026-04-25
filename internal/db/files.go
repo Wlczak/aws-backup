@@ -181,14 +181,17 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 	return res, tx.Commit()
 }
 
-// MarkMissing flips any previously uploaded row whose last_seen_at is older
+// MarkMissing flips any uploaded or zipped row whose last_seen_at is older
 // than scanStart to status=missing. Returns the affected row count.
+// 'zipped' rows are included because SetZipName may have succeeded while
+// MarkUploadedBatch was still pending; a file deleted from disk in that window
+// would otherwise be invisible to missing-detection.
 func (db *DB) MarkMissing(ctx context.Context, scanStart time.Time) (int64, error) {
 	r, err := db.ExecContext(ctx,
 		`UPDATE files
 		   SET status = ?
-		 WHERE status = ? AND last_seen_at < ?`,
-		StatusMissing, StatusUploaded, isoTime(scanStart),
+		 WHERE status IN (?, ?) AND last_seen_at < ?`,
+		StatusMissing, StatusUploaded, StatusZipped, isoTime(scanStart),
 	)
 	if err != nil {
 		return 0, err
