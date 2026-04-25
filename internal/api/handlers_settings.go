@@ -55,12 +55,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			if s.deps.ApplySettings != nil {
 				_ = s.deps.ApplySettings(merged, prev)
 			}
+			s.deps.StoragePrefix = prev.S3.KeyPrefix
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
 			return
 		}
 	}
 
 	*s.deps.Config = merged
+	s.deps.StoragePrefix = merged.S3.KeyPrefix
 	writeJSON(w, http.StatusOK, merged.Redacted())
 }
 
