@@ -8,6 +8,7 @@ import (
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 )
 
 // Deep Archive pricing the estimator uses. Kept in code (not config) so
@@ -90,7 +91,7 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 				bytes += f.Size
 			} else {
 				for req := range want {
-					if f.Path == req || hasPrefixPath(f.Path, req) {
+					if pathutil.HasPrefixPath(f.Path, req) {
 						count++
 						bytes += f.Size
 						matched[req] = true
@@ -198,17 +199,6 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		Skipped:      stats.Skipped,
 		Errors:       stats.Errors,
 	})
-}
-
-func hasPrefixPath(full, prefix string) bool {
-	if len(prefix) >= len(full) {
-		return false
-	}
-	if full[:len(prefix)] != prefix {
-		return false
-	}
-	// Only match on path-component boundary.
-	return full[len(prefix)] == '/'
 }
 
 func round2(f float64) float64 {

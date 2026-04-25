@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
@@ -95,7 +96,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 			if !wantAll {
 				hit := false
 				for req := range wantSet {
-					if f.Path == req || hasPrefixPath(f.Path, req) {
+					if pathutil.HasPrefixPath(f.Path, req) {
 						hit = true
 						matched[req] = true
 						break
@@ -299,22 +300,6 @@ func safeJoin(root, relPath string) (string, error) {
 		return "", fmt.Errorf("unsafe path %q escapes target", relPath)
 	}
 	return abs, nil
-}
-
-// hasPrefixPath matches sync-style path prefixes: "photos" matches
-// "photos/2024/a.jpg" but NOT "photosphere.jpg". Kept package-local so
-// handlers and engine restore can share the same semantics.
-func hasPrefixPath(full, prefix string) bool {
-	if full == prefix {
-		return true
-	}
-	if len(prefix) >= len(full) {
-		return false
-	}
-	if full[:len(prefix)] != prefix {
-		return false
-	}
-	return full[len(prefix)] == '/'
 }
 
 // joinKeyForPrefix concatenates an S3 key prefix with a relative object
