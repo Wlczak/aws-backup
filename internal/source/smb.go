@@ -132,9 +132,14 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 
 // Open returns a ReadCloser for relPath (relative to the configured root).
 func (s *SMB) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	full := relPath
-	if root := s.rootPath(); root != "" {
-		full = path.Join(root, relPath)
+	root := s.rootPath()
+	clean := path.Clean("/" + strings.TrimPrefix(relPath, "/"))
+	full := clean
+	if root != "" {
+		full = path.Join(root, clean)
+		if full != root && !strings.HasPrefix(full, root+"/") {
+			return nil, errors.New("path escapes SMB root")
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
