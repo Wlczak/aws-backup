@@ -25,8 +25,6 @@ import (
 // doesn't require a Glacier restore.
 const ZipIndexSuffix = ".index.txt"
 
-const zipIndexSuffix = ZipIndexSuffix
-
 // RunMode controls which phases of a backup cycle execute.
 type RunMode string
 
@@ -321,13 +319,13 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 
 	var total int64
 	for _, k := range s3Keys {
-		if !strings.HasSuffix(k, zipIndexSuffix) {
+		if !strings.HasSuffix(k, ZipIndexSuffix) {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		zipKey := strings.TrimSuffix(k, zipIndexSuffix)
+		zipKey := strings.TrimSuffix(k, ZipIndexSuffix)
 		if _, ok := zipSet[zipKey]; !ok {
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: index %s has no matching zip, skipping", k))
 			continue
@@ -449,7 +447,7 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	// the whole run. Gated so users who don't need remote listing can skip
 	// the extra STANDARD-tier objects.
 	if e.opts.EnableZipIndex {
-		indexKey := key + zipIndexSuffix
+		indexKey := key + ZipIndexSuffix
 		indexBody := strings.Join(entries, "\n") + "\n"
 		if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload zip index %s: %v", indexKey, err))

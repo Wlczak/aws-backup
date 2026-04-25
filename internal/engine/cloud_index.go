@@ -54,10 +54,10 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 	}
 
 	for _, key := range keys {
-		if !strings.HasSuffix(key, zipIndexSuffix) {
+		if !strings.HasSuffix(key, ZipIndexSuffix) {
 			continue
 		}
-		zipKey := strings.TrimSuffix(key, zipIndexSuffix)
+		zipKey := strings.TrimSuffix(key, ZipIndexSuffix)
 		if err := ctx.Err(); err != nil {
 			return idx, err
 		}
