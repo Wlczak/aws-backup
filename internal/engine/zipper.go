@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Wlczak/aws-backup/internal/source"
@@ -259,6 +260,22 @@ func ZipRelPath(files []PendingFile, n int) string {
 		return name
 	}
 	return path.Join(dir, name)
+}
+
+// parseZipNumber extracts the trailing integer N from a zip relative path
+// whose filename follows the "<label>_N.zip" convention (e.g.
+// "photos/2024/photos_2024_3.zip" → 3). Returns 0 on any parse failure.
+func parseZipNumber(zipRelPath string) int {
+	base := strings.TrimSuffix(path.Base(zipRelPath), ".zip")
+	i := strings.LastIndex(base, "_")
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(base[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // commonDirPath finds the longest directory shared by all files and

@@ -311,6 +311,66 @@ func TestEngineCancellation(t *testing.T) {
 	}
 }
 
+// TestZipCounterContinuesSequence verifies that a second run adding new files
+// to a previously-zipped directory creates photos_2.zip rather than
+// overwriting photos_1.zip.
+func TestZipCounterContinuesSequence(t *testing.T) {
+	eng, d, _, store, root, _ := newTestEngine(t, 3)
+	ctx := context.Background()
+
+	// First run: 3 files in photos/ → photos_1.zip.
+	writeFile(t, root, "photos/a.jpg", "alpha")
+	writeFile(t, root, "photos/b.jpg", "bravo")
+	writeFile(t, root, "photos/c.jpg", "charlie")
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	// Confirm photos_1.zip exists.
+	keysAfterRun1 := store.Keys()
+	var zip1Key string
+	for _, k := range keysAfterRun1 {
+		if strings.HasSuffix(k, "_1.zip") {
+			zip1Key = k
+		}
+	}
+	if zip1Key == "" {
+		t.Fatalf("expected a _1.zip after run 1, keys=%v", keysAfterRun1)
+	}
+
+	// Second run: 3 more files in photos/ → should produce photos_2.zip.
+	writeFile(t, root, "photos/d.jpg", "delta")
+	writeFile(t, root, "photos/e.jpg", "echo")
+	writeFile(t, root, "photos/f.jpg", "foxtrot")
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	// photos_1.zip must still exist (not overwritten).
+	if _, ok := store.GetBytes(zip1Key); !ok {
+		t.Errorf("photos_1.zip was overwritten: key %q missing after run 2", zip1Key)
+	}
+
+	// A new _2.zip must have been created.
+	var zip2Key string
+	for _, k := range store.Keys() {
+		if strings.HasSuffix(k, "_2.zip") {
+			zip2Key = k
+		}
+	}
+	if zip2Key == "" {
+		t.Errorf("expected a _2.zip after run 2, keys=%v", store.Keys())
+	}
+
+	// All 6 files should be uploaded.
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	for _, f := range files {
+		if f.Status != db.StatusUploaded {
+			t.Errorf("%s: status=%q want uploaded", f.Path, f.Status)
+		}
+	}
+}
+
 func TestEngineUsesClock(t *testing.T) {
 	eng, d, _, _, root, _ := newTestEngine(t, 10)
 	writeFile(t, root, "a.txt", "hi")

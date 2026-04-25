@@ -221,20 +221,34 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	// 3+4+5. process groups
-	var uploaded int64
-	var bytesUploaded int64
-	zipCounter := 0
+	// Seed per-directory zip counters from existing DB entries so new zips
+	// continue the sequence (_2, _3, …) instead of restarting at _1 and
+	// silently overwriting the previous archive.
+	existingZips, err := e.opts.DB.ListZipNames(ctx)
+	if err != nil {
+		return db.RunFailed, fmt.Errorf("list zip names: %w", err)
+	}
+	dirMaxN := map[string]int{}
+	for _, z := range existingZips {
+		dir := path.Dir(z)
+		if dir == "." {
+			dir = ""
+		}
+		if n := parseZipNumber(z); n > dirMaxN[dir] {
+			dirMaxN[dir] = n
+		}
+	}
+
+	var uploaded, bytesUploaded int64
 	for _, g := range groups {
 		if err := ctx.Err(); err != nil {
 			return db.RunCancelled, err
 		}
-		var (
-			up    int64
-			bytes int64
-		)
+		var up, bytes int64
 		if g.Zip {
-			zipCounter++
-			up, bytes, err = e.processZipGroup(ctx, runID, g, zipCounter)
+			dir := commonDirPath(g.Files)
+			dirMaxN[dir]++
+			up, bytes, err = e.processZipGroup(ctx, runID, g, dirMaxN[dir])
 		} else {
 			up, bytes, err = e.processIndividualGroup(ctx, runID, g)
 		}

@@ -307,6 +307,26 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseZipNumber(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"photos_1.zip", 1},
+		{"photos/photos_1.zip", 1},
+		{"photos/2024/photos_2024_3.zip", 3},
+		{"_root_7.zip", 7},
+		{"nonum.zip", 0},
+		{"", 0},
+		{"nodot", 0},
+	}
+	for _, tc := range cases {
+		if got := parseZipNumber(tc.in); got != tc.want {
+			t.Errorf("parseZipNumber(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestCreateZipCancel(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644); err != nil {
