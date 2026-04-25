@@ -1,57 +1,81 @@
-# S3 Cold Storage Backup Tool — Project Plan
+# aws-backup — Project Plan
 
-## Overview
-
-Build a self-contained Go binary with an embedded Svelte SPA that backs up files from an SMB source to AWS S3 (Glacier Deep Archive), with intelligent chunked uploading, a local SQLite index, directory-level zipping, and a local WebUI for monitoring and control.
+> **Read this file at the start of every session.** It is the authoritative record of project state, architecture decisions, issue handling workflow, and open work.
 
 ---
 
-## Project Structure
+## Overview
+
+A self-contained Go binary with an embedded Svelte SPA that backs up files from an SMB (or local) source to AWS S3 (Glacier Deep Archive). Features: intelligent directory-level zipping, a local SQLite index, S3 state reconciliation, a REST API, SSE live events, and a web UI for monitoring and control.
+
+Module: `github.com/Wlczak/aws-backup`
+
+---
+
+## Actual File Structure
 
 ```
-backup-tool/
-├── cmd/
-│   └── main.go                  # Entry point, wires everything together
+aws-backup/
+├── cmd/aws-backup/
+│   └── main.go                  # Entry point, scheduler, discardResponse
 ├── internal/
+│   ├── api/
+│   │   ├── server.go            # chi router, Server struct, runMu/currentRun
+│   │   ├── spa.go               # embedded SPA handler
+│   │   ├── sse.go               # SSE event stream
+│   │   ├── handlers_files.go    # GET /api/files, /api/files/stats
+│   │   ├── handlers_runs.go     # POST /api/runs, cancel, status
+│   │   ├── handlers_restore.go  # GET /api/restore/estimate, POST /api/restore/trigger, POST /api/restore/do
+│   │   ├── handlers_settings.go # GET/PUT /api/settings
+│   │   ├── handlers_sync.go     # POST /api/sync (full sync / desync fix actions)
+│   │   └── handlers_tests.go    # GET /api/test/smb, /api/test/s3
 │   ├── config/
-│   │   └── config.go            # Config struct, load/save from JSON file
+│   │   ├── config.go            # Config struct, Load/Save/Validate/Default
+│   │   └── path.go              # Platform config path resolution
 │   ├── db/
-│   │   ├── db.go                # SQLite connection, migrations
-│   │   └── queries.go           # All DB read/write operations
+│   │   ├── db.go                # SQLite open, schema migrations
+│   │   ├── files.go             # File CRUD, UpsertFile, MarkUploaded, MarkMissing, ReconcileZip, …
+│   │   ├── runs.go              # Run CRUD, AppendLog, UpdateRunStats
+│   │   └── settings.go          # Key-value settings table
 │   ├── engine/
-│   │   ├── engine.go            # Core backup orchestrator
-│   │   ├── scanner.go           # SMB source scanning
-│   │   ├── zipper.go            # Directory-level zip logic
-│   │   ├── uploader.go          # S3 upload with multipart + checksum
-│   │   └── progress.go          # SSE progress event emitter
+│   │   ├── engine.go            # Backup orchestrator: scan→reconcile→pending→zip/upload
+│   │   ├── zipper.go            # GroupFiles, CreateZip, ZipRelPath
+│   │   ├── cloud_index.go       # LoadCloudIndex, readIndexInto (S3 index sidecar reader)
+│   │   ├── restore.go           # RestoreToDir
+│   │   ├── buffer.go            # writeBuffer (batched DB writes during upload)
+│   │   └── events.go            # Event types and EventEmitter interface
+│   ├── events/
+│   │   └── bus.go               # In-process pub/sub event bus
+│   ├── pathutil/
+│   │   └── pathutil.go          # HasPrefixPath (shared, canonical, with exact-match guard)
 │   ├── scheduler/
-│   │   └── scheduler.go         # Cron-based scheduling
-│   └── api/
-│       ├── router.go            # chi router setup
-│       ├── handlers.go          # HTTP handlers
-│       └── sse.go               # Server-Sent Events stream
-├── web/                         # Svelte SPA (built output embedded into binary)
+│   │   └── scheduler.go         # Cron scheduler wrapping robfig/cron
+│   ├── source/
+│   │   ├── source.go            # Source interface (Walk, Open, Close)
+│   │   ├── factory.go           # NewSource — picks SMB or LocalDir
+│   │   ├── localdir.go          # LocalDir source (dev/test)
+│   │   ├── smb.go               # SMB source via go-smb2
+│   │   └── scan.go              # source.Scan — upserts files, marks missing
+│   └── storage/
+│       ├── storage.go           # Storage interface + types
+│       ├── s3.go                # Real S3 backend (aws-sdk-go-v2)
+│       ├── memory.go            # MemStorage — in-process fake for tests
+│       └── base64.go            # Base64 checksum helpers
+├── web/                         # Svelte SPA (built → embedded into binary)
 │   ├── src/
 │   │   ├── App.svelte
-│   │   ├── routes/
-│   │   │   ├── Dashboard.svelte
-│   │   │   ├── Index.svelte
-│   │   │   ├── Logs.svelte
-│   │   │   ├── Settings.svelte
-│   │   │   └── Restore.svelte
+│   │   ├── routes/              # Dashboard, Files, Logs, Settings, Restore
 │   │   ├── components/
-│   │   │   ├── StatusBadge.svelte
-│   │   │   ├── FileTable.svelte
-│   │   │   ├── ProgressBar.svelte
-│   │   │   └── CostEstimate.svelte
-│   │   └── lib/
-│   │       └── api.ts           # Typed fetch wrappers for Go API
+│   │   └── lib/api.ts           # Typed fetch wrappers
+│   ├── embed.go                 # go:embed directive
 │   ├── package.json
 │   └── vite.config.ts
+├── deploy/
+│   └── docker-compose.yml       # MinIO dev environment
 ├── go.mod
-├── go.sum
-├── Makefile                     # build, dev, embed targets
-└── config.json                  # Runtime config (gitignored)
+├── Makefile
+├── plan.md                      # ← this file
+└── README.md
 ```
 
 ---
@@ -59,44 +83,40 @@ backup-tool/
 ## Data Model (SQLite)
 
 ```sql
--- Tracks every file seen on the SMB source
 CREATE TABLE files (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    path          TEXT NOT NULL UNIQUE,   -- full path as seen on SMB share
+    path          TEXT    NOT NULL UNIQUE,
     size          INTEGER NOT NULL,
-    mtime         TEXT NOT NULL,          -- ISO8601
-    md5           TEXT,                   -- computed on local tmp copy
-    status        TEXT NOT NULL DEFAULT 'pending',
-                                          -- pending | zipped | uploaded | failed
-    zip_name      TEXT,                   -- which zip archive this file is in (nullable)
-    s3_key        TEXT,                   -- S3 object key after upload
-    uploaded_at   TEXT,                   -- ISO8601, set after confirmed upload
-    last_seen_at  TEXT NOT NULL           -- ISO8601, updated each scan
+    mtime         TEXT    NOT NULL,          -- ISO8601
+    md5           TEXT,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+                                             -- pending | zipped | uploaded | failed | missing
+    zip_name      TEXT,                      -- relative zip path (e.g. "photos/photos_1.zip")
+    s3_key        TEXT,                      -- full S3 key
+    uploaded_at   TEXT,
+    last_seen_at  TEXT    NOT NULL
 );
 
--- One row per backup run
 CREATE TABLE runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at      TEXT NOT NULL,
     finished_at     TEXT,
     status          TEXT NOT NULL DEFAULT 'running',
-                                          -- running | completed | failed | cancelled
+                                             -- running | completed | failed | cancelled
     files_scanned   INTEGER DEFAULT 0,
     files_uploaded  INTEGER DEFAULT 0,
     bytes_uploaded  INTEGER DEFAULT 0,
     error_message   TEXT
 );
 
--- Log lines attached to a run
 CREATE TABLE run_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id     INTEGER NOT NULL REFERENCES runs(id),
-    timestamp  TEXT NOT NULL,
-    level      TEXT NOT NULL,             -- info | warn | error
-    message    TEXT NOT NULL
+    timestamp  TEXT    NOT NULL,
+    level      TEXT    NOT NULL,             -- info | warn | error
+    message    TEXT    NOT NULL
 );
 
--- App-wide settings (key-value, so settings can be added without migrations)
 CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -110,28 +130,26 @@ CREATE TABLE settings (
 ```json
 {
   "smb": {
-    "host": "",
-    "port": 445,
-    "username": "",
-    "password": "",
-    "domain": "",
-    "share": "",
-    "path": ""
+    "host": "", "port": 445,
+    "username": "", "password": "", "domain": "",
+    "share": "", "path": ""
   },
   "s3": {
-    "bucket": "",
-    "region": "",
-    "access_key_id": "",
-    "secret_access_key": "",
+    "bucket": "", "region": "",
+    "access_key_id": "", "secret_access_key": "",
     "storage_class": "DEEP_ARCHIVE",
-    "key_prefix": "backups/"
+    "key_prefix": "backups/",
+    "endpoint": "",
+    "use_path_style": false
   },
   "backup": {
     "chunk_size": 10,
-    "tmp_dir": "/tmp/backup-tool",
+    "tmp_dir": "",
     "schedule": "0 2 * * *",
     "zip_threshold": 50,
-    "min_zip_dir_files": 20
+    "zip_max_bytes": 0,
+    "enable_zip_index": true,
+    "retry_failed": true
   },
   "server": {
     "port": 8080,
@@ -142,136 +160,158 @@ CREATE TABLE settings (
 
 ---
 
-## Core Engine Logic
-
-### Backup run lifecycle (`engine.go`)
+## Engine Backup Lifecycle
 
 ```
-1. Create run record in DB (status: running)
-2. Scan SMB source → upsert all found files into DB (status: pending if new/changed)
-3. Group pending files by top-level directory
-4. For each directory group:
-   a. If file count >= zip_threshold → zip the group (zipper.go)
-   b. Else → upload files individually
-5. For each item to upload (zip or individual file):
-   a. Copy to tmp dir (chunked, chunk_size files at a time)
-   b. Compute MD5 of each file
-   c. Upload to S3 with checksum verification (uploader.go)
-   d. Verify S3 ETag matches local MD5
-   e. Mark files as uploaded in DB + set s3_key and uploaded_at
-   f. Delete tmp copies
-6. Emit progress events throughout via SSE (progress.go)
-7. Update run record (status: completed/failed, stats)
+1.  Create run row (DB)
+2.  Scan source → upsert files, mark missing (source.Scan)
+3.  List all S3 objects under KeyPrefix (single round-trip, reused below)
+4.  reconcileFromS3 — read every .index.txt sidecar whose .zip exists in S3;
+    mark files still pending/zipped/failed in DB as uploaded
+    (closes crash window between successful S3 put and DB commit)
+5.  listPending → group files (GroupFiles)
+6.  Seed per-directory zip counters from DB + S3 listing (take max)
+7.  For each group:
+    a. Zip group  → CreateZip → Storage.Put → SetZipName → MarkUploadedBatch
+                 → PutStandard(.index.txt sidecar)
+    b. Individual → copyAndHash → Storage.Put → writeBuffer (batched commit)
+8.  Finalize run row
 ```
 
-### Change detection logic (`scanner.go`)
+### Status transitions
 
-A file is considered changed (re-queued as pending) if:
-- It exists in DB but `mtime` or `size` has changed since last scan
-- It does not exist in DB at all (new file)
+```
+pending → zipped → uploaded
+pending →          uploaded   (individual)
+pending →  failed             (upload error)
+uploaded → missing            (file gone from source on next scan)
+zipped  → missing             (file gone from source — MarkMissing covers both)
+```
 
-Files marked `uploaded` that are no longer seen on SMB are marked `status: missing` but never deleted from the index — preserving the historical record.
+### Zip naming
 
-### Zip strategy (`zipper.go`)
-
-- One zip per top-level directory on the SMB share
-- Zip name format: `dirname_YYYYMMDD_HHMMSS.zip`
-- If a directory has been zipped before and files have changed:
-  - Create a new zip with a new timestamp suffix (don't overwrite)
-  - S3 Deep Archive 180-day minimum billing means we never delete old zips — just upload the new version
-- Store zip contents manifest in the index (each file row gets `zip_name` set)
-
-### Upload logic (`uploader.go`)
-
-- Use AWS SDK v2 multipart upload manager
-- Set `ChecksumAlgorithm: types.ChecksumAlgorithmSha256` on upload
-- Verify response ETag before marking uploaded in DB
-- Retry up to 3 times on transient errors with exponential backoff
-- Emit progress SSE event after each successful upload
+Format: `{topdir}/{topdir}_{subdir}_{N}.zip` — counter N is seeded from DB **and** S3 so it survives DB loss. Index sidecar: `{zipKey}.index.txt` in STANDARD tier.
 
 ---
 
-## API Endpoints (`api/handlers.go`)
+## API Endpoints
 
 ```
-GET  /api/status              — current run status + last run summary
-GET  /api/runs                — paginated list of all runs
-GET  /api/runs/:id            — single run detail + logs
-POST /api/runs                — trigger a new backup run manually
-POST /api/runs/:id/cancel     — cancel a running backup
+GET  /api/status                — current + last run summary
+GET  /api/runs                  — paginated run list
+GET  /api/runs/:id              — run detail + logs
+POST /api/runs                  — trigger run  {mode: full|scan|upload, paths: []}
+POST /api/runs/:id/cancel       — cancel in-flight run
 
-GET  /api/files               — paginated, searchable file index
-                                query params: ?status=&search=&page=&limit=
-GET  /api/files/stats         — count by status, total size, etc.
+GET  /api/files                 — paginated file index  ?status=&search=&page=&limit=
+GET  /api/files/stats           — counts by status + total size
 
-GET  /api/settings            — current config (passwords redacted)
-PUT  /api/settings            — update config, validate before saving
+GET  /api/settings              — config (passwords redacted)
+PUT  /api/settings              — update + hot-reload config
 
-GET  /api/restore/estimate    — body: {paths: []}, returns cost estimate
-POST /api/restore/trigger     — body: {paths: []}, initiates S3 restore request
+POST /api/sync                  — full-sync / desync-fix actions
+GET  /api/restore/estimate      — cost estimate  {paths: []}
+POST /api/restore/trigger       — initiate S3 restore request
+POST /api/restore/do            — download restored files to local path
 
-GET  /api/events              — SSE stream of live backup progress
-```
+GET  /api/test/smb              — SMB connectivity test
+GET  /api/test/s3               — S3 connectivity test
 
-### SSE event types (`api/sse.go`)
-
-```json
-{ "type": "scan_progress",   "data": { "scanned": 1200, "total": 300000 } }
-{ "type": "upload_start",    "data": { "key": "backups/photos.zip", "size": 2048000 } }
-{ "type": "upload_complete", "data": { "key": "backups/photos.zip", "etag": "..." } }
-{ "type": "upload_failed",   "data": { "key": "backups/photos.zip", "error": "..." } }
-{ "type": "run_complete",    "data": { "run_id": 42, "status": "completed", "stats": {} } }
+GET  /api/events                — SSE live backup progress stream
+GET  /*                         — embedded Svelte SPA
 ```
 
 ---
 
-## WebUI Pages
+## Key Design Decisions
 
-### Dashboard (`Dashboard.svelte`)
-- Last run: status, timestamp, files uploaded, bytes transferred
-- Next scheduled run countdown
-- Quick stats: total files indexed, total size, pending/failed counts
-- "Run now" button → POST /api/runs → subscribe to /api/events SSE stream
-- Live progress bar and log tail during active run
-
-### Index Browser (`Index.svelte`)
-- Searchable, paginated table of all files
-- Columns: path, size, mtime, status, zip name, uploaded at
-- Filter by status (pending / uploaded / failed / missing)
-- Click row → show full details + S3 key
-
-### Run Logs (`Logs.svelte`)
-- List of all runs with status badges
-- Click run → expandable log viewer with level-colored lines
-
-### Settings (`Settings.svelte`)
-- Form for all config.json fields
-- SMB connection test button → GET /api/smb/test
-- S3 connection test button → GET /api/s3/test
-- Schedule input with human-readable preview ("Every day at 2:00 AM")
-
-### Restore Helper (`Restore.svelte`)
-- Browse index, multi-select files or directories
-- "Estimate cost" → calls /api/restore/estimate → shows breakdown:
-  - Request fees (n files × $0.10/1000)
-  - Retrieval fees (GB × $0.02)
-  - Egress fees (GB × $0.09, first 100GB free)
-  - Wait time estimate (12-48h for Deep Archive)
-- "Initiate restore" button with confirmation dialog
+| Decision | Rationale |
+|---|---|
+| `modernc.org/sqlite` (CGO-free) | Cross-compile without CGO toolchain |
+| STANDARD tier for `.index.txt` | Instant listing of zip contents without Glacier restore |
+| Zip counter seeded from DB **and** S3 | Survives DB wipe; no silent overwrites |
+| S3 reconcile before listPending | Idempotent retry after crash between S3 put and DB commit |
+| `writeBuffer` for individual uploads | Batches N MarkUploaded calls into one SQLite transaction |
+| `pathutil.HasPrefixPath` shared package | Single canonical implementation with exact-match guard |
 
 ---
 
-## Go Module Dependencies
+## Issue Handling Workflow
+
+When fixing a GitHub issue:
+
+1. Read the issue: `gh issue view <N> --json title,body,labels,comments`
+2. Implement the fix with a test where applicable
+3. Build + run relevant tests: `go build ./... && go test ./...`
+4. Commit with the issue number in the message title, e.g. `Fix foo (#N)`
+5. Close the issue and leave a comment citing the commit SHA:
+   ```
+   gh issue close <N>
+   gh issue comment <N> --body "Fixed in <SHA> — <one-line summary>"
+   ```
+6. Update this plan if the fix changes architecture or workflow
+
+---
+
+## Open Issues (as of 2026-04-25)
+
+### Bug
+| # | Title |
+|---|---|
+| #37 | StoragePrefix goes stale after settings hot-swap |
+
+### Security
+| # | Title |
+|---|---|
+| #35 | Restore API writes to arbitrary absolute filesystem paths |
+| #36 | No authentication on any API endpoint |
+| #45 | SMB source Open() lacks path-traversal guard |
+| #55 | index.db created with world-readable permissions |
+
+### Performance
+| # | Title |
+|---|---|
+| #40 | Stats cache stampede under concurrent dashboard polls |
+| #46 | SQLite busy_timeout not configured |
+| #47 | putWithClass ignores size parameter — ContentLength not set on S3 uploads |
+
+### Quality
+| # | Title |
+|---|---|
+| #41 | MinZipDirFiles config field is defined but never used |
+| #42 | handleTestStorage permanently blocks real AWS S3 |
+| #49 | joinKey function duplicated across api and engine packages |
+| #50 | req variable shadowed in handleRestoreEstimate loop |
+| #51 | Hand-rolled itoa in source/scan.go should use strconv |
+
+### Convention
+| # | Title |
+|---|---|
+| #52 | handleGetRun returns 404 for all DB errors, not just missing rows |
+| #53 | ListPending WHERE clause uses bare OR without parentheses |
+| #54 | Docker Compose uses unpinned 'latest' image tags for MinIO |
+
+---
+
+## Recently Closed Issues
+
+| # | Commit | Summary |
+|---|---|---|
+| #38 | db02540 | `MarkMissing` now includes `zipped` rows |
+| #39 | f1880af | `currentRun` leak + `discardResponse` header on panic |
+| #43 | b223d84 | Reconcile DB from S3 zip indexes at backup start |
+| #44 | de9b06e | `hasPrefixPath` extracted to shared `pathutil` package |
+
+---
+
+## Go Dependencies
 
 ```
-github.com/aws/aws-sdk-go-v2
-github.com/aws/aws-sdk-go-v2/config
-github.com/aws/aws-sdk-go-v2/service/s3
-github.com/aws/aws-sdk-go-v2/feature/s3/manager
-github.com/hirochachacha/go-smb2
-github.com/mattn/go-sqlite3
+github.com/aws/aws-sdk-go-v2 + service/s3 + config + credentials
 github.com/go-chi/chi/v5
+github.com/hirochachacha/go-smb2
 github.com/robfig/cron/v3
+modernc.org/sqlite
 ```
 
 ---
@@ -279,35 +319,10 @@ github.com/robfig/cron/v3
 ## Makefile Targets
 
 ```makefile
-build:       # build Svelte, embed into Go binary, compile for current OS
-build-win:   # cross-compile for Windows (GOOS=windows)
-build-linux: # cross-compile for Linux (GOOS=linux)
-dev:         # run Go with hot reload (air) + Vite dev server in parallel
-embed:       # build Svelte dist/ only (output goes to web/dist, embedded via go:embed)
-migrate:     # run DB migrations against local backup.db
-clean:       # remove dist/, tmp/, compiled binaries
-```
-
----
-
-## Cross-platform Notes
-
-- Config file location:
-  - Linux: `~/.config/backup-tool/config.json`
-  - Windows: `%APPDATA%\backup-tool\config.json`
-- DB file lives alongside config
-- Tmp dir defaults to OS temp (`os.TempDir()`), overridable in config
-- SMB library (`go-smb2`) works on both platforms — no OS-level mount needed
-- Single `go build` with `CGO_ENABLED=1` required for sqlite3 (use `modernc.org/sqlite` for CGO-free alternative)
-
----
-
-## Key Implementation Notes
-
-1. **Never mark a file as uploaded before verifying the S3 ETag** — if the process crashes between upload and DB update, the next run will safely re-upload
-2. **Index is the source of truth for incrementals** — never list S3 on incremental runs, only on first setup or manual reconciliation
-3. **Zip names include timestamps** — never overwrite an existing S3 object, always create new versioned zips to avoid 180-day Deep Archive billing issues
-4. **SSE stream should be cancellable** — if the browser disconnects, clean up the event listener goroutine
-5. **Config passwords** — never return raw credentials from the API; redact before JSON response
-6. **Graceful shutdown** — on SIGINT/SIGTERM, finish the current chunk upload, mark in-progress files as pending, close DB cleanly
+build        # build Svelte, embed, compile for current OS
+build-win    # cross-compile GOOS=windows
+build-linux  # cross-compile GOOS=linux
+dev          # Go hot-reload (air) + Vite dev server in parallel
+embed        # build Svelte dist/ only
+clean        # remove dist/, tmp/, binaries
 ```
