@@ -17,7 +17,7 @@ updates:
       semver-minor-days: 14
       semver-patch-days: 14
   - package-ecosystem: npm
-    directory: "/" # Location of package manifests
+    directory: "/web" # Location of package manifests
     schedule:
       interval: "weekly"
       day: "friday"
