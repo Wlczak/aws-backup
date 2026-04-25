@@ -41,6 +41,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			return nil, fmt.Errorf("enable WAL: %w", err)
 		}
 	}
+	if err := gdb.WithContext(ctx).Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
 	if err := gdb.WithContext(ctx).Exec("PRAGMA foreign_keys=ON").Error; err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
