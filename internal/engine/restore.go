@@ -183,7 +183,7 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 // matching member listed in members. Errors are returned per-member so a
 // corrupt entry doesn't poison the rest of the archive.
 func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File) (written, bytes int64, errs []string) {
-	key := joinKeyForPrefix(opts.KeyPrefix, zipName)
+	key := pathutil.JoinKey(opts.KeyPrefix, zipName)
 
 	tmp, err := os.CreateTemp("", "aws-backup-restore-*.zip")
 	if err != nil {
@@ -302,12 +302,3 @@ func safeJoin(root, relPath string) (string, error) {
 	return abs, nil
 }
 
-// joinKeyForPrefix concatenates an S3 key prefix with a relative object
-// name using a single "/" separator. Mirrors handlers_sync.joinKey so we
-// don't pull the api package into engine.
-func joinKeyForPrefix(prefix, name string) string {
-	if prefix == "" {
-		return name
-	}
-	return strings.TrimRight(prefix, "/") + "/" + name
-}

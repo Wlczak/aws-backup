@@ -5,10 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
-
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 )
 
 type syncResponse struct {
@@ -58,14 +57,6 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// joinKey concatenates a prefix and a name with a single "/" separator,
-// handling the case where prefix is empty or already ends with "/".
-func joinKey(prefix, name string) string {
-	if prefix == "" {
-		return name
-	}
-	return strings.TrimRight(prefix, "/") + "/" + name
-}
 
 // handleSyncFull reports whether every local file is covered in the cloud
 // (zip indexes + standalone keys) and vice versa. This is heavier than
@@ -247,7 +238,7 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		// Delete the zip and its .index.txt sidecar.
-		zipS3Key := joinKey(s.deps.StoragePrefix, cf.ZipKey)
+		zipS3Key := pathutil.JoinKey(s.deps.StoragePrefix, cf.ZipKey)
 		if err := s.deps.Storage.Delete(ctx, zipS3Key); err != nil {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("delete zip %s: %v", zipS3Key, err))
 			continue
@@ -287,7 +278,7 @@ func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error
 
 	var missingZips []string
 	for _, z := range zipNames {
-		key := joinKey(s.deps.StoragePrefix, z)
+		key := pathutil.JoinKey(s.deps.StoragePrefix, z)
 		if _, ok := inS3[key]; !ok {
 			missingZips = append(missingZips, z)
 		}
