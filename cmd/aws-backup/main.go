@@ -357,7 +357,7 @@ func runServe(cfgPath string) {
 	sched, err := scheduler.New(app.cfg.Backup.Schedule, func(ctx context.Context) error {
 		// POST /api/runs trigger. Direct call — we own the same DB/engine.
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/runs", nil)
-		w := &discardResponse{}
+		w := newDiscardResponse()
 		srv.Router().ServeHTTP(w, req)
 		return nil
 	}, logger)
@@ -400,11 +400,16 @@ func runServe(cfgPath string) {
 }
 
 // discardResponse is a minimal http.ResponseWriter for programmatic calls.
-type discardResponse struct{ status int }
+type discardResponse struct {
+	header http.Header
+	status int
+}
 
-func (d *discardResponse) Header() http.Header      { return http.Header{} }
+func newDiscardResponse() *discardResponse { return &discardResponse{header: make(http.Header)} }
+
+func (d *discardResponse) Header() http.Header       { return d.header }
 func (d *discardResponse) Write(b []byte) (int, error) { return len(b), nil }
-func (d *discardResponse) WriteHeader(s int)        { d.status = s }
+func (d *discardResponse) WriteHeader(s int)          { d.status = s }
 
 func runConfig(path string, args []string) {
 	if len(args) == 0 {

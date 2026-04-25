@@ -160,6 +160,17 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	s.currentRun = runID
 	s.currentRunCancel = cancel
 
+	// Ensure currentRun is cleared if we panic before the goroutine launches.
+	// The goroutine itself is responsible for clearing it on normal completion.
+	goroutineLaunched := false
+	defer func() {
+		if !goroutineLaunched {
+			s.currentRun = 0
+			s.currentRunCancel = nil
+			cancel()
+		}
+	}()
+
 	syncDBToS3 := s.deps.SyncDBToS3
 	logger := s.deps.Logger
 	go func() {
@@ -174,6 +185,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+	goroutineLaunched = true
 
 	writeJSON(w, http.StatusAccepted, triggerRunResponse{RunID: runID})
 }
