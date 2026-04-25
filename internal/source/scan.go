@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -125,7 +126,7 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 		}
 		stats.Missing = missing
 		if missing > 0 && log != nil {
-			log("marked missing: " + itoa(missing))
+			log("marked missing: " + strconv.FormatInt(missing, 10))
 		}
 	}
 	return stats, nil
@@ -149,24 +150,3 @@ func matchesAnyPath(relPath string, targets []string) bool {
 	return false
 }
 
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}

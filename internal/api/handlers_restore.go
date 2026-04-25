@@ -90,11 +90,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 				count++
 				bytes += f.Size
 			} else {
-				for req := range want {
-					if pathutil.HasPrefixPath(f.Path, req) {
+				for wantPath := range want {
+					if pathutil.HasPrefixPath(f.Path, wantPath) {
 						count++
 						bytes += f.Size
-						matched[req] = true
+						matched[wantPath] = true
 						break
 					}
 				}
@@ -105,9 +105,9 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !allFiles {
-		for req := range want {
-			if !matched[req] {
-				unknown = append(unknown, req)
+		for wantPath := range want {
+			if !matched[wantPath] {
+				unknown = append(unknown, wantPath)
 			}
 		}
 	}
