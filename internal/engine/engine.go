@@ -221,22 +221,44 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	// 3+4+5. process groups
-	// Seed per-directory zip counters from existing DB entries so new zips
-	// continue the sequence (_2, _3, …) instead of restarting at _1 and
-	// silently overwriting the previous archive.
+	// Seed per-directory zip counters so new zips continue the sequence
+	// (_2, _3, …) instead of restarting at _1 and silently overwriting the
+	// previous archive. We consult both the DB and S3 and take the max, so
+	// the counter survives DB corruption or a full wipe.
+	dirMaxN := map[string]int{}
+	seedDirMaxN := func(zipRelPath string) {
+		dir := path.Dir(zipRelPath)
+		if dir == "." {
+			dir = ""
+		}
+		if n := parseZipNumber(zipRelPath); n > dirMaxN[dir] {
+			dirMaxN[dir] = n
+		}
+	}
+
 	existingZips, err := e.opts.DB.ListZipNames(ctx)
 	if err != nil {
 		return db.RunFailed, fmt.Errorf("list zip names: %w", err)
 	}
-	dirMaxN := map[string]int{}
 	for _, z := range existingZips {
-		dir := path.Dir(z)
-		if dir == "." {
-			dir = ""
+		seedDirMaxN(z)
+	}
+
+	// Also scan S3 — ground truth when the DB is stale or empty.
+	s3Keys, err := e.opts.Storage.List(ctx, e.opts.KeyPrefix)
+	if err != nil {
+		return db.RunFailed, fmt.Errorf("list s3 keys: %w", err)
+	}
+	prefix := e.opts.KeyPrefix
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	for _, k := range s3Keys {
+		if !strings.HasSuffix(k, ".zip") {
+			continue
 		}
-		if n := parseZipNumber(z); n > dirMaxN[dir] {
-			dirMaxN[dir] = n
-		}
+		rel := strings.TrimPrefix(k, prefix)
+		seedDirMaxN(rel)
 	}
 
 	var uploaded, bytesUploaded int64
