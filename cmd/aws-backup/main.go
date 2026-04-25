@@ -211,6 +211,7 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		KeyPrefix:      a.cfg.S3.KeyPrefix,
 		ChunkSize:      a.cfg.Backup.ChunkSize,
 		ZipThresh:      a.cfg.Backup.ZipThreshold,
+		MinZipDirFiles: a.cfg.Backup.MinZipDirFiles,
 		ZipMaxBytes:    a.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: a.cfg.Backup.EnableZipIndex,
 		RetryFailed:    a.cfg.Backup.RetryFailed,

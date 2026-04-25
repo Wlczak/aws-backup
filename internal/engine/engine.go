@@ -55,6 +55,11 @@ type Options struct {
 	// boundaries; only loose files at one directory level that still
 	// exceed the cap get chunked into numbered parts. <= 0 disables.
 	ZipMaxBytes int64
+	// MinZipDirFiles is the minimum file count a subdirectory must have
+	// to be emitted as its own group during a size-cap split. Subdirs
+	// below this threshold are folded into the parent's loose-file pool
+	// to avoid producing many tiny zips. <= 0 disables the floor.
+	MinZipDirFiles int
 	// EnableZipIndex, when true, uploads a STANDARD-tier
 	// `{zipKey}.index.txt` sidecar next to each zip listing its
 	// entries. Default: true (set by New()).
@@ -227,7 +232,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		return db.RunCompleted, nil
 	}
 
-	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.ZipMaxBytes)
+	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.MinZipDirFiles, e.opts.ZipMaxBytes)
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("grouped %d files into %d top-level groups", len(pending), len(groups)))
 
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
