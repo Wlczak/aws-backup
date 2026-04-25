@@ -593,6 +593,42 @@ func listDistinctStrings(ctx context.Context, db interface {
 	return out, rows.Err()
 }
 
+// ReconcileZip marks files as uploaded when S3 confirms they are already
+// archived but the DB state was never committed (e.g. a crash between a
+// successful S3 put and the subsequent SetZipName/MarkUploadedBatch calls).
+// Only files whose status is pending, zipped, or failed and whose path
+// appears in paths are updated; already-uploaded rows are left untouched.
+// Returns the number of rows changed.
+func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key string, now time.Time) (int64, error) {
+	var total int64
+	for len(paths) > 0 {
+		chunk := paths
+		if len(chunk) > sqlChunkSize {
+			chunk = paths[:sqlChunkSize]
+		}
+		paths = paths[len(chunk):]
+
+		args := make([]any, 0, len(chunk)+4)
+		args = append(args, zipRel, s3Key, isoTime(now), StatusUploaded)
+		for _, p := range chunk {
+			args = append(args, p)
+		}
+		res, err := db.ExecContext(ctx,
+			`UPDATE files
+			   SET zip_name = ?, s3_key = ?, uploaded_at = ?, status = ?
+			 WHERE status IN ('pending', 'zipped', 'failed')
+			   AND path IN `+inPlaceholders(len(chunk)),
+			args...,
+		)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
 // MarkPendingByPaths resets files to pending by exact path match,
 // regardless of their current status. Used to force re-upload of files
 // that are present locally but absent from the cloud index.

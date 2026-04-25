@@ -371,6 +371,59 @@ func TestZipCounterContinuesSequence(t *testing.T) {
 	}
 }
 
+// TestEngineReconcileFromS3 simulates the crash window between a successful
+// S3 put and the DB commit: the zip and its index exist in S3 but the DB rows
+// are still pending. The next run must detect this via the index sidecars and
+// mark the files uploaded without creating a duplicate zip.
+func TestEngineReconcileFromS3(t *testing.T) {
+	eng, d, _, store, root, _ := newTestEngine(t, 3)
+	ctx := context.Background()
+
+	writeFile(t, root, "photos/a.jpg", "alpha")
+	writeFile(t, root, "photos/b.jpg", "bravo")
+	writeFile(t, root, "photos/c.jpg", "charlie")
+
+	// First run: uploads photos zip + index to S3 and marks DB uploaded.
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	keysAfterRun1 := store.Keys()
+
+	// Simulate the crash: reset all files back to pending (as if the DB
+	// commit after the successful S3 put never happened).
+	allFiles, _, _ := d.ListFiles(ctx, db.FilesFilter{All: true})
+	paths := make([]string, len(allFiles))
+	for i, f := range allFiles {
+		paths[i] = f.Path
+	}
+	if _, err := d.MarkPendingByPaths(ctx, paths); err != nil {
+		t.Fatalf("reset to pending: %v", err)
+	}
+
+	// Second run: reconcile should detect the existing zip+index in S3,
+	// mark files uploaded, and produce no new S3 objects.
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	keysAfterRun2 := store.Keys()
+	if len(keysAfterRun2) != len(keysAfterRun1) {
+		t.Errorf("S3 object count changed during reconcile run: before=%d after=%d\nbefore=%v\nafter=%v",
+			len(keysAfterRun1), len(keysAfterRun2), keysAfterRun1, keysAfterRun2)
+	}
+
+	// All files must be uploaded with zip_name set.
+	filesAfter, _, _ := d.ListFiles(ctx, db.FilesFilter{All: true})
+	for _, f := range filesAfter {
+		if f.Status != db.StatusUploaded {
+			t.Errorf("%s: status=%q want uploaded", f.Path, f.Status)
+		}
+		if f.ZipName == "" {
+			t.Errorf("%s: zip_name empty after reconcile", f.Path)
+		}
+	}
+}
+
 func TestEngineUsesClock(t *testing.T) {
 	eng, d, _, _, root, _ := newTestEngine(t, 10)
 	writeFile(t, root, "a.txt", "hi")

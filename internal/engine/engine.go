@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -203,7 +204,20 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		}
 	}
 
-	// Phase 2: gather pending files (upload phase).
+	// Phase 2: list S3 once — reused for reconciliation and counter seeding.
+	s3Keys, err := e.opts.Storage.List(ctx, e.opts.KeyPrefix)
+	if err != nil {
+		return db.RunFailed, fmt.Errorf("list s3 keys: %w", err)
+	}
+
+	// Reconcile DB against S3: any zip uploaded in a prior (partially-failed)
+	// run has an index sidecar. Files listed there but still pending or zipped
+	// in the DB are marked uploaded so listPending excludes them.
+	if err := e.reconcileFromS3(ctx, runID, s3Keys); err != nil {
+		return db.RunFailed, fmt.Errorf("reconcile from S3: %w", err)
+	}
+
+	// Phase 3: gather pending files (upload phase).
 	pending, err := e.listPending(ctx)
 	if err != nil {
 		return db.RunFailed, fmt.Errorf("list pending: %w", err)
@@ -220,7 +234,6 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		return db.RunFailed, fmt.Errorf("mkdir tmp: %w", err)
 	}
 
-	// 3+4+5. process groups
 	// Seed per-directory zip counters so new zips continue the sequence
 	// (_2, _3, …) instead of restarting at _1 and silently overwriting the
 	// previous archive. We consult both the DB and S3 and take the max, so
@@ -245,10 +258,6 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	// Also scan S3 — ground truth when the DB is stale or empty.
-	s3Keys, err := e.opts.Storage.List(ctx, e.opts.KeyPrefix)
-	if err != nil {
-		return db.RunFailed, fmt.Errorf("list s3 keys: %w", err)
-	}
 	prefix := e.opts.KeyPrefix
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -286,6 +295,76 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	return db.RunCompleted, nil
+}
+
+// reconcileFromS3 reads every zip index sidecar in S3 and, for each one
+// whose corresponding .zip object is also present, updates any DB rows that
+// are still pending/zipped/failed to uploaded. This recovers from the crash
+// window between a successful S3 put and the subsequent DB commit.
+func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []string) error {
+	prefix := e.opts.KeyPrefix
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	zipSet := make(map[string]struct{}, len(s3Keys))
+	for _, k := range s3Keys {
+		if strings.HasSuffix(k, ".zip") {
+			zipSet[k] = struct{}{}
+		}
+	}
+
+	var total int64
+	for _, k := range s3Keys {
+		if !strings.HasSuffix(k, zipIndexSuffix) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		zipKey := strings.TrimSuffix(k, zipIndexSuffix)
+		if _, ok := zipSet[zipKey]; !ok {
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: index %s has no matching zip, skipping", k))
+			continue
+		}
+		paths, err := e.readIndexPaths(ctx, k)
+		if err != nil {
+			return fmt.Errorf("reconcile: read %s: %w", k, err)
+		}
+		if len(paths) == 0 {
+			continue
+		}
+		zipRel := strings.TrimPrefix(zipKey, prefix)
+		n, err := e.opts.DB.ReconcileZip(ctx, paths, zipRel, zipKey, e.opts.Now())
+		if err != nil {
+			return fmt.Errorf("reconcile: db for %s: %w", zipKey, err)
+		}
+		if n > 0 {
+			total += n
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reconcile: marked %d files uploaded from %s", n, zipKey))
+		}
+	}
+	if total > 0 {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reconcile: %d files total recovered from S3 state", total))
+	}
+	return nil
+}
+
+func (e *Engine) readIndexPaths(ctx context.Context, indexKey string) ([]string, error) {
+	rc, err := e.opts.Storage.Get(ctx, indexKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var paths []string
+	sc := bufio.NewScanner(rc)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, sc.Err()
 }
 
 func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
