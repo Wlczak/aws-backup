@@ -16,3 +16,14 @@ updates:
       semver-major-days: 30
       semver-minor-days: 14
       semver-patch-days: 14
+  - package-ecosystem: npm
+    directory: "/" # Location of package manifests
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "08:00"
+    cooldown:
+      default-days: 30
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 14
