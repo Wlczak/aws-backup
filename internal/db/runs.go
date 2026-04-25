@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"time"
 )
 
@@ -21,90 +20,58 @@ const (
 	LogError = "error"
 )
 
-// Run is the typed row for the `runs` table.
+// Run is the GORM model for the `runs` table.
 type Run struct {
-	ID             int64
-	StartedAt      time.Time
-	FinishedAt     time.Time // zero = still running
-	Status         string
-	FilesScanned   int64
-	FilesUploaded  int64
-	BytesUploaded  int64
-	ErrorMessage   string
+	ID            int64     `gorm:"column:id;primaryKey;autoIncrement"`
+	StartedAt     time.Time `gorm:"column:started_at;not null;index"`
+	FinishedAt    time.Time `gorm:"column:finished_at"`
+	Status        string    `gorm:"column:status;not null;default:'running';index"`
+	FilesScanned  int64     `gorm:"column:files_scanned;not null;default:0"`
+	FilesUploaded int64     `gorm:"column:files_uploaded;not null;default:0"`
+	BytesUploaded int64     `gorm:"column:bytes_uploaded;not null;default:0"`
+	ErrorMessage  string    `gorm:"column:error_message"`
 }
 
-// RunLog is the typed row for `run_logs`.
+// RunLog is the GORM model for `run_logs`.
 type RunLog struct {
-	ID        int64
-	RunID     int64
-	Timestamp time.Time
-	Level     string
-	Message   string
+	ID        int64     `gorm:"column:id;primaryKey;autoIncrement"`
+	RunID     int64     `gorm:"column:run_id;not null;index"`
+	Timestamp time.Time `gorm:"column:timestamp;not null"`
+	Level     string    `gorm:"column:level;not null"`
+	Message   string    `gorm:"column:message;not null"`
 }
 
-// CreateRun inserts a new run row in `running` state.
+// CreateRun inserts a new run row in 'running' state. FinishedAt is omitted
+// so the column stays NULL until FinishRun is called.
 func (db *DB) CreateRun(ctx context.Context, startedAt time.Time) (int64, error) {
-	r, err := db.ExecContext(ctx,
-		`INSERT INTO runs (started_at, status) VALUES (?, ?)`,
-		isoTime(startedAt), RunRunning,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return r.LastInsertId()
+	run := Run{StartedAt: startedAt, Status: RunRunning}
+	err := db.g.WithContext(ctx).Omit("FinishedAt").Create(&run).Error
+	return run.ID, err
 }
 
 // UpdateRunStats bumps counters without touching status or finished_at.
 func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, uploaded, bytes int64) error {
-	_, err := db.ExecContext(ctx,
-		`UPDATE runs
-		   SET files_scanned = ?, files_uploaded = ?, bytes_uploaded = ?
-		 WHERE id = ?`,
-		scanned, uploaded, bytes, runID,
-	)
-	return err
+	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
+		"files_scanned":  scanned,
+		"files_uploaded": uploaded,
+		"bytes_uploaded": bytes,
+	}).Error
 }
 
 // FinishRun stamps finished_at and sets terminal status + optional error.
 func (db *DB) FinishRun(ctx context.Context, runID int64, status, errorMsg string, finishedAt time.Time) error {
-	var errPtr any
-	if errorMsg != "" {
-		errPtr = errorMsg
-	}
-	_, err := db.ExecContext(ctx,
-		`UPDATE runs
-		   SET finished_at = ?, status = ?, error_message = ?
-		 WHERE id = ?`,
-		isoTime(finishedAt), status, errPtr, runID,
-	)
-	return err
+	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
+		"finished_at":   finishedAt,
+		"status":        status,
+		"error_message": errorMsg,
+	}).Error
 }
 
-// GetRun returns a single run. Returns sql.ErrNoRows if id is unknown.
+// GetRun returns a single run. Returns gorm.ErrRecordNotFound if id is unknown.
 func (db *DB) GetRun(ctx context.Context, id int64) (Run, error) {
-	var (
-		r          Run
-		finishedAt sql.NullString
-		errMsg     sql.NullString
-		startedAt  string
-	)
-	err := db.QueryRowContext(ctx,
-		`SELECT id, started_at, finished_at, status,
-		        files_scanned, files_uploaded, bytes_uploaded, error_message
-		   FROM runs WHERE id = ?`, id,
-	).Scan(&r.ID, &startedAt, &finishedAt, &r.Status,
-		&r.FilesScanned, &r.FilesUploaded, &r.BytesUploaded, &errMsg)
-	if err != nil {
-		return r, err
-	}
-	r.StartedAt, _ = parseTime(startedAt)
-	if finishedAt.Valid {
-		r.FinishedAt, _ = parseTime(finishedAt.String)
-	}
-	if errMsg.Valid {
-		r.ErrorMessage = errMsg.String
-	}
-	return r, nil
+	var run Run
+	err := db.g.WithContext(ctx).First(&run, id).Error
+	return run, err
 }
 
 // ListRuns returns newest-first paginated runs plus total count.
@@ -116,48 +83,23 @@ func (db *DB) ListRuns(ctx context.Context, page, limit int) ([]Run, int64, erro
 		page = 1
 	}
 	var total int64
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&total); err != nil {
+	if err := db.g.WithContext(ctx).Model(&Run{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	rows, err := db.QueryContext(ctx,
-		`SELECT id, started_at, COALESCE(finished_at,''), status,
-		        files_scanned, files_uploaded, bytes_uploaded,
-		        COALESCE(error_message,'')
-		   FROM runs
-		 ORDER BY id DESC
-		 LIMIT ? OFFSET ?`,
-		limit, (page-1)*limit,
-	)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	var out []Run
-	for rows.Next() {
-		var (
-			r          Run
-			startedAt  string
-			finishedAt string
-		)
-		if err := rows.Scan(&r.ID, &startedAt, &finishedAt, &r.Status,
-			&r.FilesScanned, &r.FilesUploaded, &r.BytesUploaded, &r.ErrorMessage); err != nil {
-			return nil, 0, err
-		}
-		r.StartedAt, _ = parseTime(startedAt)
-		r.FinishedAt, _ = parseTime(finishedAt)
-		out = append(out, r)
-	}
-	return out, total, rows.Err()
+	var runs []Run
+	err := db.g.WithContext(ctx).
+		Order("id DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&runs).Error
+	return runs, total, err
 }
 
 // AppendLog writes a log line bound to a run.
 func (db *DB) AppendLog(ctx context.Context, runID int64, level, message string, at time.Time) error {
-	_, err := db.ExecContext(ctx,
-		`INSERT INTO run_logs (run_id, timestamp, level, message)
-		 VALUES (?, ?, ?, ?)`,
-		runID, isoTime(at), level, message,
-	)
-	return err
+	return db.g.WithContext(ctx).Create(&RunLog{
+		RunID: runID, Timestamp: at, Level: level, Message: message,
+	}).Error
 }
 
 // LogEntry is one buffered log line for AppendLogMany.
@@ -168,55 +110,25 @@ type LogEntry struct {
 	Message string
 }
 
-// AppendLogMany inserts many log rows in a single transaction. The engine
-// buffers log entries in memory and calls this periodically so per-file
-// log spam doesn't generate one WAL fsync per line.
+// AppendLogMany inserts many log rows in a single transaction.
 func (db *DB) AppendLogMany(ctx context.Context, entries []LogEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	logs := make([]RunLog, len(entries))
+	for i, e := range entries {
+		logs[i] = RunLog{RunID: e.RunID, Timestamp: e.At, Level: e.Level, Message: e.Message}
 	}
-	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO run_logs (run_id, timestamp, level, message) VALUES (?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, e := range entries {
-		if _, err := stmt.ExecContext(ctx, e.RunID, isoTime(e.At), e.Level, e.Message); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return db.g.WithContext(ctx).CreateInBatches(logs, 200).Error
 }
 
 // ListLogs returns all log lines for a run in chronological order.
 func (db *DB) ListLogs(ctx context.Context, runID int64) ([]RunLog, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT id, run_id, timestamp, level, message
-		   FROM run_logs
-		  WHERE run_id = ?
-		 ORDER BY id`, runID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []RunLog
-	for rows.Next() {
-		var (
-			l   RunLog
-			tsS string
-		)
-		if err := rows.Scan(&l.ID, &l.RunID, &tsS, &l.Level, &l.Message); err != nil {
-			return nil, err
-		}
-		l.Timestamp, _ = parseTime(tsS)
-		out = append(out, l)
-	}
-	return out, rows.Err()
+	var logs []RunLog
+	err := db.g.WithContext(ctx).
+		Where("run_id = ?", runID).
+		Order("id").
+		Find(&logs).Error
+	return logs, err
 }
+

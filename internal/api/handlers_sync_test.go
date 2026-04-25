@@ -49,15 +49,27 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Seed the DB: three scanned files, one of them (docs/spec.pdf) is
-	// marked zipped+uploaded; photos/a.jpg is marked standalone+uploaded;
-	// new-on-disk.txt is still pending. A fourth file (gone-locally) was
-	// uploaded then went missing.
+	// Seed gone-locally.txt first with a past seenAt so MarkMissing can
+	// target it by last_seen_at without affecting the other three files.
+	pastTime := now.Add(-time.Hour)
+	goneRes, err := d.UpsertFile(ctx, "gone-locally.txt", 1, pastTime, pastTime)
+	if err != nil {
+		t.Fatalf("seed gone-locally: %v", err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{goneRes.ID}, "md5", "backups/gone-locally.txt", pastTime); err != nil {
+		t.Fatalf("mark gone uploaded: %v", err)
+	}
+	// MarkMissing flips rows whose last_seen_at < now; gone-locally qualifies.
+	// s3_key is preserved so ListIndividualS3Keys still returns it.
+	if _, err := d.MarkMissing(ctx, now); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+
+	// Seed the remaining three files.
 	seed := []db.BatchEntry{
 		{Path: "photos/a.jpg", Size: 10, ModTime: now},
 		{Path: "docs/spec.pdf", Size: 20, ModTime: now},
 		{Path: "new-on-disk.txt", Size: 5, ModTime: now},
-		{Path: "gone-locally.txt", Size: 1, ModTime: now},
 	}
 	res, err := d.UpsertFileBatch(ctx, seed, now)
 	if err != nil {
@@ -78,17 +90,6 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/spec.pdf"]}, "md5", "backups/docs/docs_1.zip", now); err != nil {
 		t.Fatalf("mark docs uploaded: %v", err)
-	}
-	// gone-locally: uploaded then flagged missing by a later scan.
-	if err := d.MarkUploadedBatch(ctx, []int64{ids["gone-locally.txt"]}, "md5", "backups/gone-locally.txt", now); err != nil {
-		t.Fatalf("mark gone uploaded: %v", err)
-	}
-	if _, err := d.MarkPendingByS3Keys(ctx, []string{}); err != nil {
-		t.Fatal(err)
-	}
-	// Flip gone-locally to "missing" directly via a targeted update.
-	if _, err := d.DB.ExecContext(ctx, `UPDATE files SET status='missing' WHERE path='gone-locally.txt'`); err != nil {
-		t.Fatalf("mark missing: %v", err)
 	}
 
 	// Seed S3: the zip + its index, the standalone file, and one
