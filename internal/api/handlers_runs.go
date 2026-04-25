@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -80,8 +81,12 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := s.deps.DB.GetRun(r.Context(), id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeError(w, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	logs, err := s.deps.DB.ListLogs(r.Context(), id)

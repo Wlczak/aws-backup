@@ -227,7 +227,7 @@ GET  /*                         — embedded Svelte SPA
 
 | Decision | Rationale |
 |---|---|
-| `modernc.org/sqlite` (CGO-free) | Cross-compile without CGO toolchain |
+| GORM + `github.com/glebarez/sqlite` | CGO-free ORM; AutoMigrate owns schema, no schema.sql |
 | STANDARD tier for `.index.txt` | Instant listing of zip contents without Glacier restore |
 | Zip counter seeded from DB **and** S3 | Survives DB wipe; no silent overwrites |
 | S3 reconcile before listPending | Idempotent retry after crash between S3 put and DB commit |

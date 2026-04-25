@@ -61,15 +61,16 @@ type dirNode struct {
 //     individual uploads).
 //  3. If a subtree is too big, recurse into each child subdirectory —
 //     so `photos/2024/` and `photos/2025/` become separate zips instead
-//     of one monolithic `photos_1.zip`.
-//  4. Files sitting directly at a splitting level ("loose files") are
-//     their own group; if they collectively still exceed maxBytes they
-//     are chunked by size — this only happens when a single directory
-//     holds more than maxBytes of loose files.
+//     of one monolithic `photos_1.zip`. Child subdirectories with fewer
+//     than minZipDirFiles files are folded into the parent's loose-file
+//     pool instead of becoming tiny standalone groups.
+//  4. Files sitting directly at a splitting level ("loose files"), plus
+//     any folded small-child files, form their own group; if they
+//     collectively exceed maxBytes they are chunked by size.
 //
-// maxBytes <= 0 disables the size cap (subtrees at any depth can form
-// one group). Groups are returned in deterministic path order.
-func GroupFiles(files []PendingFile, zipThreshold int, maxBytes int64) []Group {
+// maxBytes <= 0 disables the size cap. minZipDirFiles <= 0 disables the
+// small-child folding. Groups are returned in deterministic path order.
+func GroupFiles(files []PendingFile, zipThreshold, minZipDirFiles int, maxBytes int64) []Group {
 	if zipThreshold <= 0 {
 		zipThreshold = 1
 	}
@@ -82,7 +83,7 @@ func GroupFiles(files []PendingFile, zipThreshold int, maxBytes int64) []Group {
 	// Root always descends into its children so each top-level directory
 	// is a natural group boundary, independent of the size cap. The cap
 	// only drives further splits inside a top-level subtree.
-	walkTree(root, "", zipThreshold, maxBytes, true, &out)
+	walkTree(root, "", zipThreshold, minZipDirFiles, maxBytes, true, &out)
 	return out
 }
 
@@ -122,7 +123,7 @@ func buildTree(files []PendingFile) *dirNode {
 // to this node ("" for root). mustDescend forces the split at this level
 // even if the subtree would fit in the cap — set at root so top-level
 // directories are always their own groups regardless of cap settings.
-func walkTree(n *dirNode, pathPrefix string, zipThreshold int, maxBytes int64, mustDescend bool, out *[]Group) {
+func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, maxBytes int64, mustDescend bool, out *[]Group) {
 	// Subtree fits in the cap — emit the whole thing as one group.
 	if !mustDescend && (maxBytes <= 0 || n.size <= maxBytes) {
 		files := collectSubtree(n)
@@ -140,34 +141,42 @@ func walkTree(n *dirNode, pathPrefix string, zipThreshold int, maxBytes int64, m
 
 	// Descend into each child subdir so subfolders become the group
 	// boundary (e.g. photos/2024/ vs photos/2025/) instead of numbered
-	// slices of a flat top-dir.
+	// slices of a flat top-dir. Children with fewer than minZipDirFiles
+	// files (only when not at the forced root level) are folded into
+	// this level's loose-file pool rather than becoming tiny groups.
 	childNames := make([]string, 0, len(n.children))
 	for name := range n.children {
 		childNames = append(childNames, name)
 	}
 	sort.Strings(childNames)
+
+	var folded []PendingFile
 	for _, name := range childNames {
 		child := n.children[name]
 		childPrefix := name
 		if pathPrefix != "" {
 			childPrefix = pathPrefix + "/" + name
 		}
-		walkTree(child, childPrefix, zipThreshold, maxBytes, false, out)
+		if !mustDescend && minZipDirFiles > 0 && child.count < minZipDirFiles {
+			folded = append(folded, collectSubtree(child)...)
+			continue
+		}
+		walkTree(child, childPrefix, zipThreshold, minZipDirFiles, maxBytes, false, out)
 	}
 
-	// Loose files at this level (not in any subdir) form their own
-	// group. If they alone exceed the cap, chunk them by size.
-	if len(n.files) == 0 {
+	// Loose files at this level plus any folded small-child files form
+	// their own group. If they exceed the cap, chunk them by size.
+	loose := append(append([]PendingFile(nil), n.files...), folded...)
+	if len(loose) == 0 {
 		return
 	}
-	loose := append([]PendingFile(nil), n.files...)
 	sort.Slice(loose, func(i, j int) bool { return loose[i].RelPath < loose[j].RelPath })
 
 	var looseSize int64
 	for _, f := range loose {
 		looseSize += f.Size
 	}
-	if looseSize <= maxBytes {
+	if maxBytes <= 0 || looseSize <= maxBytes {
 		*out = append(*out, Group{
 			TopDir: pathPrefix,
 			Zip:    len(loose) >= zipThreshold,

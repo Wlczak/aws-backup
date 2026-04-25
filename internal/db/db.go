@@ -1,75 +1,74 @@
 // Package db owns the sqlite index: schema, migrations, and typed queries.
 //
-// Uses modernc.org/sqlite (pure Go) so cross-compiling needs no CGO.
+// Uses github.com/glebarez/sqlite (pure Go, no CGO) so cross-compiling
+// works without a C toolchain. Schema management is handled by GORM's
+// AutoMigrate, removing the need for an embedded schema.sql.
 package db
 
 import (
 	"context"
-	"database/sql"
-	_ "embed"
 	"fmt"
-	"time"
 
-	_ "modernc.org/sqlite"
+	gsqlite "github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
-//go:embed schema.sql
-var schemaSQL string
-
-// DB wraps *sql.DB with a stable, typed query surface.
+// DB wraps *gorm.DB with a stable, typed query surface.
 type DB struct {
-	*sql.DB
+	g *gorm.DB
 }
 
 // Open returns a ready-to-use DB connected to path (":memory:" works for tests).
-// It runs the embedded schema and enables WAL journaling for on-disk files.
+// WAL mode and foreign keys are enabled for on-disk databases.
 func Open(ctx context.Context, path string) (*DB, error) {
-	sqldb, err := sql.Open("sqlite", path)
+	gdb, err := gorm.Open(gsqlite.Open(path), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	sqldb.SetMaxOpenConns(1) // modernc sqlite is safer with a single writer
-	if err := sqldb.PingContext(ctx); err != nil {
-		sqldb.Close()
-		return nil, fmt.Errorf("ping %s: %w", path, err)
+
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get sql.DB: %w", err)
 	}
+	sqlDB.SetMaxOpenConns(1)
 
 	if path != ":memory:" {
-		if _, err := sqldb.ExecContext(ctx, "PRAGMA journal_mode=WAL;"); err != nil {
-			sqldb.Close()
+		if err := gdb.WithContext(ctx).Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+			sqlDB.Close()
 			return nil, fmt.Errorf("enable WAL: %w", err)
 		}
 	}
-	if _, err := sqldb.ExecContext(ctx, "PRAGMA foreign_keys=ON;"); err != nil {
-		sqldb.Close()
+	if err := gdb.WithContext(ctx).Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	if err := gdb.WithContext(ctx).Exec("PRAGMA foreign_keys=ON").Error; err != nil {
+		sqlDB.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	if _, err := sqldb.ExecContext(ctx, schemaSQL); err != nil {
-		sqldb.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+	if err := gdb.WithContext(ctx).AutoMigrate(&File{}, &Run{}, &RunLog{}, &Setting{}); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	return &DB{DB: sqldb}, nil
+	return &DB{g: gdb}, nil
+}
+
+// Close releases the database connection.
+func (db *DB) Close() error {
+	sqlDB, err := db.g.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
 // Checkpoint flushes the WAL file into the main database file so the
-// .db can be uploaded to S3 as a consistent snapshot. Safe to call while
-// the database is open; other connections continue to work normally.
+// .db can be uploaded to S3 as a consistent snapshot.
 func (db *DB) Checkpoint(ctx context.Context) error {
-	_, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE);")
-	return err
-}
-
-// isoTime formats t in RFC3339Nano so it sorts lexicographically.
-func isoTime(t time.Time) string {
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-// parseTime is the inverse of isoTime; zero value on empty input.
-func parseTime(s string) (time.Time, error) {
-	if s == "" {
-		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339Nano, s)
+	return db.g.WithContext(ctx).Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
 }

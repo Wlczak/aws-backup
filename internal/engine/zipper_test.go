@@ -22,7 +22,7 @@ func TestGroupFiles(t *testing.T) {
 	}
 
 	// Threshold 3, no size cap -> photos qualifies, docs does not, root does not.
-	groups := GroupFiles(files, 3, 0)
+	groups := GroupFiles(files, 3, 0, 0)
 	if len(groups) != 3 {
 		t.Fatalf("want 3 groups, got %d", len(groups))
 	}
@@ -56,7 +56,7 @@ func TestGroupFilesSizeCap(t *testing.T) {
 	}
 	// threshold 2, cap 2000 bytes -> 2024 = 1600B, 2025 = 1600B, both
 	// under cap as subtrees; media/ together = 3200B, over cap.
-	groups := GroupFiles(files, 2, 2000)
+	groups := GroupFiles(files, 2, 0, 2000)
 	if len(groups) != 2 {
 		t.Fatalf("want 2 groups (one per year), got %d: %+v", len(groups), groups)
 	}
@@ -82,7 +82,7 @@ func TestGroupFilesSizeCapChunksLooseFiles(t *testing.T) {
 		{ID: 5, RelPath: "bulk/e", Size: 500},
 		{ID: 6, RelPath: "bulk/f", Size: 500},
 	}
-	groups := GroupFiles(files, 2, 1200)
+	groups := GroupFiles(files, 2, 0, 1200)
 	if len(groups) != 3 {
 		t.Fatalf("want 3 chunks, got %d", len(groups))
 	}
@@ -105,7 +105,7 @@ func TestGroupFilesSingleFileOverCap(t *testing.T) {
 		{ID: 1, RelPath: "huge/one.bin", Size: 10_000_000_000}, // 10 GB
 		{ID: 2, RelPath: "huge/two.bin", Size: 100},
 	}
-	groups := GroupFiles(files, 2, 1<<30) // 1 GB cap
+	groups := GroupFiles(files, 2, 0, 1<<30) // 1 GB cap
 	var haveIndividual bool
 	for _, g := range groups {
 		for _, f := range g.Files {
@@ -116,6 +116,58 @@ func TestGroupFilesSingleFileOverCap(t *testing.T) {
 	}
 	if !haveIndividual {
 		t.Errorf("oversized file should land in an individual (non-zipped) group: %+v", groups)
+	}
+}
+
+func TestGroupFilesMinZipDirFiles(t *testing.T) {
+	// media/ exceeds the 2000-byte cap, so it would normally split into
+	// three subdirs. With minZipDirFiles=3, the two small subdirs (2 files
+	// each) are folded back into media/'s loose pool and chunked together,
+	// while the large subdir (4 files) becomes its own group.
+	files := []PendingFile{
+		{ID: 1, RelPath: "media/small1/a.mov", Size: 400},
+		{ID: 2, RelPath: "media/small1/b.mov", Size: 400},
+		{ID: 3, RelPath: "media/small2/c.mov", Size: 400},
+		{ID: 4, RelPath: "media/small2/d.mov", Size: 400},
+		{ID: 5, RelPath: "media/big/e.mov", Size: 600},
+		{ID: 6, RelPath: "media/big/f.mov", Size: 600},
+		{ID: 7, RelPath: "media/big/g.mov", Size: 600},
+		{ID: 8, RelPath: "media/big/h.mov", Size: 600},
+	}
+	// Total = 4000B > cap=2000B; big/=2400B > cap; small subdirs=800B each.
+	// minZipDirFiles=3: small1 (2 files) and small2 (2 files) get folded.
+	groups := GroupFiles(files, 2, 3, 2000)
+
+	byTop := map[string][]PendingFile{}
+	for _, g := range groups {
+		byTop[g.TopDir] = append(byTop[g.TopDir], g.Files...)
+	}
+
+	// big/ should be its own group (4 files >= 3).
+	if len(byTop["media/big"]) != 4 {
+		t.Errorf("media/big: want 4 files, got %d (groups=%+v)", len(byTop["media/big"]), groups)
+	}
+	// small1/ and small2/ should be folded into media/ loose files —
+	// they must NOT appear as their own groups.
+	if _, ok := byTop["media/small1"]; ok {
+		t.Error("media/small1 should be folded, not its own group")
+	}
+	if _, ok := byTop["media/small2"]; ok {
+		t.Error("media/small2 should be folded, not its own group")
+	}
+	// All 4 folded files (ids 1-4) must appear somewhere under media/.
+	mediaFiles := map[int64]bool{}
+	for _, g := range groups {
+		if g.TopDir == "media" || g.TopDir == "" {
+			for _, f := range g.Files {
+				mediaFiles[f.ID] = true
+			}
+		}
+	}
+	for _, id := range []int64{1, 2, 3, 4} {
+		if !mediaFiles[id] {
+			t.Errorf("folded file id=%d missing from media loose groups", id)
+		}
 	}
 }
 
