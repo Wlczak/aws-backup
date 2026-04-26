@@ -357,6 +357,7 @@ When fixing a GitHub issue:
 | #125 | 86a44f7 | `syncDBToS3` calls `Storage.PutStandard` so the DB sidecar lands in STANDARD tier (read on every restart) |
 | #126 | 2613de2 | New `upload_plan` event carries `{total_files, total_groups, total_bytes}` after `listPending` + `GroupFiles`; Dashboard ProgressBar uses this as denominator instead of `uploads.started` |
 | #124 | 601cce6 | New `POST /api/runs/:id/stop` graceful-stop endpoint + `db.RunStopped` status; engine polls `Options.StopRequested` between groups/files and exits cleanly via `ErrStopRequested`; UI gains separate **Stop** + **Force cancel** buttons |
+| —    | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase; `copyAndHash` + `CreateZip` accept a wrap closure; Dashboard tracks a phase field per item and renders a "copying"/"uploading" sublabel |
 
 ---
 
