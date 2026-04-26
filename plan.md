@@ -316,6 +316,11 @@ When fixing a GitHub issue:
 | #60 | 8589466 | CLI `runBackup` passes `MinZipDirFiles` to `engine.New` |
 | #95 | 8589466 | `processZipGroup` uploads `.index.txt` sidecar before the zip |
 | #98 | 8589466 | `handleRestoreEstimate` filters by `uploaded`/`zipped` status |
+| #61 | 9d88159 | `subscribeEvents` accepts onStatus callback for connect/disconnect signals |
+| #62 | 9d88159 | S3 `Put` routes >5 GiB / unknown-size bodies through multipart uploader |
+| #81 | 9d88159 | Per-file upload errors skipped; only all-groups-failed marks run failed |
+| #83 | 9d88159 | `writeBuffer.flush` requeues on error; inline flushes log + retry |
+| #84 | 9d88159 | `MarkZipUploadedBatch` collapses zip+upload DB writes into one txn |
 
 ---
 
