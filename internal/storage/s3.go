@@ -11,7 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	tmtypes "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -37,7 +38,7 @@ type S3Config struct {
 // S3Storage is the real S3 / MinIO backend.
 type S3Storage struct {
 	client       *s3.Client
-	uploader     *manager.Uploader
+	uploader     *transfermanager.Client
 	bucket       string
 	storageClass s3types.StorageClass
 }
@@ -74,7 +75,7 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 
 	return &S3Storage{
 		client:       client,
-		uploader:     manager.NewUploader(client),
+		uploader:     transfermanager.New(client),
 		bucket:       cfg.Bucket,
 		storageClass: s3types.StorageClass(cfg.StorageClass),
 	}, nil
@@ -191,12 +192,12 @@ func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader
 // bug or off-by-one in DEEP_ARCHIVE storage stays undetected for years
 // until the operator tries to restore. (#109)
 func (s *S3Storage) uploadMultipart(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
-	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
+	out, err := s.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		Body:              body,
-		StorageClass:      class,
-		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
+		StorageClass:      tmtypes.StorageClass(class),
+		ChecksumAlgorithm: tmtypes.ChecksumAlgorithmSha256,
 	})
 	if err != nil {
 		return PutResult{}, err
