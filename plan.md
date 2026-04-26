@@ -306,6 +306,11 @@ When fixing a GitHub issue:
 | #93 | ac6714a | `runWithID` returns real `runErr` even when `FinishRun` fails |
 | #97 | ac6714a | `Storage.List` callers normalize prefix via `pathutil.NormalizeS3ListPrefix` |
 | #100 | ac6714a | `handleTriggerRun` goroutine defers `cancel()` to release run context |
+| #82 | 031f359 | `MarkMissing` now includes `pending` and `failed` rows |
+| #86 | 031f359 | `downloadDBFromS3` writes atomically via `.part` + rename |
+| #89 | 031f359 | `handlePutSettings` surfaces rollback errors instead of dropping them |
+| #90 | 031f359 | `source.Scan` cancels walker via `WithCancelCause` on flush failure |
+| #96 | 031f359 | `LoadCloudIndex` skips `.index.txt` sidecars whose zip is missing |
 
 ---
 
