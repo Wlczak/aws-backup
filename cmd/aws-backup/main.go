@@ -239,9 +239,12 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 // applySettings hot-swaps source, storage, and scheduler when the
 // corresponding config section changes. Called by the API after a
 // successful PUT /api/settings. All pre-checks happen before any swap
-// so a failed step never leaves partial state; in-flight runs keep
-// their captured src/store references (old instances are GC'd once
-// every run that captured them finishes).
+// so a failed step never leaves partial state.
+//
+// handlePutSettings holds runMu for the duration of this call and
+// refuses to run while a backup is in progress, so closing the
+// swapped-out src/store eagerly is safe — no engine.Engine can still
+// hold a reference to them.
 func (a *appState) applySettings(ctx context.Context, prev, next config.Config) error {
 	var (
 		newSrc   source.Source
@@ -278,13 +281,17 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	}
 
 	a.mu.Lock()
+	var oldSrc source.Source
+	var oldStore storage.Storage
 	if newSrc != nil {
+		oldSrc = a.src
 		a.src = newSrc
 		if a.logger != nil {
 			a.logger.Info("source hot-swapped", "type", next.Source.Type)
 		}
 	}
 	if newStore != nil {
+		oldStore = a.store
 		a.store = newStore
 		if a.logger != nil {
 			a.logger.Info("storage hot-swapped", "endpoint", next.S3.Endpoint, "bucket", next.S3.Bucket)
@@ -293,6 +300,19 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	a.cfg = next
 	sched := a.sched
 	a.mu.Unlock()
+
+	// Close swapped-out instances eagerly; no in-flight run holds them
+	// because handlePutSettings refuses to run while currentRun != 0.
+	if oldSrc != nil {
+		if err := oldSrc.Close(); err != nil && a.logger != nil {
+			a.logger.Warn("close old source after settings swap", "err", err)
+		}
+	}
+	if oldStore != nil {
+		if err := oldStore.Close(); err != nil && a.logger != nil {
+			a.logger.Warn("close old storage after settings swap", "err", err)
+		}
+	}
 
 	if scheduleChanged && sched != nil {
 		if err := sched.Update(next.Backup.Schedule); err != nil {
@@ -413,6 +433,12 @@ func runServe(cfgPath string) {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown", "error", err)
+	}
+	// httpSrv.Shutdown only waits for HTTP handlers; the engine goroutine
+	// spawned by POST /api/runs is detached. Cancel any in-flight run and
+	// wait for it before app.close() tears down DB and storage.
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("engine shutdown", "error", err)
 	}
 }
 

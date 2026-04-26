@@ -18,13 +18,14 @@ type testResult struct {
 // localdir that means the root exists and is a directory; the real SMB
 // impl plugs in its own check in feature 18.
 func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
-	if s.deps.Config == nil {
+	cfg, ok := s.snapshotConfig()
+	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
-	switch s.deps.Config.Source.Type {
+	switch cfg.Source.Type {
 	case config.SourceLocalDir:
-		root := s.deps.Config.Source.LocalDir.Root
+		root := cfg.Source.LocalDir.Root
 		st, err := os.Stat(root)
 		if err != nil {
 			writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
@@ -36,7 +37,7 @@ func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "localdir root reachable"})
 	case config.SourceSMB:
-		smb, err := source.FromConfig(s.deps.Config.Source)
+		smb, err := source.FromConfig(cfg.Source)
 		if err != nil {
 			writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
 			return
@@ -52,11 +53,12 @@ func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
 // endpoints (the ones aws-backup is configured against today) and
 // otherwise reports "not yet wired" to avoid accidentally reaching real AWS.
 func (s *Server) handleTestStorage(w http.ResponseWriter, _ *http.Request) {
-	if s.deps.Config == nil {
+	cfg, ok := s.snapshotConfig()
+	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
-	endpoint := s.deps.Config.S3.Endpoint
+	endpoint := cfg.S3.Endpoint
 	if endpoint == "" {
 		writeJSON(w, http.StatusOK, testResult{
 			OK:      false,

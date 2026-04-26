@@ -56,6 +56,13 @@ type Server struct {
 	runMu            sync.Mutex
 	currentRun       int64 // 0 when idle
 	currentRunCancel context.CancelFunc
+	// runWg tracks engine goroutines spawned by handleTriggerRun so the
+	// CLI can wait for them on shutdown before tearing down DB / storage.
+	runWg sync.WaitGroup
+
+	// cfgMu guards reads/writes of deps.Config (the pointee) and
+	// deps.StoragePrefix, both of which can be replaced by handlePutSettings.
+	cfgMu sync.RWMutex
 
 	// statsCache coalesces /api/files/stats across poll-heavy UI clients
 	// so a full-table COUNT/SUM doesn't hit the DB more than once every
@@ -63,6 +70,67 @@ type Server struct {
 	statsMu     sync.Mutex
 	statsValue  db.FileStats
 	statsExpiry time.Time
+}
+
+// snapshotConfig returns a copy of the live config, plus a "loaded" flag.
+// Callers should never share the returned value across the lock; mutate-
+// then-write paths must use updateConfig.
+func (s *Server) snapshotConfig() (config.Config, bool) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.deps.Config == nil {
+		return config.Config{}, false
+	}
+	return *s.deps.Config, true
+}
+
+// storagePrefix returns the live S3 key prefix.
+func (s *Server) storagePrefix() string {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.deps.StoragePrefix
+}
+
+// updateConfig atomically replaces both deps.Config (pointee) and
+// deps.StoragePrefix so concurrent readers always see a consistent pair.
+func (s *Server) updateConfig(c config.Config) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if s.deps.Config != nil {
+		*s.deps.Config = c
+	}
+	s.deps.StoragePrefix = c.S3.KeyPrefix
+}
+
+// setStoragePrefix is the rollback-only path for handlePutSettings; updateConfig
+// covers the success path.
+func (s *Server) setStoragePrefix(p string) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	s.deps.StoragePrefix = p
+}
+
+// Shutdown cancels any in-flight engine run and waits for the run goroutine
+// to finish (bounded by ctx). Call before tearing down DB / Storage so the
+// engine doesn't hit closed handles mid-write.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.runMu.Lock()
+	if s.currentRunCancel != nil {
+		s.currentRunCancel()
+	}
+	s.runMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.runWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // statsCacheTTL bounds staleness of the cached /api/files/stats response.

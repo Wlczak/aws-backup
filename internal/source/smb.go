@@ -131,7 +131,11 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 }
 
 // Open returns a ReadCloser for relPath (relative to the configured root).
-func (s *SMB) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+// If the cached SMB session has gone stale (idle timeout, server-side
+// drop, transient network blip) the first Open call after the failure
+// re-dials and re-mounts the share once before giving up — long backups
+// shouldn't die because the share was idle during a slow zip.
+func (s *SMB) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	root := s.rootPath()
 	clean := path.Clean("/" + strings.TrimPrefix(relPath, "/"))
 	full := clean
@@ -144,10 +148,97 @@ func (s *SMB) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f, err := s.share.Open(full)
-	if err != nil {
+	if err == nil {
+		return f, nil
+	}
+	if !isSMBSessionError(err) {
 		return nil, fmt.Errorf("smb open %s: %w", full, err)
 	}
+	// One reconnect attempt. If it fails, surface the original error so
+	// the caller doesn't lose the failure mode.
+	if rerr := s.reconnectLocked(ctx); rerr != nil {
+		return nil, fmt.Errorf("smb open %s: %w (reconnect failed: %v)", full, err, rerr)
+	}
+	f, err = s.share.Open(full)
+	if err != nil {
+		return nil, fmt.Errorf("smb open %s after reconnect: %w", full, err)
+	}
 	return f, nil
+}
+
+// isSMBSessionError reports whether err looks like a session-/connection-
+// level failure that a reconnect can recover from. Conservative: anything
+// network-y (EOF, broken pipe, connection reset, deadline exceeded) plus
+// the smb2 "session expired" wrapper. False positives just retry; false
+// negatives skip the retry and surface the original error unchanged.
+func isSMBSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"broken pipe",
+		"connection reset",
+		"connection refused",
+		"use of closed network connection",
+		"session expired",
+		"session not found",
+		"reset by peer",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconnectLocked tears down the existing connection (best-effort) and
+// dials + mounts a fresh one. Caller must hold s.mu.
+func (s *SMB) reconnectLocked(ctx context.Context) error {
+	if s.share != nil {
+		_ = s.share.Umount()
+		s.share = nil
+	}
+	if s.sess != nil {
+		_ = s.sess.Logoff()
+		s.sess = nil
+	}
+	if s.conn != nil {
+		_ = s.conn.Close()
+		s.conn = nil
+	}
+
+	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	dialer := &net.Dialer{Timeout: s.cfg.DialTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	d := &smb2.Dialer{
+		Initiator: &smb2.NTLMInitiator{
+			User:     s.cfg.Username,
+			Password: s.cfg.Password,
+			Domain:   s.cfg.Domain,
+		},
+	}
+	sess, err := d.Dial(conn)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("authenticate: %w", err)
+	}
+	share, err := sess.Mount(s.cfg.Share)
+	if err != nil {
+		sess.Logoff()
+		conn.Close()
+		return fmt.Errorf("mount %s: %w", s.cfg.Share, err)
+	}
+	s.conn = conn
+	s.sess = sess
+	s.share = share
+	return nil
 }
 
 // Close logs off the SMB session and closes the underlying TCP connection.

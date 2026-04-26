@@ -191,7 +191,7 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
 		DB:        s.deps.DB,
 		Storage:   s.deps.Storage,
-		KeyPrefix: s.deps.StoragePrefix,
+		KeyPrefix: s.storagePrefix(),
 		TargetDir: req.TargetDir,
 		Paths:     req.Paths,
 	})

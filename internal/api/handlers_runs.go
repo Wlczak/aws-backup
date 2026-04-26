@@ -178,7 +178,9 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 
 	syncDBToS3 := s.deps.SyncDBToS3
 	logger := s.deps.Logger
+	s.runWg.Add(1)
 	go func() {
+		defer s.runWg.Done()
 		// Release the run context regardless of how RunWithID returned, so
 		// the WithCancel chain doesn't leak goroutines/timers per run.
 		defer cancel()

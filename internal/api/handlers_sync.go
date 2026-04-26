@@ -83,7 +83,8 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, s.deps.StoragePrefix, indivKeys)
+	prefix := s.storagePrefix()
+	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, prefix, indivKeys)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
 		return
@@ -181,7 +182,8 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("list individual keys: %w", err))
 		return
 	}
-	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, s.deps.StoragePrefix, indivKeys)
+	prefix := s.storagePrefix()
+	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, prefix, indivKeys)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
 		return
@@ -238,7 +240,7 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		// Delete the zip and its .index.txt sidecar.
-		zipS3Key := pathutil.JoinKey(s.deps.StoragePrefix, cf.ZipKey)
+		zipS3Key := pathutil.JoinKey(prefix, cf.ZipKey)
 		if err := s.deps.Storage.Delete(ctx, zipS3Key); err != nil {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("delete zip %s: %v", zipS3Key, err))
 			continue
@@ -266,7 +268,8 @@ func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error
 		return syncResponse{}, fmt.Errorf("list individual keys: %w", err)
 	}
 
-	s3Keys, err := s.deps.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(s.deps.StoragePrefix))
+	prefix := s.storagePrefix()
+	s3Keys, err := s.deps.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(prefix))
 	if err != nil {
 		return syncResponse{}, fmt.Errorf("list s3 keys: %w", err)
 	}
@@ -278,7 +281,7 @@ func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error
 
 	var missingZips []string
 	for _, z := range zipNames {
-		key := pathutil.JoinKey(s.deps.StoragePrefix, z)
+		key := pathutil.JoinKey(prefix, z)
 		if _, ok := inS3[key]; !ok {
 			missingZips = append(missingZips, z)
 		}

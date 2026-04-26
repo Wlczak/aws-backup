@@ -9,11 +9,12 @@ import (
 )
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
-	if s.deps.Config == nil {
+	cfg, ok := s.snapshotConfig()
+	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Config.Redacted())
+	writeJSON(w, http.StatusOK, cfg.Redacted())
 }
 
 // handlePutSettings accepts a full Config in the body. Fields equal to
@@ -24,17 +25,34 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 // Save to disk -> update in-memory Config. Any step can fail; failures
 // after ApplySettings try to roll back by calling it again with the
 // original config.
+//
+// Refuses to run while a backup is in progress: the hot-swap closes the
+// previously-active Source/Storage handles, which would break a run
+// holding references to them. 409 the caller and let them retry.
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Config == nil {
+	prev, ok := s.snapshotConfig()
+	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
+
+	s.runMu.Lock()
+	if s.currentRun != 0 {
+		current := s.currentRun
+		s.runMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":          "cannot change settings while a backup run is in progress",
+			"current_run_id": current,
+		})
+		return
+	}
+	defer s.runMu.Unlock()
+
 	var next config.Config
 	if err := decodeJSON(r, &next); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
 		return
 	}
-	prev := *s.deps.Config
 	merged := mergeSecrets(next, prev)
 	if err := merged.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -59,7 +77,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			if s.deps.ApplySettings != nil {
 				rollbackErr = s.deps.ApplySettings(merged, prev)
 			}
-			s.deps.StoragePrefix = prev.S3.KeyPrefix
+			s.setStoragePrefix(prev.S3.KeyPrefix)
 			if rollbackErr != nil {
 				if s.deps.Logger != nil {
 					s.deps.Logger.Error("settings rollback failed after save error",
@@ -74,8 +92,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	*s.deps.Config = merged
-	s.deps.StoragePrefix = merged.S3.KeyPrefix
+	s.updateConfig(merged)
 	writeJSON(w, http.StatusOK, merged.Redacted())
 }
 
