@@ -2,8 +2,10 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -15,7 +17,7 @@ import (
 
 func TestSSEDeliversEvents(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus))
+	srv := httptest.NewServer(sseHandler(bus, slog.Default()))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -50,7 +52,7 @@ func TestSSEDeliversEvents(t *testing.T) {
 
 func TestSSECleansUpOnDisconnect(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus))
+	srv := httptest.NewServer(sseHandler(bus, slog.Default()))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -99,6 +101,49 @@ func readNextEvent(r io.Reader, timeout time.Duration) (sseFrame, error) {
 		return r.f, r.err
 	case <-time.After(timeout):
 		return sseFrame{}, io.ErrUnexpectedEOF
+	}
+}
+
+// TestSSEMarshalErrorLogsAndClosesStream verifies that an event with an
+// unmarshallable payload is logged at error level and causes the stream
+// to close (so EventSource auto-reconnects) rather than silently
+// continuing. (#72)
+func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
+	bus := events.NewBus(8)
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	srv := httptest.NewServer(sseHandler(bus, log))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	waitFor(t, func() bool { return bus.SubscriberCount() == 1 }, 500*time.Millisecond)
+
+	// Channels are not JSON-serialisable; this event must fail to marshal.
+	bus.Publish(engine.Event{
+		Type:  "upload_complete",
+		RunID: 7,
+		Data:  map[string]any{"bad": make(chan int)},
+	})
+
+	// The handler should close the stream after the marshal error.
+	waitFor(t, func() bool { return bus.SubscriberCount() == 0 }, time.Second)
+	if bus.SubscriberCount() != 0 {
+		t.Errorf("subscribers=%d want 0 after marshal error", bus.SubscriberCount())
+	}
+
+	// The error must have been logged with the event type.
+	logged := logBuf.String()
+	if !strings.Contains(logged, "upload_complete") {
+		t.Errorf("expected event_type in log, got: %s", logged)
+	}
+	if !strings.Contains(logged, "sse: failed to marshal event") {
+		t.Errorf("expected error message in log, got: %s", logged)
 	}
 }
 

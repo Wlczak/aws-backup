@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/Wlczak/aws-backup/internal/events"
@@ -13,7 +14,9 @@ import (
 // sseHandler returns an http.Handler that streams events from bus to the
 // client over Server-Sent Events. The handler returns when the client
 // disconnects (ctx.Done fires) or the subscription is closed.
-func sseHandler(bus *events.Bus) http.Handler {
+// log is used to surface marshal errors; pass slog.Default() when no
+// specific logger is available.
+func sseHandler(bus *events.Bus, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -47,7 +50,15 @@ func sseHandler(bus *events.Bus) http.Handler {
 				}
 				body, err := json.Marshal(ev)
 				if err != nil {
-					continue
+					// A marshal failure means a code defect (e.g. an
+					// unmarshallable field was added to an event type).
+					// Log it so the bug is visible, then close the stream
+					// so the client's EventSource auto-reconnects. (#72)
+					log.Error("sse: failed to marshal event",
+						"event_type", ev.Type,
+						"run_id", ev.RunID,
+						"error", err)
+					return
 				}
 				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, body)
 				flusher.Flush()

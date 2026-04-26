@@ -189,7 +189,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/sync/full", s.handleSyncFull)
 		r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
 
-		r.Mount("/events", sseHandler(s.deps.Bus))
+		r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger))
 	})
 
 	// Serve the embedded Svelte SPA at "/". Any path that doesn't resolve
