@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
@@ -149,8 +150,13 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 		errMsg = runErr.Error()
 		_ = e.opts.DB.AppendLog(cleanupCtx, runID, db.LogError, "run failed: "+errMsg, finished)
 	}
-	if err := e.opts.DB.FinishRun(cleanupCtx, runID, finalStatus, errMsg, finished); err != nil {
-		return runID, fmt.Errorf("finalize run: %w", err)
+	if ferr := e.opts.DB.FinishRun(cleanupCtx, runID, finalStatus, errMsg, finished); ferr != nil {
+		// Don't shadow the actual run failure with a finalize-write failure;
+		// surface runErr if present and just log the FinishRun problem.
+		slog.Warn("finalize run failed", "err", ferr, "run_id", runID)
+		if runErr == nil {
+			return runID, fmt.Errorf("finalize run: %w", ferr)
+		}
 	}
 
 	stats, _ := e.opts.DB.GetRun(cleanupCtx, runID)
@@ -208,7 +214,9 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	// Phase 2: list S3 once — reused for reconciliation and counter seeding.
-	s3Keys, err := e.opts.Storage.List(ctx, e.opts.KeyPrefix)
+	// Normalize the prefix so List does not match sibling keys (e.g. a
+	// configured prefix "backups" must not capture "backups2/...").
+	s3Keys, err := e.opts.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(e.opts.KeyPrefix))
 	if err != nil {
 		return db.RunFailed, fmt.Errorf("list s3 keys: %w", err)
 	}
@@ -288,7 +296,9 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		}
 		uploaded += up
 		bytesUploaded += bytes
-		_ = e.opts.DB.UpdateRunStats(ctx, runID, int64(len(pending)), uploaded, bytesUploaded)
+		if uerr := e.opts.DB.UpdateUploadStats(ctx, runID, uploaded, bytesUploaded); uerr != nil {
+			slog.Warn("update run stats failed", "err", uerr, "run_id", runID)
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err

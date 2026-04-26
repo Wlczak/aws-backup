@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
@@ -40,9 +41,10 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 		return idx, fmt.Errorf("storage is nil")
 	}
 
-	keys, err := s.List(ctx, prefix)
+	listPrefix := pathutil.NormalizeS3ListPrefix(prefix)
+	keys, err := s.List(ctx, listPrefix)
 	if err != nil {
-		return idx, fmt.Errorf("list %q: %w", prefix, err)
+		return idx, fmt.Errorf("list %q: %w", listPrefix, err)
 	}
 
 	// Use the listing as ground truth for "present in cloud" — the DB's

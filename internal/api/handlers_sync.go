@@ -266,7 +266,7 @@ func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error
 		return syncResponse{}, fmt.Errorf("list individual keys: %w", err)
 	}
 
-	s3Keys, err := s.deps.Storage.List(ctx, s.deps.StoragePrefix)
+	s3Keys, err := s.deps.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(s.deps.StoragePrefix))
 	if err != nil {
 		return syncResponse{}, fmt.Errorf("list s3 keys: %w", err)
 	}

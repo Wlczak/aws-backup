@@ -14,7 +14,12 @@ func JoinKey(prefix, name string) string {
 // HasPrefixPath reports whether full equals prefix or begins with prefix
 // followed by a "/" path-component separator.
 // "photos" matches "photos" and "photos/2024/a.jpg" but not "photosphere.jpg".
+// A trailing "/" on prefix is tolerated so "photos/" behaves like "photos".
 func HasPrefixPath(full, prefix string) bool {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return true
+	}
 	if full == prefix {
 		return true
 	}
@@ -25,4 +30,15 @@ func HasPrefixPath(full, prefix string) bool {
 		return false
 	}
 	return full[len(prefix)] == '/'
+}
+
+// NormalizeS3ListPrefix returns prefix with a trailing "/" appended so that
+// Storage.List does not match sibling keys (e.g. prefix "backups" matching
+// "backups2/foo"). An empty prefix is returned unchanged so List("") still
+// enumerates the whole bucket.
+func NormalizeS3ListPrefix(prefix string) string {
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
 }

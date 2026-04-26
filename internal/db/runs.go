@@ -58,6 +58,16 @@ func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, uploaded, byte
 	}).Error
 }
 
+// UpdateUploadStats updates only the upload counters, leaving files_scanned
+// untouched. Used during the upload loop so per-group progress writes don't
+// clobber the scan count captured at the end of phase 1.
+func (db *DB) UpdateUploadStats(ctx context.Context, runID, uploaded, bytes int64) error {
+	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
+		"files_uploaded": uploaded,
+		"bytes_uploaded": bytes,
+	}).Error
+}
+
 // FinishRun stamps finished_at and sets terminal status + optional error.
 func (db *DB) FinishRun(ctx context.Context, runID int64, status, errorMsg string, finishedAt time.Time) error {
 	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
