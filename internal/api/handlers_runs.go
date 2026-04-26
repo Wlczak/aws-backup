@@ -231,14 +231,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{}
 	if current > 0 {
 		run, err := s.deps.DB.GetRun(r.Context(), current)
-		if err == nil {
-			sum := toSummary(run)
-			resp.Current = &sum
+		if err != nil {
+			// Don't return 200 with empty body — the dashboard polls this
+			// every few seconds and would render a green "idle" while the
+			// DB is unreachable. Surface the failure so the SPA can show
+			// it. (#117)
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("get current run: %w", err))
+			return
 		}
+		sum := toSummary(run)
+		resp.Current = &sum
 	}
 
 	runs, _, err := s.deps.DB.ListRuns(r.Context(), 1, 1)
-	if err == nil && len(runs) > 0 {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("list runs: %w", err))
+		return
+	}
+	if len(runs) > 0 {
 		sum := toSummary(runs[0])
 		resp.Last = &sum
 	}

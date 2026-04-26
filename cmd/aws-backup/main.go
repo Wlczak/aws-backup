@@ -24,6 +24,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/scheduler"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
+	"github.com/robfig/cron/v3"
 )
 
 var version = "0.0.0-dev"
@@ -254,6 +255,16 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	s3Changed := prev.S3 != next.S3
 	scheduleChanged := prev.Backup.Schedule != next.Backup.Schedule
 
+	// Pre-validate the cron expression before any swap so applySettings
+	// is all-or-nothing: a bad schedule must not leave src/store hot-
+	// swapped to the new config while sched.Update later rolls back to
+	// the old expression. (#115)
+	if scheduleChanged && next.Backup.Schedule != "" {
+		if _, err := cron.ParseStandard(next.Backup.Schedule); err != nil {
+			return fmt.Errorf("schedule: %w", err)
+		}
+	}
+
 	if sourceChanged {
 		s, err := source.FromConfig(next.Source)
 		if err != nil {
@@ -396,6 +407,13 @@ func runServe(cfgPath string) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/runs", nil)
 		w := newDiscardResponse()
 		srv.Router().ServeHTTP(w, req)
+		// Surface non-success statuses so the scheduler logs the failure
+		// instead of silently retrying every tick. 409 (run already in
+		// progress) is expected when a manual run overlaps a scheduled
+		// tick — keep that case quiet so it doesn't pollute logs. (#114)
+		if w.status >= 400 && w.status != http.StatusConflict {
+			return fmt.Errorf("backup trigger returned HTTP %d", w.status)
+		}
 		return nil
 	}, logger)
 	if err != nil {
@@ -405,7 +423,6 @@ func runServe(cfgPath string) {
 	app.sched = sched
 	app.mu.Unlock()
 	sched.Start()
-	defer sched.Stop()
 
 	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)
 	httpSrv := &http.Server{
@@ -431,6 +448,13 @@ func runServe(cfgPath string) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Stop the scheduler BEFORE the HTTP server. If we let it run during
+	// shutdown a tick can fire after httpSrv.Shutdown returns, call
+	// srv.Router().ServeHTTP, and spawn a fresh engine goroutine that
+	// outlives s.runWg.Wait — which would then race app.close() tearing
+	// down DB/Storage. sched.Stop drains the in-flight tick (if any)
+	// before returning. (#108)
+	sched.Stop()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown", "error", err)
 	}

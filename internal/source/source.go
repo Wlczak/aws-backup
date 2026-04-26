@@ -23,6 +23,21 @@ type Entry struct {
 // walk with that error. ctx cancellation is checked between entries.
 type WalkFunc func(Entry) error
 
+// isValidRelPath rejects paths containing characters that break SQLite's
+// UNIQUE index (NUL truncates on bind in some drivers, silently colliding
+// distinct rows) or the SSE event stream's data: framing (CR/LF). The
+// walker drops these entries with a warning rather than letting them
+// poison the index or corrupt the live event log.
+func isValidRelPath(rel string) bool {
+	for i := 0; i < len(rel); i++ {
+		switch rel[i] {
+		case 0, '\r', '\n':
+			return false
+		}
+	}
+	return true
+}
+
 // Source is the interface the engine uses to scan and read input files.
 type Source interface {
 	// Walk visits every regular file under the source, calling fn for each.

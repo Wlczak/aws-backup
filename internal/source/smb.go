@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -32,11 +34,11 @@ type SMBConfig struct {
 
 // SMB implements Source against a CIFS/SMB2 share via go-smb2.
 type SMB struct {
-	cfg  SMBConfig
-	conn net.Conn
-	sess *smb2.Session
+	cfg   SMBConfig
+	mu    sync.Mutex
+	conn  net.Conn
+	sess  *smb2.Session
 	share *smb2.Share
-	mu   sync.Mutex
 }
 
 // NewSMB dials the share and authenticates. The returned *SMB holds the
@@ -94,25 +96,41 @@ func (s *SMB) rootPath() string {
 // Walk visits every regular file under the configured path using
 // fs.WalkDir over the share. Entries are emitted with forward-slash
 // RelPath just like LocalDir.
+//
+// Per-entry errors (transient I/O, ACL flap, single bad dir entry) are
+// logged and skipped instead of aborting the whole walk: a single
+// permission-denied subtree must not wedge every backup forever.
 func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
+	s.mu.Lock()
+	share := s.share
+	s.mu.Unlock()
+	if share == nil {
+		return errors.New("smb: share is not connected")
+	}
+
 	root := s.rootPath()
 	start := root
 	if start == "" {
 		start = "."
 	}
-	return fs.WalkDir(s.share.DirFS(""), start, func(p string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(share.DirFS(""), start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			slog.Warn("smb walk: per-entry error, skipping", "path", p, "err", err)
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
+		info, ierr := d.Info()
+		if ierr != nil {
+			slog.Warn("smb walk: stat failed, skipping", "path", p, "err", ierr)
+			return nil
 		}
 		rel := p
 		if root != "" {
@@ -120,6 +138,10 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 			rel = strings.TrimPrefix(rel, "/")
 		}
 		if rel == "" {
+			return nil
+		}
+		if !isValidRelPath(rel) {
+			slog.Warn("smb walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
 			return nil
 		}
 		return fn(Entry{
@@ -147,19 +169,28 @@ func (s *SMB) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.share != nil {
+		f, err := s.share.Open(full)
+		if err == nil {
+			return f, nil
+		}
+		if !isSMBSessionError(err) {
+			return nil, fmt.Errorf("smb open %s: %w", full, err)
+		}
+		// One reconnect attempt. If it fails, surface the original error so
+		// the caller doesn't lose the failure mode.
+		if rerr := s.reconnectLocked(ctx); rerr != nil {
+			return nil, fmt.Errorf("smb open %s: %w (reconnect failed: %v)", full, err, rerr)
+		}
+	} else {
+		// Previous reconnect tore down state and failed; try once more
+		// before giving up so a transient outage doesn't leave us
+		// permanently disconnected.
+		if rerr := s.reconnectLocked(ctx); rerr != nil {
+			return nil, fmt.Errorf("smb open %s: share not connected (reconnect failed: %v)", full, rerr)
+		}
+	}
 	f, err := s.share.Open(full)
-	if err == nil {
-		return f, nil
-	}
-	if !isSMBSessionError(err) {
-		return nil, fmt.Errorf("smb open %s: %w", full, err)
-	}
-	// One reconnect attempt. If it fails, surface the original error so
-	// the caller doesn't lose the failure mode.
-	if rerr := s.reconnectLocked(ctx); rerr != nil {
-		return nil, fmt.Errorf("smb open %s: %w (reconnect failed: %v)", full, err, rerr)
-	}
-	f, err = s.share.Open(full)
 	if err != nil {
 		return nil, fmt.Errorf("smb open %s after reconnect: %w", full, err)
 	}
@@ -178,6 +209,13 @@ func isSMBSessionError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
 	msg := err.Error()
 	for _, needle := range []string{
 		"broken pipe",
@@ -187,6 +225,15 @@ func isSMBSessionError(err error) bool {
 		"session expired",
 		"session not found",
 		"reset by peer",
+		"i/o timeout",
+		"deadline exceeded",
+		"network name deleted",
+		"tree not found",
+		"no route to host",
+		"host is unreachable",
+		"host is down",
+		"network is unreachable",
+		"network is down",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
@@ -195,9 +242,15 @@ func isSMBSessionError(err error) bool {
 	return false
 }
 
-// reconnectLocked tears down the existing connection (best-effort) and
-// dials + mounts a fresh one. Caller must hold s.mu.
+// reconnectLocked dials + mounts a fresh connection and atomically swaps
+// it into s.{conn,sess,share} only on full success. On failure the
+// previous (already-broken) state is torn down and the fields are left
+// nil so callers see a clear "not connected" condition rather than
+// dereferencing a partially-rebuilt share. Caller must hold s.mu.
 func (s *SMB) reconnectLocked(ctx context.Context) error {
+	// Tear down the broken connection first; the caller already saw an
+	// error from the existing share so it can't be used further. Holding
+	// onto it would just leak a fd until the next failure.
 	if s.share != nil {
 		_ = s.share.Umount()
 		s.share = nil
@@ -213,7 +266,7 @@ func (s *SMB) reconnectLocked(ctx context.Context) error {
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
 	dialer := &net.Dialer{Timeout: s.cfg.DialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	newConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -224,40 +277,47 @@ func (s *SMB) reconnectLocked(ctx context.Context) error {
 			Domain:   s.cfg.Domain,
 		},
 	}
-	sess, err := d.Dial(conn)
+	newSess, err := d.Dial(newConn)
 	if err != nil {
-		conn.Close()
+		newConn.Close()
 		return fmt.Errorf("authenticate: %w", err)
 	}
-	share, err := sess.Mount(s.cfg.Share)
+	newShare, err := newSess.Mount(s.cfg.Share)
 	if err != nil {
-		sess.Logoff()
-		conn.Close()
+		newSess.Logoff()
+		newConn.Close()
 		return fmt.Errorf("mount %s: %w", s.cfg.Share, err)
 	}
-	s.conn = conn
-	s.sess = sess
-	s.share = share
+	// Swap in only after every step succeeded, so a partial failure
+	// can't leave s.share nil while s.conn/sess look healthy.
+	s.conn = newConn
+	s.sess = newSess
+	s.share = newShare
 	return nil
 }
 
 // Close logs off the SMB session and closes the underlying TCP connection.
 func (s *SMB) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var first error
 	if s.share != nil {
 		if err := s.share.Umount(); err != nil && first == nil {
 			first = err
 		}
+		s.share = nil
 	}
 	if s.sess != nil {
 		if err := s.sess.Logoff(); err != nil && first == nil {
 			first = err
 		}
+		s.sess = nil
 	}
 	if s.conn != nil {
 		if err := s.conn.Close(); err != nil && first == nil {
 			first = err
 		}
+		s.conn = nil
 	}
 	return first
 }

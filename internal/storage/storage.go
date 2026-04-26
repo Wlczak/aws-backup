@@ -12,6 +12,13 @@ import (
 // ErrNotFound is returned by Head / GetRestoreStatus when a key is absent.
 var ErrNotFound = errors.New("storage: key not found")
 
+// ErrAlreadyExists is returned by PutIfAbsent when an object already
+// exists at the requested key. Callers (the engine's zip path) treat it
+// as a signal to advance to the next counter slot rather than silently
+// overwriting a previous DEEP_ARCHIVE object that may differ in
+// content. (#116)
+var ErrAlreadyExists = errors.New("storage: key already exists")
+
 // PutResult reports what the destination acknowledged after an upload.
 type PutResult struct {
 	Key            string
@@ -39,6 +46,13 @@ type Storage interface {
 	// (zip index files) that must stay instantly retrievable while the
 	// main payload sits in a cold tier like DEEP_ARCHIVE.
 	PutStandard(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error)
+
+	// PutIfAbsent uploads body under key only if no object exists there
+	// already. Returns ErrAlreadyExists if the key is occupied. Used by
+	// the engine's zip path so a retry under the same key can't
+	// silently replace a prior DEEP_ARCHIVE object whose content may
+	// differ — the engine then advances to a fresh counter slot. (#116)
+	PutIfAbsent(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error)
 
 	// Head returns metadata or ErrNotFound.
 	Head(ctx context.Context, key string) (HeadResult, error)

@@ -41,6 +41,20 @@ func (m *MemStorage) PutStandard(_ context.Context, key string, body io.Reader, 
 	return m.put(key, body, "STANDARD")
 }
 
+// PutIfAbsent fails with ErrAlreadyExists when key is already populated;
+// otherwise behaves like Put. Mirrors S3's IfNoneMatch="*" precondition
+// for tests that exercise the engine's collision-detection path. (#116)
+func (m *MemStorage) PutIfAbsent(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	m.mu.Lock()
+	if _, exists := m.objects[key]; exists {
+		m.mu.Unlock()
+		_, _ = io.Copy(io.Discard, body)
+		return PutResult{}, ErrAlreadyExists
+	}
+	m.mu.Unlock()
+	return m.put(key, body, "DEEP_ARCHIVE")
+}
+
 func (m *MemStorage) put(key string, body io.Reader, class string) (PutResult, error) {
 	buf, err := io.ReadAll(body)
 	if err != nil {

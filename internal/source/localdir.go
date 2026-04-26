@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,26 +40,40 @@ func (l *LocalDir) Root() string { return l.root }
 
 // Walk implements Source.Walk using filepath.WalkDir. Symlinks are not
 // followed; non-regular files (devices, sockets, dirs) are skipped.
+//
+// Per-entry errors (transient I/O, EACCES on a single subtree) are
+// logged and skipped instead of aborting the whole walk so one bad ACL
+// doesn't wedge every backup forever.
 func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 	return filepath.WalkDir(l.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			slog.Warn("localdir walk: per-entry error, skipping", "path", path, "err", err)
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
+		info, ierr := d.Info()
+		if ierr != nil {
+			slog.Warn("localdir walk: stat failed, skipping", "path", path, "err", ierr)
+			return nil
 		}
-		rel, err := filepath.Rel(l.root, path)
-		if err != nil {
-			return err
+		rel, rerr := filepath.Rel(l.root, path)
+		if rerr != nil {
+			slog.Warn("localdir walk: rel failed, skipping", "path", path, "err", rerr)
+			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		if !isValidRelPath(rel) {
+			slog.Warn("localdir walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
+			return nil
+		}
 		return fn(Entry{
 			RelPath: rel,
 			Size:    info.Size(),
@@ -75,12 +90,20 @@ func (l *LocalDir) Open(_ context.Context, relPath string) (io.ReadCloser, error
 	abs := filepath.Join(l.root, filepath.FromSlash(clean))
 
 	// Defense in depth: after join+clean the absolute path must still be
-	// inside root.
+	// inside root. The boundary check uses TrimSuffix on the separator so
+	// a root that already ends in os.PathSeparator (root='/' on Unix,
+	// 'C:\' on Windows) doesn't synthesize a double-separator prefix that
+	// no resolved path could ever match.
 	absClean, err := filepath.Abs(abs)
 	if err != nil {
 		return nil, err
 	}
-	if absClean != l.root && !strings.HasPrefix(absClean, l.root+string(os.PathSeparator)) {
+	rootTrim := strings.TrimSuffix(l.root, string(os.PathSeparator))
+	if rootTrim == "" {
+		// Filesystem root ('/' on Unix). Every absolute path is inside.
+		return os.Open(absClean)
+	}
+	if absClean != rootTrim && !strings.HasPrefix(absClean, rootTrim+string(os.PathSeparator)) {
 		return nil, errors.New("path escapes source root")
 	}
 	return os.Open(absClean)

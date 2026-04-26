@@ -70,14 +70,18 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 			results[i].ID = existing.ID
 			if e.Size != existing.Size || !e.ModTime.Equal(existing.MTime) {
 				results[i].Changed = true
+				// Preserve md5/zip_name/s3_key/uploaded_at as the historical
+				// record of the *previous* uploaded version. status=pending
+				// drives the new upload; the stale columns let
+				// reconcileFromS3 distinguish "fresh row never uploaded"
+				// (uploaded_at IS NULL → safe to bind to S3 zip) from
+				// "modified-after-upload" (uploaded_at set → must NOT be
+				// rebound to the old zip, or the new bytes are lost). See
+				// #103.
 				if err := tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
-					"size":        e.Size,
-					"mtime":       e.ModTime,
-					"status":      StatusPending,
-					"md5":         gorm.Expr("NULL"),
-					"zip_name":    gorm.Expr("NULL"),
-					"s3_key":      gorm.Expr("NULL"),
-					"uploaded_at": gorm.Expr("NULL"),
+					"size":         e.Size,
+					"mtime":        e.ModTime,
+					"status":       StatusPending,
 					"last_seen_at": seenAt,
 				}).Error; err != nil {
 					return err
@@ -114,14 +118,12 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 		res.ID = existing.ID
 		if size != existing.Size || !mtime.Equal(existing.MTime) {
 			res.Changed = true
+			// See UpsertFileBatch for why md5/zip_name/s3_key/uploaded_at
+			// are preserved instead of cleared. (#103)
 			return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
-				"size":        size,
-				"mtime":       mtime,
-				"status":      StatusPending,
-				"md5":         gorm.Expr("NULL"),
-				"zip_name":    gorm.Expr("NULL"),
-				"s3_key":      gorm.Expr("NULL"),
-				"uploaded_at": gorm.Expr("NULL"),
+				"size":         size,
+				"mtime":        mtime,
+				"status":       StatusPending,
 				"last_seen_at": seenAt,
 			}).Error
 		}
@@ -189,23 +191,30 @@ func (db *DB) MarkZipUploadedBatch(ctx context.Context, ids []int64, zipName, md
 }
 
 // MarkUploadedBatch flips many ids to 'uploaded' sharing a single md5/s3_key.
+// All chunks run inside a single transaction so a partial failure cannot
+// leave half the batch uploaded and half stuck in the prior state. (#110)
 func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key string, uploadedAt time.Time) error {
-	for len(ids) > 0 {
-		chunk := ids
-		if len(chunk) > sqlChunkSize {
-			chunk = ids[:sqlChunkSize]
-		}
-		ids = ids[len(chunk):]
-		if err := db.g.WithContext(ctx).Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
-			"md5":         md5,
-			"s3_key":      s3Key,
-			"uploaded_at": uploadedAt,
-			"status":      StatusUploaded,
-		}).Error; err != nil {
-			return err
-		}
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(ids) > 0 {
+			chunk := ids
+			if len(chunk) > sqlChunkSize {
+				chunk = ids[:sqlChunkSize]
+			}
+			ids = ids[len(chunk):]
+			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"md5":         md5,
+				"s3_key":      s3Key,
+				"uploaded_at": uploadedAt,
+				"status":      StatusUploaded,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // UploadedRow describes one individual-upload outcome to flush in a batch.
@@ -243,21 +252,28 @@ func (db *DB) MarkFailed(ctx context.Context, id int64) error {
 }
 
 // SetZipName attaches a zip name to a batch of file IDs and flips status to zipped.
+// Wrapped in a single transaction so a partial chunk failure cannot leave
+// the batch split across statuses. (#110)
 func (db *DB) SetZipName(ctx context.Context, ids []int64, zipName string) error {
-	for len(ids) > 0 {
-		chunk := ids
-		if len(chunk) > sqlChunkSize {
-			chunk = ids[:sqlChunkSize]
-		}
-		ids = ids[len(chunk):]
-		if err := db.g.WithContext(ctx).Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
-			"zip_name": zipName,
-			"status":   StatusZipped,
-		}).Error; err != nil {
-			return err
-		}
+	if len(ids) == 0 {
+		return nil
 	}
-	return nil
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(ids) > 0 {
+			chunk := ids
+			if len(chunk) > sqlChunkSize {
+				chunk = ids[:sqlChunkSize]
+			}
+			ids = ids[len(chunk):]
+			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"zip_name": zipName,
+				"status":   StatusZipped,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // FilesFilter describes a ListFiles query.
@@ -340,27 +356,35 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 }
 
 // MarkPendingByIDs resets md5/zip_name/s3_key/uploaded_at and flips status to pending.
+// All chunks run inside a single transaction so a partial failure cannot
+// leave the batch split across statuses. (#110)
 func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) {
-	var total int64
-	for len(ids) > 0 {
-		chunk := ids
-		if len(chunk) > sqlChunkSize {
-			chunk = ids[:sqlChunkSize]
-		}
-		ids = ids[len(chunk):]
-		result := db.g.WithContext(ctx).Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
-			"status":      StatusPending,
-			"md5":         gorm.Expr("NULL"),
-			"zip_name":    gorm.Expr("NULL"),
-			"s3_key":      gorm.Expr("NULL"),
-			"uploaded_at": gorm.Expr("NULL"),
-		})
-		if result.Error != nil {
-			return total, result.Error
-		}
-		total += result.RowsAffected
+	if len(ids) == 0 {
+		return 0, nil
 	}
-	return total, nil
+	var total int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(ids) > 0 {
+			chunk := ids
+			if len(chunk) > sqlChunkSize {
+				chunk = ids[:sqlChunkSize]
+			}
+			ids = ids[len(chunk):]
+			result := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"status":      StatusPending,
+				"md5":         gorm.Expr("NULL"),
+				"zip_name":    gorm.Expr("NULL"),
+				"s3_key":      gorm.Expr("NULL"),
+				"uploaded_at": gorm.Expr("NULL"),
+			})
+			if result.Error != nil {
+				return result.Error
+			}
+			total += result.RowsAffected
+		}
+		return nil
+	})
+	return total, err
 }
 
 // PurgeMissingFiles deletes every row whose status is 'missing'.
@@ -382,21 +406,29 @@ func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 }
 
 // DeleteFiles removes the given rows from the files table.
+// All chunks run inside a single transaction so a partial failure cannot
+// leave half the batch deleted. (#110)
 func (db *DB) DeleteFiles(ctx context.Context, ids []int64) (int64, error) {
-	var total int64
-	for len(ids) > 0 {
-		chunk := ids
-		if len(chunk) > sqlChunkSize {
-			chunk = ids[:sqlChunkSize]
-		}
-		ids = ids[len(chunk):]
-		result := db.g.WithContext(ctx).Where("id IN ?", chunk).Delete(&File{})
-		if result.Error != nil {
-			return total, result.Error
-		}
-		total += result.RowsAffected
+	if len(ids) == 0 {
+		return 0, nil
 	}
-	return total, nil
+	var total int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(ids) > 0 {
+			chunk := ids
+			if len(chunk) > sqlChunkSize {
+				chunk = ids[:sqlChunkSize]
+			}
+			ids = ids[len(chunk):]
+			result := tx.Where("id IN ?", chunk).Delete(&File{})
+			if result.Error != nil {
+				return result.Error
+			}
+			total += result.RowsAffected
+		}
+		return nil
+	})
+	return total, err
 }
 
 // ListPending returns every row the engine should attempt to upload.
@@ -432,7 +464,16 @@ func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 	return keys, err
 }
 
-// ReconcileZip marks pending/zipped/failed files as uploaded based on an S3 index.
+// ReconcileZip marks files as uploaded based on an S3 index sidecar.
+//
+// The match is restricted to rows that look genuinely orphaned in the
+// crash window between a successful S3 zip upload and its DB commit:
+// either status='zipped' (the intended intermediate state, now atomic
+// per #84) or pending/failed rows that still have NULL md5 / zip_name /
+// uploaded_at. A pending row that already carries those columns means
+// UpsertFileBatch saw a size/mtime change after the previous upload and
+// cleared them — re-binding it to the old zip would silently lose the
+// modified content (the new bytes never get uploaded). See #103.
 func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key string, now time.Time) (int64, error) {
 	var total int64
 	for len(paths) > 0 {
@@ -441,8 +482,24 @@ func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key st
 			chunk = paths[:sqlChunkSize]
 		}
 		paths = paths[len(chunk):]
+		// Match either:
+		//   - status='zipped' (the legacy intermediate state, kept for
+		//     migrations from older deployments), OR
+		//   - status in (pending, failed) AND uploaded_at IS NULL — i.e.
+		//     a row that has never been uploaded. This guards against
+		//     re-binding a freshly-modified file (whose row was reset to
+		//     pending by UpsertFile but retains uploaded_at from the
+		//     previous version) back to its stale zip and silently losing
+		//     the new content. See #103.
 		result := db.g.WithContext(ctx).Model(&File{}).
-			Where("status IN ? AND path IN ?", []string{StatusPending, StatusZipped, StatusFailed}, chunk).
+			Where("path IN ? AND ("+
+				"status = ? OR "+
+				"(status IN ? AND uploaded_at IS NULL)"+
+				")",
+				chunk,
+				StatusZipped,
+				[]string{StatusPending, StatusFailed},
+			).
 			Updates(map[string]any{
 				"zip_name":    zipRel,
 				"s3_key":      s3Key,
@@ -474,28 +531,36 @@ func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, er
 
 // markPendingByColumn is the shared implementation for the three MarkPendingBy* functions.
 // column must be one of the validated constants: "path", "zip_name", "s3_key".
+// All chunks run inside a single transaction so a partial failure cannot
+// leave the batch split across statuses. (#110)
 func markPendingByColumn(ctx context.Context, g *gorm.DB, column string, values []string) (int64, error) {
-	var total int64
-	for len(values) > 0 {
-		chunk := values
-		if len(chunk) > sqlChunkSize {
-			chunk = values[:sqlChunkSize]
-		}
-		values = values[len(chunk):]
-		result := g.WithContext(ctx).Model(&File{}).
-			Where(fmt.Sprintf("status != ? AND %s IN ?", column), StatusMissing, chunk).
-			Updates(map[string]any{
-				"status":      StatusPending,
-				"md5":         gorm.Expr("NULL"),
-				"zip_name":    gorm.Expr("NULL"),
-				"s3_key":      gorm.Expr("NULL"),
-				"uploaded_at": gorm.Expr("NULL"),
-			})
-		if result.Error != nil {
-			return total, result.Error
-		}
-		total += result.RowsAffected
+	if len(values) == 0 {
+		return 0, nil
 	}
-	return total, nil
+	var total int64
+	err := g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(values) > 0 {
+			chunk := values
+			if len(chunk) > sqlChunkSize {
+				chunk = values[:sqlChunkSize]
+			}
+			values = values[len(chunk):]
+			result := tx.Model(&File{}).
+				Where(fmt.Sprintf("status != ? AND %s IN ?", column), StatusMissing, chunk).
+				Updates(map[string]any{
+					"status":      StatusPending,
+					"md5":         gorm.Expr("NULL"),
+					"zip_name":    gorm.Expr("NULL"),
+					"s3_key":      gorm.Expr("NULL"),
+					"uploaded_at": gorm.Expr("NULL"),
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			total += result.RowsAffected
+		}
+		return nil
+	})
+	return total, err
 }
 

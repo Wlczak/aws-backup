@@ -60,7 +60,10 @@ func TestUpsertFileLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Size change → Changed=true, status reset to pending, md5 cleared.
+	// Size change → Changed=true, status reset to pending. The previous
+	// upload's md5/s3_key/uploaded_at are intentionally preserved as the
+	// historical record so reconcileFromS3 can distinguish a fresh row
+	// from a modified-after-upload row (#103).
 	r, err = d.UpsertFile(ctx, "photos/2024/a.jpg", 2000, mtime, seen2)
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +82,11 @@ func TestUpsertFileLifecycle(t *testing.T) {
 	if f.Status != StatusPending {
 		t.Errorf("want status=pending after change, got %q", f.Status)
 	}
-	if f.MD5 != "" || f.S3Key != "" {
-		t.Errorf("md5/s3_key not cleared: %+v", f)
+	if f.MD5 != "md5hex" || f.S3Key != "backups/photos/a.jpg" {
+		t.Errorf("md5/s3_key not preserved: %+v", f)
+	}
+	if f.UploadedAt.IsZero() {
+		t.Errorf("uploaded_at unexpectedly cleared: %+v", f)
 	}
 }
 

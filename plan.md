@@ -253,12 +253,12 @@ When fixing a GitHub issue:
 
 ---
 
-## Open Issues (as of 2026-04-25)
+## Open Issues (as of 2026-04-26)
 
 ### Bug
 | # | Title |
 |---|---|
-| (none open) | All bug issues resolved as of 2026-04-26 |
+| (none open) | All 21 newly-filed bug issues resolved on 2026-04-26 |
 
 ### Bug (formerly open, now closed)
 | # | Title |
@@ -331,6 +331,27 @@ When fixing a GitHub issue:
 | #88 | e96f640 | SMB.Open transparently re-dials + remounts on session-level errors |
 | #91 | e96f640 | `StoragePrefix` accessed via `cfgMu`-guarded `storagePrefix()` |
 | #94 | e96f640 | `deps.Config` accessed via `cfgMu`-guarded `snapshotConfig()` / `updateConfig()` |
+| #101 | TBD | `config.Save` fsyncs tmp file and parent dir for crash-safe atomic write |
+| #102 | TBD | LocalDir / SMB walkers log + skip per-entry errors instead of aborting whole walk |
+| #103 | TBD | `ReconcileZip` requires `uploaded_at IS NULL` to avoid rebinding modified files to stale zip |
+| #104 | TBD | SMB.Walk/Close snapshot/lock `s.share` to prevent torn read vs reconnectLocked |
+| #105 | TBD | `reconnectLocked` swaps connection state only on full success; `Open` re-attempts when share is nil |
+| #106 | TBD | `source.Scan` prefers `flushErr` and `context.Cause(scanCtx)` over masked `context.Canceled` |
+| #107 | TBD | `isSMBSessionError` covers timeouts, network-name-deleted, no-route-to-host, etc. |
+| #108 | TBD | `runServe` calls `sched.Stop` explicitly before `httpSrv.Shutdown` to drain in-flight tick |
+| #109 | TBD | S3 multipart uploads request composed full-object SHA256 via `ChecksumAlgorithm` |
+| #110 | TBD | DB chunk-loop helpers (`MarkUploadedBatch`, `SetZipName`, `MarkPendingByIDs`, `DeleteFiles`, `markPendingByColumn`) wrap chunks in a single transaction |
+| #111 | TBD | `config.Validate` rejects cron expressions that never fire (Feb 30, etc.) |
+| #112 | TBD | `LocalDir.Open` boundary check tolerates root that already ends in `os.PathSeparator` |
+| #113 | TBD | Walkers reject RelPaths containing NUL/CR/LF |
+| #114 | TBD | Scheduler trigger surfaces non-success HTTP statuses (excluding 409) as errors |
+| #115 | TBD | `applySettings` pre-validates the cron expression before any source/storage swap |
+| #116 | TBD | `Storage.PutIfAbsent` uses S3 `IfNoneMatch=*`; engine retries zip upload at next counter slot on collision |
+| #117 | TBD | `handleStatus` returns 500 on DB errors instead of 200 + empty body |
+| #118 | TBD | `runWithID` drains writeBuffer before `FinishRun` / `EventRunComplete` so files_uploaded matches DB |
+| #119 | TBD | Upload-phase setup reclassifies `context.Canceled` / `DeadlineExceeded` as `RunCancelled` |
+| #120 | TBD | `reconcileFromS3` logs and skips per-sidecar read/DB errors instead of aborting the run |
+| #121 | TBD | `reconcileFromS3` deletes orphan `.index.txt` sidecars whose backing zip is missing |
 
 ---
 

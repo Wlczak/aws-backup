@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -152,9 +153,14 @@ func applyBackfills(data []byte, cfg *Config) {
 	}
 }
 
-// Save atomically writes cfg to path (creates parent dir as needed).
+// Save atomically and durably writes cfg to path (creates parent dir as
+// needed). The standard write-tmp + rename pattern is extended with an
+// fsync of the tmp file before rename and an fsync of the parent
+// directory after rename, so a hard reset between rename and
+// writeback can't leave a zero-byte file at path. (#101)
 func Save(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -162,10 +168,36 @@ func Save(path string, cfg Config) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// fsync the parent dir so the rename itself is durable. Best-effort:
+	// not all filesystems / OSes support it, and a missing fsync there
+	// is far less harmful than a missing fsync on the tmp file.
+	if dirF, err := os.Open(dir); err == nil {
+		_ = dirF.Sync()
+		_ = dirF.Close()
+	}
+	return nil
 }
 
 // Validate returns nil if the config is internally consistent and usable.
@@ -219,8 +251,20 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("backup.tmp_dir is required"))
 	}
 	if c.Backup.Schedule != "" {
-		if _, err := cron.ParseStandard(c.Backup.Schedule); err != nil {
+		sched, err := cron.ParseStandard(c.Backup.Schedule)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("backup.schedule invalid: %w", err))
+		} else {
+			// cron.ParseStandard accepts impossible date combinations like
+			// "0 0 30 2 *" (Feb 30) or "0 0 31 4 *" (Apr 31) — they parse
+			// fine but Next() returns the zero time, meaning the cron
+			// silently never fires. Reject those so a misconfigured
+			// schedule fails fast at startup instead of looking healthy.
+			// (#111)
+			next := sched.Next(time.Now())
+			if next.IsZero() || next.After(time.Now().AddDate(5, 0, 0)) {
+				errs = append(errs, fmt.Errorf("backup.schedule %q never fires (impossible day-of-month / month combination)", c.Backup.Schedule))
+			}
 		}
 	}
 

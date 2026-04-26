@@ -117,11 +117,20 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 
 	close(done)
 	flushErr := <-flushErrCh
-	if walkErr != nil {
-		return stats, walkErr
-	}
+	// Prefer flushErr over walkErr: when the flusher cancels the walker,
+	// the walker returns scanCtx.Err() (context.Canceled) which masks the
+	// real cause (disk full, busy DB, schema mismatch, …). Surfacing the
+	// underlying flush error gives operators an accurate diagnosis. (#106)
 	if flushErr != nil {
 		return stats, flushErr
+	}
+	if walkErr != nil {
+		// Walker may have aborted because flusher cancelled scanCtx; if
+		// so, recover the original cause attached by WithCancelCause.
+		if cause := context.Cause(scanCtx); cause != nil && cause != ctx.Err() && cause != context.Canceled {
+			return stats, cause
+		}
+		return stats, walkErr
 	}
 
 	// Only detect missing files on a full scan; partial scans only walked a

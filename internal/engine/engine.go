@@ -126,17 +126,24 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 	buf := newWriteBuffer(e.opts.DB)
 	buf.start(ctx)
 	e.buf = buf
-	defer func() {
-		e.buf = nil
-		if err := buf.close(); err != nil {
-			slog.Warn("engine write buffer final flush failed", "err", err)
-		}
-	}()
 
 	e.emit(Event{Type: EventRunStart, RunID: runID, At: start})
 	e.log(ctx, runID, db.LogInfo, "run started")
 
 	finalStatus, runErr := e.runInner(ctx, runID)
+
+	// Drain the write buffer BEFORE finalising the run row so the
+	// per-file MarkUploaded rows and per-group AppendLog entries land
+	// in the DB ahead of FinishRun / EventRunComplete. If we deferred
+	// buf.close() (LIFO), runs would briefly observe a 'completed' row
+	// with files_uploaded=N while the files table still showed M < N
+	// rows uploaded — those (N-M) files would be re-uploaded next run.
+	// (#118)
+	e.buf = nil
+	if err := buf.close(); err != nil {
+		slog.Warn("engine write buffer final flush failed", "err", err)
+	}
+
 	finished := e.opts.Now()
 
 	// Bookkeeping always runs to completion: even if the caller's ctx was
@@ -213,25 +220,36 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		}
 	}
 
+	// upload-phase helper: reclassify ctx cancellation as RunCancelled
+	// instead of RunFailed, so a user-initiated cancel during any of
+	// these blocking S3 / DB / mkdir calls produces the right run-status.
+	// (#119)
+	classify := func(stage string, err error) (string, error) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return db.RunCancelled, err
+		}
+		return db.RunFailed, fmt.Errorf("%s: %w", stage, err)
+	}
+
 	// Phase 2: list S3 once — reused for reconciliation and counter seeding.
 	// Normalize the prefix so List does not match sibling keys (e.g. a
 	// configured prefix "backups" must not capture "backups2/...").
 	s3Keys, err := e.opts.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(e.opts.KeyPrefix))
 	if err != nil {
-		return db.RunFailed, fmt.Errorf("list s3 keys: %w", err)
+		return classify("list s3 keys", err)
 	}
 
 	// Reconcile DB against S3: any zip uploaded in a prior (partially-failed)
 	// run has an index sidecar. Files listed there but still pending or zipped
 	// in the DB are marked uploaded so listPending excludes them.
 	if err := e.reconcileFromS3(ctx, runID, s3Keys); err != nil {
-		return db.RunFailed, fmt.Errorf("reconcile from S3: %w", err)
+		return classify("reconcile from S3", err)
 	}
 
 	// Phase 3: gather pending files (upload phase).
 	pending, err := e.listPending(ctx)
 	if err != nil {
-		return db.RunFailed, fmt.Errorf("list pending: %w", err)
+		return classify("list pending", err)
 	}
 	if len(pending) == 0 {
 		e.log(ctx, runID, db.LogInfo, "no pending files to upload")
@@ -242,7 +260,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("grouped %d files into %d top-level groups", len(pending), len(groups)))
 
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
-		return db.RunFailed, fmt.Errorf("mkdir tmp: %w", err)
+		return classify("mkdir tmp", err)
 	}
 
 	// Seed per-directory zip counters so new zips continue the sequence
@@ -262,7 +280,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 
 	existingZips, err := e.opts.DB.ListZipNames(ctx)
 	if err != nil {
-		return db.RunFailed, fmt.Errorf("list zip names: %w", err)
+		return classify("list zip names", err)
 	}
 	for _, z := range existingZips {
 		seedDirMaxN(z)
@@ -292,8 +310,18 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		var up, bytes int64
 		if g.Zip {
 			dir := commonDirPath(g.Files)
-			dirMaxN[dir]++
-			up, bytes, err = e.processZipGroup(ctx, runID, g, dirMaxN[dir])
+			// On ErrAlreadyExists from S3 (IfNoneMatch=* tripped), bump
+			// the counter and retry once with a fresh slot. Cap the
+			// retry budget so a perpetually-occupied dir doesn't loop.
+			// (#116)
+			for attempt := 0; attempt < 5; attempt++ {
+				dirMaxN[dir]++
+				up, bytes, err = e.processZipGroup(ctx, runID, g, dirMaxN[dir])
+				if !errors.Is(err, storage.ErrAlreadyExists) {
+					break
+				}
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("zip key collision at slot %d for dir %q, advancing", dirMaxN[dir], dir))
+			}
 		} else {
 			up, bytes, err = e.processIndividualGroup(ctx, runID, g)
 		}
@@ -343,17 +371,35 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 		if !strings.HasSuffix(k, ZipIndexSuffix) {
 			continue
 		}
+		// Cancellation aborts the loop cleanly; transient cancels
+		// during a Get are handled below.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		zipKey := strings.TrimSuffix(k, ZipIndexSuffix)
 		if _, ok := zipSet[zipKey]; !ok {
-			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: index %s has no matching zip, skipping", k))
+			// Orphan sidecar: zip upload failed after the sidecar
+			// succeeded. Delete it now so flaky-network deployments
+			// don't accumulate dangling .index.txt keys monotonically
+			// across runs. Best-effort: a delete failure just defers
+			// cleanup to a future run. (#121)
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: index %s has no matching zip, deleting orphan", k))
+			if delErr := e.opts.Storage.Delete(ctx, k); delErr != nil {
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: orphan delete %s failed: %v", k, delErr))
+			}
 			continue
 		}
 		paths, err := e.readIndexPaths(ctx, k)
 		if err != nil {
-			return fmt.Errorf("reconcile: read %s: %w", k, err)
+			// Cancellation must abort the run; everything else is a
+			// per-sidecar issue (transient 5xx, corrupt object) — log
+			// and continue so one bad sidecar doesn't wedge every
+			// subsequent backup. (#120)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: read %s failed, skipping: %v", k, err))
+			continue
 		}
 		if len(paths) == 0 {
 			continue
@@ -361,7 +407,11 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 		zipRel := strings.TrimPrefix(zipKey, prefix)
 		n, err := e.opts.DB.ReconcileZip(ctx, paths, zipRel, zipKey, e.opts.Now())
 		if err != nil {
-			return fmt.Errorf("reconcile: db for %s: %w", zipKey, err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: db for %s failed, skipping: %v", zipKey, err))
+			continue
 		}
 		if n > 0 {
 			total += n
@@ -455,7 +505,11 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	if err != nil {
 		return 0, 0, err
 	}
-	res, err := e.opts.Storage.Put(ctx, key, f, size)
+	// PutIfAbsent so a retry under the same key can't silently overwrite
+	// a prior DEEP_ARCHIVE object whose content may differ. The caller
+	// catches ErrAlreadyExists and advances to the next counter slot.
+	// (#116)
+	res, err := e.opts.Storage.PutIfAbsent(ctx, key, f, size)
 	f.Close()
 	if err != nil {
 		e.emit(Event{

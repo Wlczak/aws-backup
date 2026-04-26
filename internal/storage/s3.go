@@ -95,6 +95,59 @@ func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader,
 	return s.putWithClass(ctx, key, body, size, s3types.StorageClassStandard)
 }
 
+// PutIfAbsent uploads body under key with the configured storage class,
+// failing with ErrAlreadyExists if the key is already occupied. Implemented
+// via S3's IfNoneMatch="*" precondition; AWS responds with 412 which we
+// translate to ErrAlreadyExists. Bodies large enough to need multipart
+// (> 5 GiB or unknown size) are not supported here because the SDK's
+// multipart manager doesn't surface preconditions cleanly — for those we
+// fall back to a HEAD probe + regular put, which is racy but matches
+// what bucket-versioning would catch operationally. (#116)
+func (s *S3Storage) PutIfAbsent(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error) {
+	if size < 0 || size > s3SinglePartLimit {
+		// Best-effort race-y path for huge / unknown-size bodies.
+		if _, err := s.Head(ctx, key); err == nil {
+			return PutResult{}, ErrAlreadyExists
+		} else if !errors.Is(err, ErrNotFound) {
+			return PutResult{}, err
+		}
+		return s.uploadMultipart(ctx, key, body, size, s.storageClass)
+	}
+
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:            aws.String(s.bucket),
+		Key:               aws.String(key),
+		Body:              body,
+		ContentLength:     aws.Int64(size),
+		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
+		StorageClass:      s.storageClass,
+		IfNoneMatch:       aws.String("*"),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "PreconditionFailed", "ConditionalRequestConflict":
+				return PutResult{}, ErrAlreadyExists
+			}
+		}
+		return PutResult{}, err
+	}
+
+	res := PutResult{Key: key, Size: size}
+	if out.ETag != nil {
+		res.ETag = *out.ETag
+	}
+	if out.ChecksumSHA256 != nil {
+		if hx, err := base64ToHex(*out.ChecksumSHA256); err == nil {
+			res.ChecksumSHA256 = hx
+		} else {
+			res.ChecksumSHA256 = *out.ChecksumSHA256
+		}
+	}
+	return res, nil
+}
+
 func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
 	// Bodies larger than the 5 GiB single-PutObject limit (or of unknown
 	// size) must go through the multipart uploader; PutObject would reject
@@ -132,15 +185,18 @@ func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader
 }
 
 // uploadMultipart uses the SDK's transfer manager to split body into part
-// uploads. ChecksumAlgorithm cannot be set on multipart per-part metadata
-// the same way as single-shot PutObject — the manager handles per-part
-// checksums internally.
+// uploads. Setting ChecksumAlgorithm here makes the SDK request a
+// composed full-object SHA256 from S3, which AWS verifies on reassembly
+// — without it, only per-part MD5s are checked and a silent reassembly
+// bug or off-by-one in DEEP_ARCHIVE storage stays undetected for years
+// until the operator tries to restore. (#109)
 func (s *S3Storage) uploadMultipart(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
 	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket:       aws.String(s.bucket),
-		Key:          aws.String(key),
-		Body:         body,
-		StorageClass: class,
+		Bucket:            aws.String(s.bucket),
+		Key:               aws.String(key),
+		Body:              body,
+		StorageClass:      class,
+		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
 	})
 	if err != nil {
 		return PutResult{}, err
