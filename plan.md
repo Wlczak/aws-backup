@@ -351,7 +351,7 @@ When fixing a GitHub issue:
 | #119 | ebfb6c5 | Upload-phase setup reclassifies `context.Canceled` / `DeadlineExceeded` as `RunCancelled` |
 | #120 | ebfb6c5 | `reconcileFromS3` logs and skips per-sidecar read/DB errors instead of aborting the run |
 | #121 | ebfb6c5 | `reconcileFromS3` deletes orphan `.index.txt` sidecars whose backing zip is missing |
-| #42 | (pending) | `handleTestStorage` does a real `HeadBucket` round-trip; works against AWS and S3-compatible endpoints; `Validate` rejects Glacier-tier classes when `s3.endpoint` is set; default `storage_class` is `STANDARD` to match the MinIO default endpoint |
+| #42 | 5e0decd | `handleTestStorage` does a real `HeadBucket` round-trip; works against AWS and S3-compatible endpoints; `Validate` rejects Glacier-tier classes when `s3.endpoint` is set; default `storage_class` is `STANDARD` to match the MinIO default endpoint |
 
 ---
 
