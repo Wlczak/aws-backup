@@ -131,11 +131,15 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 	return res, err
 }
 
-// MarkMissing flips uploaded or zipped rows whose last_seen_at is older
-// than scanStart to status=missing. Returns the affected row count.
+// MarkMissing flips any non-missing row whose last_seen_at is older than
+// scanStart to status=missing. Returns the affected row count.
+// Includes pending/failed so a file that was queued but deleted before
+// upload doesn't sit in the queue forever, re-failing every run.
 func (db *DB) MarkMissing(ctx context.Context, scanStart time.Time) (int64, error) {
 	result := db.g.WithContext(ctx).Model(&File{}).
-		Where("status IN ? AND last_seen_at < ?", []string{StatusUploaded, StatusZipped}, scanStart).
+		Where("status IN ? AND last_seen_at < ?",
+			[]string{StatusUploaded, StatusZipped, StatusPending, StatusFailed},
+			scanStart).
 		Update("status", StatusMissing)
 	return result.RowsAffected, result.Error
 }

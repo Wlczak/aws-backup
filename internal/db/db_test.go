@@ -99,19 +99,28 @@ func TestMarkMissing(t *testing.T) {
 	r2, _ := d.UpsertFile(ctx, "b.txt", 1, old, new)
 	_ = d.MarkUploaded(ctx, r2.ID, "m", "k", new)
 
-	// Pending, old — should NOT be flipped (only uploaded/zipped rows).
+	// Pending, old — should be marked missing so deleted-but-queued
+	// rows don't sit in the queue forever.
 	_, _ = d.UpsertFile(ctx, "c.txt", 1, old, old)
 
 	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should be marked missing.
 	r3, _ := d.UpsertFile(ctx, "d.txt", 1, old, old)
 	_ = d.SetZipName(ctx, []int64{r3.ID}, "z.zip")
 
+	// Failed, old — should be marked missing (was queued but file is gone).
+	r4, _ := d.UpsertFile(ctx, "e.txt", 1, old, old)
+	_ = d.MarkFailed(ctx, r4.ID)
+
+	// Failed, recent — should stay failed (file still being seen).
+	r5, _ := d.UpsertFile(ctx, "f.txt", 1, old, new)
+	_ = d.MarkFailed(ctx, r5.ID)
+
 	affected, err := d.MarkMissing(ctx, new)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if affected != 2 {
-		t.Errorf("want 2 affected, got %d", affected)
+	if affected != 4 {
+		t.Errorf("want 4 affected, got %d", affected)
 	}
 
 	files, _, _ := d.ListFiles(ctx, FilesFilter{All: true})
@@ -125,11 +134,17 @@ func TestMarkMissing(t *testing.T) {
 	if got["b.txt"] != StatusUploaded {
 		t.Errorf("b.txt want uploaded, got %q", got["b.txt"])
 	}
-	if got["c.txt"] != StatusPending {
-		t.Errorf("c.txt want pending, got %q", got["c.txt"])
+	if got["c.txt"] != StatusMissing {
+		t.Errorf("c.txt want missing, got %q", got["c.txt"])
 	}
 	if got["d.txt"] != StatusMissing {
 		t.Errorf("d.txt want missing, got %q", got["d.txt"])
+	}
+	if got["e.txt"] != StatusMissing {
+		t.Errorf("e.txt want missing, got %q", got["e.txt"])
+	}
+	if got["f.txt"] != StatusFailed {
+		t.Errorf("f.txt want failed, got %q", got["f.txt"])
 	}
 }
 

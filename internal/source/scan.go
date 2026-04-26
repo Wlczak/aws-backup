@@ -76,6 +76,12 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 		return nil
 	}
 
+	// scanCtx is cancelled by the flusher when a tick-flush errors so the
+	// walker stops appending immediately — otherwise the buffer would grow
+	// unbounded and silently discard every entry walked after the failure.
+	scanCtx, cancelScan := context.WithCancelCause(ctx)
+	defer cancelScan(nil)
+
 	done := make(chan struct{})
 	flushErrCh := make(chan error, 1)
 	go func() {
@@ -85,6 +91,7 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 			select {
 			case <-ticker.C:
 				if err := flush(); err != nil {
+					cancelScan(err)
 					flushErrCh <- err
 					return
 				}
@@ -95,8 +102,8 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 		}
 	}()
 
-	walkErr := src.Walk(ctx, func(e Entry) error {
-		if err := ctx.Err(); err != nil {
+	walkErr := src.Walk(scanCtx, func(e Entry) error {
+		if err := scanCtx.Err(); err != nil {
 			return err
 		}
 		if len(paths) > 0 && !matchesAnyPath(e.RelPath, paths) {

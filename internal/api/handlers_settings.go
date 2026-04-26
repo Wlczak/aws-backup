@@ -51,11 +51,24 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if s.deps.ConfigPath != "" {
 		if err := config.Save(s.deps.ConfigPath, merged); err != nil {
 			// Roll back the hot-swap so memory + components still match
-			// what's on disk.
+			// what's on disk. If the rollback itself fails the live
+			// process is in a half-swapped state (new src/store, old
+			// config file): surface both errors so the operator knows
+			// to restart and log the rollback failure.
+			var rollbackErr error
 			if s.deps.ApplySettings != nil {
-				_ = s.deps.ApplySettings(merged, prev)
+				rollbackErr = s.deps.ApplySettings(merged, prev)
 			}
 			s.deps.StoragePrefix = prev.S3.KeyPrefix
+			if rollbackErr != nil {
+				if s.deps.Logger != nil {
+					s.deps.Logger.Error("settings rollback failed after save error",
+						"save_err", err, "rollback_err", rollbackErr)
+				}
+				writeError(w, http.StatusInternalServerError,
+					fmt.Errorf("save config: %w; rollback also failed: %v", err, rollbackErr))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
 			return
 		}

@@ -60,6 +60,12 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 			continue
 		}
 		zipKey := strings.TrimSuffix(key, ZipIndexSuffix)
+		// Only consume sidecars whose backing zip is also present. A
+		// dangling .index.txt (e.g. zip manually deleted from S3) would
+		// otherwise inflate the cloud index with phantom paths.
+		if _, ok := inS3[zipKey]; !ok {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return idx, err
 		}

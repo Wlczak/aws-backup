@@ -155,7 +155,10 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}, nil
 }
 
-// downloadDBFromS3 downloads the index.db object from S3 and writes it to dst.
+// downloadDBFromS3 downloads the index.db object from S3 and writes it to dst
+// atomically: bytes go to dst+".part", are fsynced, then renamed into place.
+// A partial file (process kill mid-stream) is therefore never visible at dst,
+// so the next startup won't open a truncated SQLite file as the live index.
 func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
 	key := dbS3Key(prefix)
 	body, err := store.Get(ctx, key)
@@ -163,15 +166,27 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 		return err
 	}
 	defer body.Close()
-	f, err := os.Create(dst)
+
+	tmp := dst + ".part"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, body)
-	if closeErr := f.Close(); closeErr != nil && err == nil {
-		err = closeErr
+	if _, err := io.Copy(f, body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
 	}
-	return err
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // syncDBToS3 checkpoints the WAL and uploads the DB file to S3.
