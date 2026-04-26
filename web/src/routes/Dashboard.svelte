@@ -13,6 +13,40 @@
   let triggering = $state(false);
   let err = $state('');
 
+  type ItemProgress = {
+    key: string;
+    bytesUploaded: number;
+    size: number;
+    percent: number;
+    status: 'active' | 'done' | 'failed';
+    error?: string;
+    updatedAt: number;
+  };
+  let itemProgress = $state<Record<string, ItemProgress>>({});
+
+  function upsertItem(key: string, patch: Partial<ItemProgress>) {
+    const prev = itemProgress[key];
+    itemProgress[key] = {
+      key,
+      bytesUploaded: prev?.bytesUploaded ?? 0,
+      size: prev?.size ?? 0,
+      percent: prev?.percent ?? 0,
+      status: prev?.status ?? 'active',
+      error: prev?.error,
+      updatedAt: Date.now(),
+      ...patch,
+    };
+  }
+
+  let itemList = $derived(
+    Object.values(itemProgress).sort((a, b) => {
+      // Active first, then most recent.
+      if (a.status === 'active' && b.status !== 'active') return -1;
+      if (b.status === 'active' && a.status !== 'active') return 1;
+      return b.updatedAt - a.updatedAt;
+    }),
+  );
+
   let es: { close: () => void } | null = null;
   let pollTimer: number | undefined;
 
@@ -31,10 +65,49 @@
     pollTimer = window.setInterval(refresh, 3000);
     es = subscribeEvents((type, data) => {
       const d = data as any;
-      if (type === 'scan_complete') scanSeen = d?.data?.seen ?? 0;
-      if (type === 'upload_start') uploads.started++;
-      if (type === 'upload_complete') uploads.completed++;
-      if (type === 'upload_failed') uploads.failed++;
+      const payload = d?.data ?? {};
+      if (type === 'scan_complete') scanSeen = payload.seen ?? 0;
+      if (type === 'upload_start') {
+        uploads.started++;
+        if (payload.key) {
+          upsertItem(payload.key, {
+            bytesUploaded: 0,
+            size: payload.size ?? 0,
+            percent: 0,
+            status: 'active',
+            error: undefined,
+          });
+        }
+      }
+      if (type === 'upload_progress' && payload.key) {
+        upsertItem(payload.key, {
+          bytesUploaded: payload.bytes_uploaded ?? 0,
+          size: payload.size ?? 0,
+          percent: payload.percent ?? 0,
+          status: 'active',
+        });
+      }
+      if (type === 'upload_complete') {
+        uploads.completed++;
+        if (payload.key) {
+          upsertItem(payload.key, {
+            bytesUploaded: payload.size ?? itemProgress[payload.key]?.size ?? 0,
+            size: payload.size ?? itemProgress[payload.key]?.size ?? 0,
+            percent: 100,
+            status: 'done',
+          });
+        }
+      }
+      if (type === 'upload_failed' && payload.key) {
+        uploads.failed++;
+        upsertItem(payload.key, {
+          status: 'failed',
+          error: payload.error ?? '',
+        });
+      }
+      if (type === 'run_start') {
+        itemProgress = {};
+      }
       const line = `[${type}] ${JSON.stringify(d.data ?? d)}`;
       logLines = [...logLines.slice(-49), line];
       if (type === 'run_complete' || type === 'run_start') refresh();
@@ -54,6 +127,7 @@
       uploads = { completed: 0, failed: 0, started: 0 };
       scanSeen = 0;
       logLines = [];
+      itemProgress = {};
     } catch (e) {
       err = String(e);
     } finally {
@@ -429,6 +503,31 @@
     {#if uploads.started > 0}
       <ProgressBar value={uploads.completed} max={uploads.started} label="Uploads" />
     {/if}
+    {#if itemList.length > 0}
+      <div class="items">
+        {#each itemList as item (item.key)}
+          <div class="item item-{item.status}">
+            <div class="item-head">
+              <span class="item-key mono" title={item.key}>{item.key}</span>
+              <span class="item-pct">
+                {#if item.status === 'failed'}
+                  failed
+                {:else if item.status === 'done'}
+                  100%
+                {:else}
+                  {item.percent.toFixed(1)}%
+                {/if}
+              </span>
+            </div>
+            <div class="bar"><div class="fill" style="width: {Math.min(100, item.percent)}%"></div></div>
+            <div class="item-foot mono">
+              {bytes(item.bytesUploaded)} / {bytes(item.size)}
+              {#if item.error}<span class="err"> · {item.error}</span>{/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if logLines.length}
       <pre class="log">{logLines.join('\n')}</pre>
     {/if}
@@ -463,6 +562,42 @@
   .path-input { flex: 1 1 240px; min-width: 0; padding: 0.3rem 0.6rem; font-size: 0.85rem; font-family: var(--mono, monospace); border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 4px; }
   .ok-text { color: var(--ok, #22c55e); font-size: 0.85rem; }
   .warn-text { color: var(--warn, #f59e0b); }
+  .items {
+    display: grid;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+    max-height: 320px;
+    overflow: auto;
+    padding-right: 0.25rem;
+  }
+  .item {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+  }
+  .item-done { opacity: 0.7; }
+  .item-failed { border-color: var(--err); }
+  .item-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    align-items: baseline;
+    font-size: 0.85rem;
+  }
+  .item-key {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .item-pct { font-size: 0.8rem; color: var(--muted); flex: 0 0 auto; }
+  .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+  .item-foot { font-size: 0.75rem; color: var(--muted); }
   .log {
     background: var(--bg);
     border: 1px solid var(--border);

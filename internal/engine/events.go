@@ -14,13 +14,14 @@ type Event struct {
 
 // Event type constants — keep in sync with plan.md and the SSE layer.
 const (
-	EventScanProgress   = "scan_progress"
-	EventScanComplete   = "scan_complete"
-	EventUploadStart    = "upload_start"
-	EventUploadComplete = "upload_complete"
-	EventUploadFailed   = "upload_failed"
-	EventRunStart       = "run_start"
-	EventRunComplete    = "run_complete"
+	EventScanProgress    = "scan_progress"
+	EventScanComplete    = "scan_complete"
+	EventUploadStart     = "upload_start"
+	EventUploadProgress  = "upload_progress"
+	EventUploadComplete  = "upload_complete"
+	EventUploadFailed    = "upload_failed"
+	EventRunStart        = "run_start"
+	EventRunComplete     = "run_complete"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

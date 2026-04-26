@@ -509,7 +509,7 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	// a prior DEEP_ARCHIVE object whose content may differ. The caller
 	// catches ErrAlreadyExists and advances to the next counter slot.
 	// (#116)
-	res, err := e.opts.Storage.PutIfAbsent(ctx, key, f, size)
+	res, err := e.opts.Storage.PutIfAbsent(ctx, key, e.progressBody(runID, key, f, size), size)
 	f.Close()
 	if err != nil {
 		e.emit(Event{
@@ -595,7 +595,7 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	if err != nil {
 		return 0, err
 	}
-	res, err := e.opts.Storage.Put(ctx, key, f, size)
+	res, err := e.opts.Storage.Put(ctx, key, e.progressBody(runID, key, f, size), size)
 	f.Close()
 	if err != nil {
 		e.emit(Event{
@@ -624,6 +624,32 @@ func (e *Engine) emit(ev Event) {
 	if e.opts.Emit != nil {
 		e.opts.Emit(ev)
 	}
+}
+
+// progressBody wraps body so each Read advances a throttled
+// EventUploadProgress event for key. The wrapper deliberately exposes
+// only io.Reader (not Seeker / ReaderAt) so the AWS SDK reads bytes
+// serially through Read and we observe every chunk; concurrent
+// multipart uploads then run from the SDK's internal part buffers.
+func (e *Engine) progressBody(runID int64, key string, body io.Reader, size int64) io.Reader {
+	return newProgressReader(body, size, defaultProgressInterval, func(read, total int64) {
+		var pct float64
+		if total > 0 {
+			pct = float64(read) / float64(total) * 100
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		e.emit(Event{
+			Type: EventUploadProgress, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"key":            key,
+				"bytes_uploaded": read,
+				"size":           total,
+				"percent":        pct,
+			},
+		})
+	})
 }
 
 func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {

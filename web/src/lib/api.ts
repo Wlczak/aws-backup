@@ -275,7 +275,7 @@ export function subscribeEvents(
   };
   const types = [
     'scan_progress', 'scan_complete',
-    'upload_start', 'upload_complete', 'upload_failed',
+    'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
     'run_start', 'run_complete',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
