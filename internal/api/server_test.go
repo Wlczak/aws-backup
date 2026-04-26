@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -393,15 +394,30 @@ func TestTriggerRunConflict(t *testing.T) {
 }
 
 func TestTestEndpoints(t *testing.T) {
-	ts, deps := newTestServer(t)
+	ts, _ := newTestServer(t)
 
 	var res testResult
 	getJSON(t, ts, "/api/smb/test", &res)
 	if !res.OK {
 		t.Errorf("source test: ok=false msg=%s", res.Message)
 	}
+}
 
+// TestTestEndpointS3 hits the live HeadBucket round-trip handleTestStorage
+// performs. Requires the docker-compose MinIO at localhost:9000; skipped
+// when unreachable so CI (no MinIO sidecar) stays green. Mirrors the
+// probe in s3_integration_test.go.
+func TestTestEndpointS3(t *testing.T) {
+	conn, err := net.DialTimeout("tcp", "localhost:9000", 300*time.Millisecond)
+	if err != nil {
+		t.Skipf("skipping: MinIO not reachable at localhost:9000 (%v)", err)
+	}
+	conn.Close()
+
+	ts, deps := newTestServer(t)
 	deps.Config.S3.Endpoint = "http://localhost:9000"
+
+	var res testResult
 	getJSON(t, ts, "/api/s3/test", &res)
 	if !res.OK {
 		t.Errorf("storage test: ok=false msg=%s", res.Message)
