@@ -18,6 +18,11 @@ const (
 	EventScanComplete    = "scan_complete"
 	EventUploadPlan      = "upload_plan"
 	EventCopyProgress    = "copy_progress"
+	// EventRunLog is emitted as a burst on SSE connect to replay the
+	// in-flight run's persisted log lines, so clients that reconnect
+	// mid-run see the full history rather than just events from the
+	// moment of reconnection. (#130)
+	EventRunLog          = "run_log"
 	EventUploadStart     = "upload_start"
 	EventUploadProgress  = "upload_progress"
 	EventUploadComplete  = "upload_complete"

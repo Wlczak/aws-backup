@@ -189,7 +189,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/sync/full", s.handleSyncFull)
 		r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
 
-		r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger))
+		r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger, s.sseReplay))
 	})
 
 	// Serve the embedded Svelte SPA at "/". Any path that doesn't resolve
@@ -222,4 +222,49 @@ var errBadJSON = errors.New("invalid JSON body")
 // so the engine exits cleanly between files when the flag flips.
 func (s *Server) IsStopRequested() bool {
 	return s.currentRunStopReq.Load()
+}
+
+// sseReplay is passed to sseHandler as the replay callback. On each SSE
+// connect it returns a burst of engine.Events that reconstruct the
+// in-flight run's history from the DB so clients that refresh mid-run
+// see the full log rather than starting blank. (#130)
+func (s *Server) sseReplay(ctx context.Context) []engine.Event {
+	s.runMu.Lock()
+	runID := s.currentRun
+	s.runMu.Unlock()
+	if runID == 0 {
+		return nil
+	}
+
+	run, err := s.deps.DB.GetRun(ctx, runID)
+	if err != nil {
+		return nil
+	}
+
+	evts := []engine.Event{
+		{
+			Type:  engine.EventRunStart,
+			RunID: run.ID,
+			At:    run.StartedAt,
+			Data: map[string]any{
+				"files_scanned":  run.FilesScanned,
+				"files_uploaded": run.FilesUploaded,
+				"bytes_uploaded": run.BytesUploaded,
+			},
+		},
+	}
+
+	logs, err := s.deps.DB.ListLogs(ctx, runID)
+	if err != nil {
+		return evts
+	}
+	for _, l := range logs {
+		evts = append(evts, engine.Event{
+			Type:  engine.EventRunLog,
+			RunID: l.RunID,
+			At:    l.Timestamp,
+			Data:  map[string]any{"level": l.Level, "message": l.Message},
+		})
+	}
+	return evts
 }

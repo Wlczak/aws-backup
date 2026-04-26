@@ -126,7 +126,11 @@
         itemProgress = {};
         uploads = { completed: 0, failed: 0, started: 0, total: 0 };
       }
-      const line = `[${type}] ${JSON.stringify(d.data ?? d)}`;
+      // run_log events are replayed history; render them as readable
+      // "[level] message" lines rather than raw JSON. (#130)
+      const line = type === 'run_log'
+        ? `[${payload.level ?? 'log'}] ${payload.message ?? ''}`
+        : `[${type}] ${JSON.stringify(d.data ?? d)}`;
       logLines = [...logLines.slice(-49), line];
       if (type === 'run_complete' || type === 'run_start') refresh();
     });

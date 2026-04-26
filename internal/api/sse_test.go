@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -17,7 +18,7 @@ import (
 
 func TestSSEDeliversEvents(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus, slog.Default()))
+	srv := httptest.NewServer(sseHandler(bus, slog.Default(), nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -52,7 +53,7 @@ func TestSSEDeliversEvents(t *testing.T) {
 
 func TestSSECleansUpOnDisconnect(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus, slog.Default()))
+	srv := httptest.NewServer(sseHandler(bus, slog.Default(), nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -104,6 +105,84 @@ func readNextEvent(r io.Reader, timeout time.Duration) (sseFrame, error) {
 	}
 }
 
+// TestSSEReplayOnConnect verifies that a connecting client receives the
+// in-flight run history (run_start + run_log entries) before the live
+// stream begins, so a page refresh mid-run restores the full log. (#130)
+func TestSSEReplayOnConnect(t *testing.T) {
+	bus := events.NewBus(8)
+	replayed := []engine.Event{
+		{Type: engine.EventRunStart, RunID: 5},
+		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan started"}},
+		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan complete"}},
+	}
+	replay := func(_ context.Context) []engine.Event { return replayed }
+	srv := httptest.NewServer(sseHandler(bus, slog.Default(), replay))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Use one persistent scanner so the read-ahead buffer isn't lost
+	// between calls — readNextEvent creates a fresh Scanner each time
+	// which would miss buffered-ahead bytes from the replay burst.
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	scanFrame := func(timeout time.Duration) (sseFrame, error) {
+		type res struct {
+			f   sseFrame
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			var f sseFrame
+			for sc.Scan() {
+				line := sc.Text()
+				switch {
+				case strings.HasPrefix(line, "event: "):
+					f.event = strings.TrimPrefix(line, "event: ")
+				case strings.HasPrefix(line, "data: "):
+					f.data = strings.TrimPrefix(line, "data: ")
+				case line == "" && f.event != "":
+					ch <- res{f: f}
+					return
+				}
+			}
+			ch <- res{err: sc.Err()}
+		}()
+		select {
+		case r := <-ch:
+			return r.f, r.err
+		case <-time.After(timeout):
+			return sseFrame{}, io.ErrUnexpectedEOF
+		}
+	}
+
+	// Three replayed events should arrive immediately.
+	for i, want := range []string{engine.EventRunStart, engine.EventRunLog, engine.EventRunLog} {
+		got, err := scanFrame(time.Second)
+		if err != nil {
+			t.Fatalf("replay event %d: %v", i, err)
+		}
+		if got.event != want {
+			t.Errorf("replay event %d: got %q want %q", i, got.event, want)
+		}
+	}
+
+	// Live events still arrive after the replay burst.
+	waitFor(t, func() bool { return bus.SubscriberCount() == 1 }, 500*time.Millisecond)
+	bus.Publish(engine.Event{Type: engine.EventRunComplete, RunID: 5})
+	got, err := scanFrame(time.Second)
+	if err != nil {
+		t.Fatal("live event:", err)
+	}
+	if got.event != engine.EventRunComplete {
+		t.Errorf("live event: got %q want run_complete", got.event)
+	}
+}
+
 // TestSSEMarshalErrorLogsAndClosesStream verifies that an event with an
 // unmarshallable payload is logged at error level and causes the stream
 // to close (so EventSource auto-reconnects) rather than silently
@@ -113,7 +192,7 @@ func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	srv := httptest.NewServer(sseHandler(bus, log))
+	srv := httptest.NewServer(sseHandler(bus, log, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")

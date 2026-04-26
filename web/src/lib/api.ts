@@ -281,7 +281,7 @@ export function subscribeEvents(
     'upload_plan',
     'copy_progress',
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
-    'run_start', 'run_complete',
+    'run_start', 'run_log', 'run_complete',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   if (onStatus) {

@@ -3,20 +3,27 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 
+	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
 )
 
 // sseHandler returns an http.Handler that streams events from bus to the
 // client over Server-Sent Events. The handler returns when the client
 // disconnects (ctx.Done fires) or the subscription is closed.
-// log is used to surface marshal errors; pass slog.Default() when no
-// specific logger is available.
-func sseHandler(bus *events.Bus, log *slog.Logger) http.Handler {
+//
+// replay, when non-nil, is called once at connect time and its events
+// are flushed to the client before the live stream begins. This lets
+// a client that refreshes mid-run receive the full run history rather
+// than starting blind. (#130)
+//
+// log is used to surface marshal errors.
+func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) []engine.Event) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -31,12 +38,28 @@ func sseHandler(bus *events.Bus, log *slog.Logger) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
+		// Subscribe before the replay so we don't miss events that land
+		// between the DB query and the live-loop start.
 		sub := bus.Subscribe()
 		defer sub.Close()
 
 		// Initial comment line so clients know the stream is live even
 		// before the first real event arrives.
 		fmt.Fprint(w, ": connected\n\n")
+
+		// Replay in-flight run history if a run is active.
+		if replay != nil {
+			for _, ev := range replay(r.Context()) {
+				if err := writeSSEEvent(w, ev); err != nil {
+					// Skip one bad replay entry rather than killing the
+					// whole connection before the live stream begins.
+					log.Error("sse: failed to marshal replay event",
+						"event_type", ev.Type,
+						"run_id", ev.RunID,
+						"error", err)
+				}
+			}
+		}
 		flusher.Flush()
 
 		ctx := r.Context()
@@ -48,8 +71,7 @@ func sseHandler(bus *events.Bus, log *slog.Logger) http.Handler {
 				if !ok {
 					return
 				}
-				body, err := json.Marshal(ev)
-				if err != nil {
+				if err := writeSSEEvent(w, ev); err != nil {
 					// A marshal failure means a code defect (e.g. an
 					// unmarshallable field was added to an event type).
 					// Log it so the bug is visible, then close the stream
@@ -60,9 +82,17 @@ func sseHandler(bus *events.Bus, log *slog.Logger) http.Handler {
 						"error", err)
 					return
 				}
-				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, body)
 				flusher.Flush()
 			}
 		}
 	})
+}
+
+func writeSSEEvent(w http.ResponseWriter, ev engine.Event) error {
+	body, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, body)
+	return nil
 }
