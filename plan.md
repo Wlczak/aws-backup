@@ -145,7 +145,7 @@ CREATE TABLE settings (
   "backup": {
     "chunk_size": 10,
     "tmp_dir": "",
-    "schedule": "0 2 * * *",
+    "schedule": "",
     "zip_threshold": 50,
     "zip_max_bytes": 0,
     "enable_zip_index": true,

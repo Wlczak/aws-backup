@@ -15,6 +15,12 @@ func TestDefaultValidates(t *testing.T) {
 	}
 }
 
+func TestDefaultScheduleDisabled(t *testing.T) {
+	if got := Default().Backup.Schedule; got != "" {
+		t.Errorf("Default().Backup.Schedule = %q; want empty (scheduled runs disabled by default)", got)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "config.json")

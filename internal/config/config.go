@@ -114,7 +114,7 @@ func Default() Config {
 		Backup: BackupConfig{
 			ChunkSize:      10,
 			TmpDir:         filepath.Join(os.TempDir(), "aws-backup"),
-			Schedule:       "0 2 * * *",
+			Schedule:       "",
 			ZipThreshold:   50,
 			MinZipDirFiles: 20,
 			ZipMaxBytes:    0, // engine default (2 GiB)
