@@ -204,7 +204,10 @@ func (a *appState) syncDBToS3(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.store.Put(ctx, dbS3Key(a.cfg.S3.KeyPrefix), f, fi.Size())
+	// STANDARD tier: the DB sidecar is read on every restart to seed the
+	// local index, so it must be instantly readable without a Glacier
+	// restore — same reasoning as the zip .index.txt sidecars. (#125)
+	_, err = a.store.PutStandard(ctx, dbS3Key(a.cfg.S3.KeyPrefix), f, fi.Size())
 	return err
 }
 
