@@ -146,6 +146,19 @@
     }
   }
 
+  let stopping = $state(false);
+  async function stop() {
+    if (!status?.current || stopping) return;
+    stopping = true;
+    try {
+      await api.stopRun(status.current.id);
+    } catch (e) {
+      err = String(e);
+    } finally {
+      stopping = false;
+    }
+  }
+
   let syncing = $state(false);
   let syncInfo = $state('');
   let fullSyncResult = $state<{
@@ -297,7 +310,14 @@
         run #{status.current.id} <StatusBadge status={status.current.status} />
       </div>
       <div class="muted">started {relativeTime(status.current.started_at)}</div>
-      <button onclick={cancel} type="button" style="margin-top: 0.5rem">Cancel</button>
+      <div class="run-actions" style="margin-top: 0.5rem">
+        <button class="primary" onclick={stop} type="button" disabled={stopping} title="Finish the in-flight upload, then stop">
+          {stopping ? 'Stopping…' : 'Stop'}
+        </button>
+        <button class="danger" onclick={cancel} type="button" title="Kill the in-flight upload immediately">
+          Force cancel
+        </button>
+      </div>
     {:else}
       <div class="big muted">Idle</div>
       <div class="run-actions">

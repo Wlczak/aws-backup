@@ -218,6 +218,59 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	}
 }
 
+// TestEngineGracefulStop ensures StopRequested fired between groups
+// terminates the run cleanly with RunStopped status: the in-flight
+// upload completes (no torn files), no further uploads start, and the
+// run carries no error message. (#124)
+func TestEngineGracefulStop(t *testing.T) {
+	eng, d, _, store, root, col := newTestEngine(t, 100) // high zip threshold → all individual
+
+	// Five separate top-dirs so each becomes its own group, giving the
+	// engine multiple between-group check points where StopRequested
+	// can flip to true.
+	for _, dir := range []string{"a", "b", "c", "d", "e"} {
+		writeFile(t, root, dir+"/file.txt", "data-"+dir)
+	}
+
+	var stop bool
+	eng.opts.StopRequested = func() bool { return stop }
+	// Flip after the first upload completes so we know mid-run stop works
+	// (rather than refusing to start anything).
+	origEmit := eng.opts.Emit
+	eng.opts.Emit = func(ev Event) {
+		origEmit(ev)
+		if ev.Type == EventUploadComplete {
+			stop = true
+		}
+	}
+
+	ctx := context.Background()
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	run, _ := d.GetRun(ctx, runID)
+	if run.Status != db.RunStopped {
+		t.Errorf("status=%q want %q", run.Status, db.RunStopped)
+	}
+	if run.ErrorMessage != "" {
+		t.Errorf("ErrorMessage=%q want empty", run.ErrorMessage)
+	}
+	completes := col.byType(EventUploadComplete)
+	if len(completes) == 0 {
+		t.Fatal("expected at least one upload to complete before stop")
+	}
+	if len(completes) >= 5 {
+		t.Errorf("got %d completes, expected stop to short-circuit before all 5", len(completes))
+	}
+	// Storage should hold exactly the keys we observed completing,
+	// proving no torn / partial uploads landed.
+	if got := len(store.Keys()); got != len(completes) {
+		t.Errorf("store has %d keys but %d uploads completed", got, len(completes))
+	}
+}
+
 func TestEngineNoPendingFiles(t *testing.T) {
 	eng, d, _, _, _, col := newTestEngine(t, 3)
 	runID, err := eng.Run(context.Background())

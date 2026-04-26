@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,6 +57,11 @@ type Server struct {
 	runMu            sync.Mutex
 	currentRun       int64 // 0 when idle
 	currentRunCancel context.CancelFunc
+	// currentRunStopReq is the graceful-stop flag for the in-flight run.
+	// /api/runs/:id/stop sets it; the engine polls via IsStopRequested
+	// between files / groups and exits cleanly with status="stopped"
+	// once the current upload finishes. Cleared at run start. (#124)
+	currentRunStopReq atomic.Bool
 	// runWg tracks engine goroutines spawned by handleTriggerRun so the
 	// CLI can wait for them on shutdown before tearing down DB / storage.
 	runWg sync.WaitGroup
@@ -159,6 +165,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/runs", s.handleTriggerRun)
 		r.Get("/runs/{id}", s.handleGetRun)
 		r.Post("/runs/{id}/cancel", s.handleCancelRun)
+		r.Post("/runs/{id}/stop", s.handleStopRun)
 
 		r.Get("/files", s.handleListFiles)
 		r.Get("/files/stats", s.handleFileStats)
@@ -208,3 +215,10 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // errBadJSON and errMissingBody help return consistent 400s.
 var errBadJSON = errors.New("invalid JSON body")
+
+// IsStopRequested returns whether the in-flight run has been asked to
+// stop gracefully. The CLI wires this into engine.Options.StopRequested
+// so the engine exits cleanly between files when the flag flips.
+func (s *Server) IsStopRequested() bool {
+	return s.currentRunStopReq.Load()
+}

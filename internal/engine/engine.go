@@ -68,7 +68,17 @@ type Options struct {
 	ScanPaths      []string         // when set with RunModeScan: partial rescan targets
 	Now            func() time.Time // injectable clock for tests
 	Emit           EventEmitter
+	// StopRequested, if non-nil, is polled between files / groups during
+	// the upload phase. When it returns true the run exits cleanly with
+	// RunStopped status (the in-flight upload completes; no further files
+	// start). Distinct from context cancellation, which kills mid-stream.
+	// (#124)
+	StopRequested func() bool
 }
+
+// ErrStopRequested is returned by upload helpers when StopRequested
+// fires mid-group; the outer loop converts it to db.RunStopped.
+var ErrStopRequested = errors.New("engine: stop requested")
 
 // Engine owns a run's lifecycle.
 type Engine struct {
@@ -323,6 +333,10 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		if err := ctx.Err(); err != nil {
 			return db.RunCancelled, err
 		}
+		if e.opts.StopRequested != nil && e.opts.StopRequested() {
+			e.log(ctx, runID, db.LogInfo, "stop requested — finishing run after current group")
+			return db.RunStopped, nil
+		}
 		var up, bytes int64
 		if g.Zip {
 			dir := commonDirPath(g.Files)
@@ -347,6 +361,10 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			slog.Warn("update run stats failed", "err", uerr, "run_id", runID)
 		}
 		if err != nil {
+			if errors.Is(err, ErrStopRequested) {
+				e.log(ctx, runID, db.LogInfo, "stop requested — exiting after in-flight uploads")
+				return db.RunStopped, nil
+			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err
 			}
@@ -572,6 +590,9 @@ func (e *Engine) processIndividualGroup(ctx context.Context, runID int64, g Grou
 		for _, pf := range g.Files[i:j] {
 			if err := ctx.Err(); err != nil {
 				return uploaded, bytes, err
+			}
+			if e.opts.StopRequested != nil && e.opts.StopRequested() {
+				return uploaded, bytes, ErrStopRequested
 			}
 			n, err := e.uploadIndividual(ctx, runID, pf)
 			if err != nil {

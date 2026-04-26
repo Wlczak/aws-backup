@@ -11,6 +11,11 @@ const (
 	RunCompleted = "completed"
 	RunFailed    = "failed"
 	RunCancelled = "cancelled"
+	// RunStopped is the terminal state for a run that exited cleanly
+	// after a graceful stop request: the in-flight upload finished, but
+	// no further files were started. Distinct from RunCancelled (force
+	// kill mid-upload). (#124)
+	RunStopped = "stopped"
 )
 
 // Log severity levels.

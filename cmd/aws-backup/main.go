@@ -93,6 +93,9 @@ type appState struct {
 	bus     *events.Bus
 	dbPath  string
 	logger  *slog.Logger
+	// stopRequested is wired from api.Server.IsStopRequested in runServe
+	// so the engine can poll for graceful-stop requests between files. (#124)
+	stopRequested func() bool
 }
 
 func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
@@ -237,6 +240,7 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		Mode:           mode,
 		ScanPaths:      scanPaths,
 		Emit:           a.bus.Publish,
+		StopRequested:  a.stopRequested,
 	}), nil
 }
 
@@ -404,6 +408,10 @@ func runServe(cfgPath string) {
 		},
 		Logger: logger,
 	})
+	// Wire the API server's graceful-stop flag into the engine. Set before
+	// Router() is mounted so buildEngine, called per-run, sees a non-nil
+	// callback. (#124)
+	app.stopRequested = srv.IsStopRequested
 
 	sched, err := scheduler.New(app.cfg.Backup.Schedule, func(ctx context.Context) error {
 		// POST /api/runs trigger. Direct call — we own the same DB/engine.

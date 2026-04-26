@@ -321,6 +321,60 @@ func TestTriggerRun(t *testing.T) {
 	t.Fatalf("run %d did not complete in time", tr.RunID)
 }
 
+// TestStopRun verifies the graceful-stop endpoint flips the server's
+// stop flag (which the engine polls between files) and returns 202.
+// Cancel-vs-stop semantic separation: /cancel still kills mid-stream;
+// /stop only requests an after-current exit. (#124)
+func TestStopRun(t *testing.T) {
+	ts, deps := newTestServer(t)
+
+	// Pretend a run is in flight under id 42.
+	srv := &Server{deps: deps, currentRun: 42, currentRunCancel: func() {}}
+	ts.Config.Handler = srv.Router()
+
+	if srv.IsStopRequested() {
+		t.Fatal("stop flag should be clear before /stop")
+	}
+
+	// Wrong id: 404, flag stays clear.
+	resp, err := ts.Client().Post(ts.URL+"/api/runs/41/stop", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("wrong-id status=%d want 404", resp.StatusCode)
+	}
+	if srv.IsStopRequested() {
+		t.Fatal("wrong-id call must not flip the stop flag")
+	}
+
+	// Right id: 202 + flag set.
+	resp, err = ts.Client().Post(ts.URL+"/api/runs/42/stop", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status=%d want 202", resp.StatusCode)
+	}
+	if !srv.IsStopRequested() {
+		t.Error("stop flag should be set after /stop")
+	}
+
+	// Idle server: 404.
+	idle := &Server{deps: deps}
+	ts.Config.Handler = idle.Router()
+	resp, err = ts.Client().Post(ts.URL+"/api/runs/1/stop", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("idle status=%d want 404", resp.StatusCode)
+	}
+}
+
 func TestTriggerRunConflict(t *testing.T) {
 	ts, deps := newTestServer(t)
 

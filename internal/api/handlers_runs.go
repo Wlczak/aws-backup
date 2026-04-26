@@ -164,6 +164,9 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.currentRun = runID
 	s.currentRunCancel = cancel
+	// Clear any stale graceful-stop flag from a prior run before the
+	// engine starts polling it. (#124)
+	s.currentRunStopReq.Store(false)
 
 	// Ensure currentRun is cleared if we panic before the goroutine launches.
 	// The goroutine itself is responsible for clearing it on normal completion.
@@ -216,6 +219,26 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	cancel()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+}
+
+// handleStopRun signals a graceful stop: the engine finishes its
+// in-flight upload and exits between files. Distinct from /cancel,
+// which forcibly kills the upload mid-stream. (#124)
+func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid run id"))
+		return
+	}
+	s.runMu.Lock()
+	current := s.currentRun
+	s.runMu.Unlock()
+	if current == 0 || current != id {
+		writeError(w, http.StatusNotFound, errors.New("no running run with that id"))
+		return
+	}
+	s.currentRunStopReq.Store(true)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
 
 type statusResponse struct {

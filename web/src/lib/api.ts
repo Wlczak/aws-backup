@@ -154,6 +154,7 @@ export const api = {
       body: opts ? JSON.stringify(opts) : undefined,
     }),
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
+  stopRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/stop`, { method: 'POST' }),
 
   files: (opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {}) => {
     const qs = new URLSearchParams();
