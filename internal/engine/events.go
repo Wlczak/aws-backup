@@ -17,6 +17,7 @@ const (
 	EventScanProgress    = "scan_progress"
 	EventScanComplete    = "scan_complete"
 	EventUploadPlan      = "upload_plan"
+	EventCopyProgress    = "copy_progress"
 	EventUploadStart     = "upload_start"
 	EventUploadProgress  = "upload_progress"
 	EventUploadComplete  = "upload_complete"

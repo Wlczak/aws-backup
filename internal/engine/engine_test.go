@@ -131,6 +131,22 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 		t.Errorf("upload_plan.total_groups = %v, want 3", got)
 	}
 
+	// Each of the 4 upload keys (1 zip + 3 individual) must surface at
+	// least one copy_progress event so the UI can show source→tmp
+	// progress for slow reads. The final belt-and-braces 100% sample
+	// emitted by the engine guarantees this even for tiny test files.
+	// (#127)
+	copies := col.byType(EventCopyProgress)
+	gotKeys := map[string]bool{}
+	for _, ev := range copies {
+		if k, ok := ev.Data["key"].(string); ok {
+			gotKeys[k] = true
+		}
+	}
+	if len(gotKeys) != 4 {
+		t.Errorf("copy_progress saw %d distinct keys, want 4 (one zip + 3 individual)", len(gotKeys))
+	}
+
 	// Exactly one zip object in storage, one matching .index.txt sidecar,
 	// and the rest are per-file keys.
 	keys := store.Keys()

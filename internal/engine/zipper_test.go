@@ -321,7 +321,7 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "photos.zip")
-	size, entries, err := CreateZip(context.Background(), src, pending, out)
+	size, entries, err := CreateZip(context.Background(), src, pending, out, nil)
 	if err != nil {
 		t.Fatalf("CreateZip: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestCreateZipCancel(t *testing.T) {
 	cancel()
 
 	_, _, err := CreateZip(ctx, src, []PendingFile{{RelPath: "a.txt"}},
-		filepath.Join(t.TempDir(), "out.zip"))
+		filepath.Join(t.TempDir(), "out.zip"), nil)
 	if err == nil {
 		t.Fatal("expected cancel error")
 	}

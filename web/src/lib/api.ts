@@ -279,6 +279,7 @@ export function subscribeEvents(
   const types = [
     'scan_progress', 'scan_complete',
     'upload_plan',
+    'copy_progress',
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
     'run_start', 'run_complete',
   ];

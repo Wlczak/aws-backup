@@ -19,6 +19,7 @@
     size: number;
     percent: number;
     status: 'active' | 'done' | 'failed';
+    phase: 'copy' | 'upload';
     error?: string;
     updatedAt: number;
   };
@@ -32,6 +33,7 @@
       size: prev?.size ?? 0,
       percent: prev?.percent ?? 0,
       status: prev?.status ?? 'active',
+      phase: prev?.phase ?? 'copy',
       error: prev?.error,
       updatedAt: Date.now(),
       ...patch,
@@ -68,14 +70,26 @@
       const payload = d?.data ?? {};
       if (type === 'scan_complete') scanSeen = payload.seen ?? 0;
       if (type === 'upload_plan') uploads.total = payload.total_files ?? 0;
+      if (type === 'copy_progress' && payload.key) {
+        upsertItem(payload.key, {
+          bytesUploaded: payload.bytes_copied ?? 0,
+          size: payload.size ?? 0,
+          percent: payload.percent ?? 0,
+          status: 'active',
+          phase: 'copy',
+        });
+      }
       if (type === 'upload_start') {
         uploads.started++;
         if (payload.key) {
+          // Reset bar to 0 on phase switch — the upload size differs from
+          // the copy size for zips (compression) so we can't carry over.
           upsertItem(payload.key, {
             bytesUploaded: 0,
             size: payload.size ?? 0,
             percent: 0,
             status: 'active',
+            phase: 'upload',
             error: undefined,
           });
         }
@@ -86,6 +100,7 @@
           size: payload.size ?? 0,
           percent: payload.percent ?? 0,
           status: 'active',
+          phase: 'upload',
         });
       }
       if (type === 'upload_complete') {
@@ -96,6 +111,7 @@
             size: payload.size ?? itemProgress[payload.key]?.size ?? 0,
             percent: 100,
             status: 'done',
+            phase: 'upload',
           });
         }
       }
@@ -554,6 +570,9 @@
           <div class="item item-{item.status}">
             <div class="item-head">
               <span class="item-key mono" title={item.key}>{item.key}</span>
+              {#if item.status === 'active'}
+                <span class="item-phase">{item.phase === 'copy' ? 'copying' : 'uploading'}</span>
+              {/if}
               <span class="item-pct">
                 {#if item.status === 'failed'}
                   failed
@@ -640,6 +659,7 @@
     min-width: 0;
   }
   .item-pct { font-size: 0.8rem; color: var(--muted); flex: 0 0 auto; }
+  .item-phase { font-size: 0.75rem; color: var(--muted); flex: 0 0 auto; font-style: italic; }
   .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
   .item-foot { font-size: 0.75rem; color: var(--muted); }

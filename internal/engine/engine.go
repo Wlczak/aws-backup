@@ -497,18 +497,29 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	zipPath := filepath.Join(e.opts.TmpDir, zipBase)
 	defer os.Remove(zipPath)
 
+	key := path.Join(e.opts.KeyPrefix, zipRel)
+	indexKey := key + ZipIndexSuffix
+
+	// Sum source bytes up front so copy_progress events can render a
+	// real percent. The resulting tmp zip is typically smaller than
+	// this total due to compression, but for *copy* progress we report
+	// against what's being read off the source. (#127)
+	var groupTotalBytes int64
+	for _, f := range g.Files {
+		groupTotalBytes += f.Size
+	}
+
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipRel))
-	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath)
+	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath, e.copyWrapZip(runID, key, groupTotalBytes))
 	if err != nil {
 		return 0, 0, fmt.Errorf("create zip %s: %w", zipRel, err)
 	}
+	e.emitCopyProgress(runID, key, groupTotalBytes, groupTotalBytes) // belt-and-braces final 100%
 
 	md5hex, err := md5File(zipPath)
 	if err != nil {
 		return 0, 0, err
 	}
-	key := path.Join(e.opts.KeyPrefix, zipRel)
-	indexKey := key + ZipIndexSuffix
 
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
@@ -616,13 +627,17 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d-%d", runID, pf.ID))
 	defer os.Remove(tmp)
 
+	key := path.Join(e.opts.KeyPrefix, pf.RelPath)
+
 	// Copy source -> tmp so we can compute MD5 and then upload from a file.
-	size, md5hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp)
+	// Wrap the source reader so bytes flowing through emit copy_progress
+	// events; key matches the upload phase so the UI keeps one entry per
+	// item with a phase field.
+	size, md5hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
 	if err != nil {
 		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
 	}
-
-	key := path.Join(e.opts.KeyPrefix, pf.RelPath)
+	e.emitCopyProgress(runID, key, size, size) // belt-and-braces final 100% sample
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
 		Data: map[string]any{"key": key, "size": size},
@@ -663,6 +678,70 @@ func (e *Engine) emit(ev Event) {
 	}
 }
 
+// emitCopyProgress publishes an EventCopyProgress sample for key.
+// Used both via the throttled progressReader callback during copies
+// and as the explicit final 100% sample after the copy returns.
+func (e *Engine) emitCopyProgress(runID int64, key string, read, total int64) {
+	var pct float64
+	if total > 0 {
+		pct = float64(read) / float64(total) * 100
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	e.emit(Event{
+		Type: EventCopyProgress, RunID: runID, At: e.opts.Now(),
+		Data: map[string]any{
+			"key":          key,
+			"bytes_copied": read,
+			"size":         total,
+			"percent":      pct,
+		},
+	})
+}
+
+// copyWrap returns an io.Reader-wrap closure for a single source file,
+// emitting throttled EventCopyProgress events keyed by S3 key. Returns
+// nil when the engine has no event sink, so copyAndHash skips the
+// allocation entirely. (#127)
+func (e *Engine) copyWrap(runID int64, key string, size int64) func(io.Reader) io.Reader {
+	if e.opts.Emit == nil {
+		return nil
+	}
+	return func(r io.Reader) io.Reader {
+		return newProgressReader(r, size, defaultProgressInterval, func(read, total int64) {
+			e.emitCopyProgress(runID, key, read, total)
+		})
+	}
+}
+
+// copyWrapZip returns a wrap closure for the zip-group copy path.
+// Bytes from every per-file reader feed one shared running total
+// against the group's full source byte count (sum of f.Size); throttling
+// is enforced here, not per-reader, so file boundaries don't reset
+// the throttle and flood the bus. The returned closure is intended
+// to be passed to CreateZip and applied once per zip entry. (#127)
+func (e *Engine) copyWrapZip(runID int64, key string, total int64) func(io.Reader) io.Reader {
+	if e.opts.Emit == nil {
+		return nil
+	}
+	var (
+		seen     int64
+		lastEmit time.Time
+	)
+	return func(r io.Reader) io.Reader {
+		return &counterReader{r: r, onRead: func(n int) {
+			seen += int64(n)
+			now := e.opts.Now()
+			if !lastEmit.IsZero() && now.Sub(lastEmit) < defaultProgressInterval {
+				return
+			}
+			lastEmit = now
+			e.emitCopyProgress(runID, key, seen, total)
+		}}
+	}
+}
+
 // progressBody wraps body so each Read advances a throttled
 // EventUploadProgress event for key. The wrapper deliberately exposes
 // only io.Reader (not Seeker / ReaderAt) so the AWS SDK reads bytes
@@ -698,8 +777,11 @@ func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {
 }
 
 // copyAndHash copies a source entry to disk, computing md5 on the way.
-// Returns the copied size and lowercase hex md5.
-func copyAndHash(ctx context.Context, src source.Source, rel, tmp string) (int64, string, error) {
+// Returns the copied size and lowercase hex md5. wrap, if non-nil,
+// wraps the source reader before bytes flow into the writer — the
+// engine uses this to inject a progressReader that emits live
+// copy_progress events for slow / large source reads.
+func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap func(io.Reader) io.Reader) (int64, string, error) {
 	rc, err := src.Open(ctx, rel)
 	if err != nil {
 		return 0, "", err
@@ -712,8 +794,13 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string) (int64
 	}
 	defer out.Close()
 
+	var reader io.Reader = rc
+	if wrap != nil {
+		reader = wrap(rc)
+	}
+
 	h := md5.New()
-	n, err := io.Copy(io.MultiWriter(out, h), rc)
+	n, err := io.Copy(io.MultiWriter(out, h), reader)
 	if err != nil {
 		return n, "", err
 	}

@@ -369,8 +369,11 @@ func sanitizeLabel(s string) string {
 
 // CreateZip streams every file in `files` from src into a zip at outPath.
 // Files retain their source-relative RelPath inside the archive. Returns
-// the final zip size and the list of entry paths written.
-func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string) (size int64, entries []string, err error) {
+// the final zip size and the list of entry paths written. wrap, when
+// non-nil, is applied once per source reader before bytes flow into
+// the zip writer; the engine uses it to inject a counterReader that
+// emits live copy_progress events.
+func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string, wrap func(io.Reader) io.Reader) (size int64, entries []string, err error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return 0, nil, err
 	}
@@ -391,7 +394,7 @@ func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outP
 			zw.Close()
 			return 0, nil, err
 		}
-		if err := writeZipEntry(ctx, zw, src, f); err != nil {
+		if err := writeZipEntry(ctx, zw, src, f, wrap); err != nil {
 			zw.Close()
 			return 0, nil, fmt.Errorf("zip %s: %w", f.RelPath, err)
 		}
@@ -410,7 +413,7 @@ func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outP
 	return st.Size(), entries, nil
 }
 
-func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile) error {
+func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile, wrap func(io.Reader) io.Reader) error {
 	w, err := zw.Create(f.RelPath)
 	if err != nil {
 		return err
@@ -420,6 +423,10 @@ func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f Pen
 		return err
 	}
 	defer rc.Close()
-	_, err = io.Copy(w, rc)
+	var reader io.Reader = rc
+	if wrap != nil {
+		reader = wrap(rc)
+	}
+	_, err = io.Copy(w, reader)
 	return err
 }

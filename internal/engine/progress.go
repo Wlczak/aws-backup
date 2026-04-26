@@ -63,3 +63,22 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// counterReader is a minimal io.Reader wrapper that fires onRead with
+// the byte count of every Read. No throttling — the caller is expected
+// to throttle its emit logic externally. Used by the zip copy phase
+// where bytes from many sequential per-file readers feed one shared
+// running total against a group-level size; per-reader throttling
+// would reset on every file boundary and cause emit storms.
+type counterReader struct {
+	r      io.Reader
+	onRead func(n int)
+}
+
+func (cr *counterReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 && cr.onRead != nil {
+		cr.onRead(n)
+	}
+	return n, err
+}
