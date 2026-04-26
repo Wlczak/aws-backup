@@ -225,43 +225,55 @@ func TestEngineNoPendingFiles(t *testing.T) {
 
 type failingStorage struct {
 	storage.Storage
-	putErr error
-	calls  int
+	putErr   error
+	failKeys map[string]bool // when set, only listed keys fail; others delegate to inner
+	calls    int
 }
 
 func (f *failingStorage) Put(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
 	f.calls++
-	_, _ = io.Copy(io.Discard, body)
-	if f.putErr != nil {
+	if f.putErr != nil && (f.failKeys == nil || f.failKeys[key]) {
+		_, _ = io.Copy(io.Discard, body)
 		return storage.PutResult{}, f.putErr
 	}
+	if f.Storage != nil {
+		return f.Storage.Put(ctx, key, body, size)
+	}
+	_, _ = io.Copy(io.Discard, body)
 	return storage.PutResult{Key: key, ETag: "\"x\"", Size: size}, nil
 }
 
 func TestEngineUploadFailure(t *testing.T) {
 	eng, d, _, _, root, col := newTestEngine(t, 10) // high threshold -> individual
 	writeFile(t, root, "a.txt", "hi")
+	writeFile(t, root, "b.txt", "ok")
 
-	failing := &failingStorage{Storage: storage.NewMemStorage(), putErr: errors.New("boom")}
+	// Fail only on a.txt; b.txt should still upload successfully so we can
+	// verify a per-file failure doesn't abort the rest of the run.
+	mem := storage.NewMemStorage()
+	failing := &failingStorage{Storage: mem, putErr: errors.New("boom"), failKeys: map[string]bool{"backups/a.txt": true}}
 	eng.opts.Storage = failing
 
 	ctx := context.Background()
 	runID, err := eng.Run(ctx)
-	if err == nil {
-		t.Fatal("want run error")
+	if err != nil {
+		t.Fatalf("run should succeed despite per-file failure, got %v", err)
 	}
 	run, _ := d.GetRun(ctx, runID)
-	if run.Status != db.RunFailed {
-		t.Errorf("status=%q want failed", run.Status)
-	}
-	if run.ErrorMessage == "" {
-		t.Error("error_message not set")
+	if run.Status != db.RunCompleted {
+		t.Errorf("status=%q want completed", run.Status)
 	}
 
-	// File should be marked failed.
 	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
-	if len(files) != 1 || files[0].Status != db.StatusFailed {
-		t.Errorf("want 1 failed file, got %+v", files)
+	got := map[string]string{}
+	for _, f := range files {
+		got[f.Path] = f.Status
+	}
+	if got["a.txt"] != db.StatusFailed {
+		t.Errorf("a.txt status=%q want failed", got["a.txt"])
+	}
+	if got["b.txt"] != db.StatusUploaded {
+		t.Errorf("b.txt status=%q want uploaded", got["b.txt"])
 	}
 
 	if len(col.byType(EventUploadFailed)) != 1 {

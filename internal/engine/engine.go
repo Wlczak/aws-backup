@@ -281,7 +281,10 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		seedDirMaxN(rel)
 	}
 
-	var uploaded, bytesUploaded int64
+	var (
+		uploaded, bytesUploaded int64
+		groupErrCount           int
+	)
 	for _, g := range groups {
 		if err := ctx.Err(); err != nil {
 			return db.RunCancelled, err
@@ -303,10 +306,18 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err
 			}
-			return db.RunFailed, err
+			// One failed group should not abort the rest of the run; the
+			// affected files stay pending/failed in the DB and will be
+			// retried next run. Surface true infrastructure failure only
+			// when every group fails.
+			groupErrCount++
+			e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", err))
 		}
 	}
 
+	if groupErrCount > 0 && groupErrCount == len(groups) {
+		return db.RunFailed, fmt.Errorf("all %d groups failed", groupErrCount)
+	}
 	return db.RunCompleted, nil
 }
 
@@ -466,10 +477,9 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	for _, f := range g.Files {
 		ids = append(ids, f.ID)
 	}
-	if err := e.opts.DB.SetZipName(ctx, ids, zipRel); err != nil {
-		return 0, 0, fmt.Errorf("set zip name: %w", err)
-	}
-	if err := e.opts.DB.MarkUploadedBatch(ctx, ids, md5hex, key, now); err != nil {
+	// Single transactional write so a partial failure can't leave files
+	// stuck in the intermediate 'zipped' state with no md5/s3_key.
+	if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, zipRel, md5hex, key, now); err != nil {
 		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipRel, err)
 	}
 
@@ -495,7 +505,14 @@ func (e *Engine) processIndividualGroup(ctx context.Context, runID int64, g Grou
 			}
 			n, err := e.uploadIndividual(ctx, runID, pf)
 			if err != nil {
-				return uploaded, bytes, err
+				// Cancellation aborts the whole run; otherwise the row
+				// is already marked failed by uploadIndividual — log
+				// and keep going so one bad file doesn't stop the rest.
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return uploaded, bytes, err
+				}
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after upload error: %v", pf.RelPath, err))
+				continue
 			}
 			uploaded++
 			bytes += n

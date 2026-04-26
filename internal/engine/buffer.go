@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -65,7 +66,9 @@ func (b *writeBuffer) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = b.flush(ctx)
+			if err := b.flush(ctx); err != nil {
+				slog.Warn("write buffer flush failed (will retry on next tick)", "err", err)
+			}
 		}
 	}
 }
@@ -78,7 +81,9 @@ func (b *writeBuffer) markUploaded(ctx context.Context, id int64, md5, s3Key str
 	full := len(b.uploads) >= b.flushSize
 	b.mu.Unlock()
 	if full {
-		_ = b.flush(ctx)
+		if err := b.flush(ctx); err != nil {
+			slog.Warn("write buffer flush failed (will retry on next tick)", "err", err)
+		}
 	}
 }
 
@@ -89,13 +94,17 @@ func (b *writeBuffer) appendLog(ctx context.Context, runID int64, level, msg str
 	full := len(b.logs) >= b.flushSize
 	b.mu.Unlock()
 	if full {
-		_ = b.flush(ctx)
+		if err := b.flush(ctx); err != nil {
+			slog.Warn("write buffer flush failed (will retry on next tick)", "err", err)
+		}
 	}
 }
 
 // flush drains the current uploads+logs buffers to the DB. Swaps slices
 // under the lock so the flush itself happens outside the critical section
-// — cheap enqueues don't block on a slow commit.
+// — cheap enqueues don't block on a slow commit. On error the unflushed
+// entries are re-prepended into the queue so the next flush retries them
+// instead of silently dropping rows that were already uploaded to S3.
 func (b *writeBuffer) flush(ctx context.Context) error {
 	b.mu.Lock()
 	uploads := b.uploads
@@ -105,18 +114,47 @@ func (b *writeBuffer) flush(ctx context.Context) error {
 	b.mu.Unlock()
 
 	if err := b.d.MarkUploadedMany(ctx, uploads); err != nil {
+		b.requeue(uploads, logs)
 		return err
 	}
-	return b.d.AppendLogMany(ctx, logs)
+	if err := b.d.AppendLogMany(ctx, logs); err != nil {
+		// Uploads already committed; only logs need requeueing.
+		b.requeue(nil, logs)
+		return err
+	}
+	return nil
+}
+
+// requeue puts un-committed entries back at the head of the buffers so
+// the next flush attempt retries them. Preserves ordering relative to
+// any entries enqueued in the meantime.
+func (b *writeBuffer) requeue(uploads []db.UploadedRow, logs []db.LogEntry) {
+	if len(uploads) == 0 && len(logs) == 0 {
+		return
+	}
+	b.mu.Lock()
+	if len(uploads) > 0 {
+		b.uploads = append(uploads, b.uploads...)
+	}
+	if len(logs) > 0 {
+		b.logs = append(logs, b.logs...)
+	}
+	b.mu.Unlock()
 }
 
 // close stops the flusher and drains. Uses a detached context with a
 // short timeout for the final flush so a cancelled run still persists
-// what it managed to upload.
+// what it managed to upload. Retries once on transient errors before
+// giving up so a flaky DB write doesn't lose already-uploaded rows.
 func (b *writeBuffer) close() error {
 	close(b.stop)
 	<-b.done
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return b.flush(ctx)
+	err := b.flush(ctx)
+	if err != nil {
+		slog.Warn("write buffer final flush failed, retrying", "err", err)
+		err = b.flush(ctx)
+	}
+	return err
 }

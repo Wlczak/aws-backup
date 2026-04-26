@@ -256,8 +256,15 @@ export const api = {
 
 // subscribeEvents opens a live EventSource against /api/events. Returns
 // an AbortController-style { close } — callers should invoke it on
-// component teardown to unsubscribe.
-export function subscribeEvents(onEvent: (type: string, data: unknown) => void): { close: () => void } {
+// component teardown to unsubscribe. The optional onStatus callback fires
+// with 'open' once the stream is connected and 'error' on disconnect, so
+// the UI can surface a "live updates disconnected" banner instead of
+// freezing silently when the connection drops. The browser auto-reconnects
+// on transient network errors; onStatus('open') will fire again once it's back.
+export function subscribeEvents(
+  onEvent: (type: string, data: unknown) => void,
+  onStatus?: (status: 'open' | 'error') => void,
+): { close: () => void } {
   const es = new EventSource('/api/events');
   const handler = (ev: MessageEvent) => {
     try {
@@ -272,5 +279,9 @@ export function subscribeEvents(onEvent: (type: string, data: unknown) => void):
     'run_start', 'run_complete',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
+  if (onStatus) {
+    es.addEventListener('open', () => onStatus('open'));
+    es.addEventListener('error', () => onStatus('error'));
+  }
   return { close: () => es.close() };
 }

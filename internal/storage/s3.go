@@ -11,10 +11,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
+
+// s3SinglePartLimit is the SDK's hard ceiling on a single PutObject body.
+// Above it (or when size is unknown) we go through the multipart uploader.
+const s3SinglePartLimit = 5 * 1024 * 1024 * 1024 // 5 GiB
 
 // S3Config holds everything S3Storage needs. The Endpoint field is what
 // points the client at MinIO (or another S3-compatible service); set to
@@ -32,6 +37,7 @@ type S3Config struct {
 // S3Storage is the real S3 / MinIO backend.
 type S3Storage struct {
 	client       *s3.Client
+	uploader     *manager.Uploader
 	bucket       string
 	storageClass s3types.StorageClass
 }
@@ -68,14 +74,17 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 
 	return &S3Storage{
 		client:       client,
+		uploader:     manager.NewUploader(client),
 		bucket:       cfg.Bucket,
 		storageClass: s3types.StorageClass(cfg.StorageClass),
 	}, nil
 }
 
-// Put uploads body under key via the SDK's multipart uploader with a
-// server-verified SHA256 checksum. Returns the ETag, size, and checksum
-// echoed by the service.
+// Put uploads body under key. Bodies <= 5 GiB go through PutObject with a
+// server-verified SHA256 checksum. Bodies above that limit (or of unknown
+// size, size = -1) are routed through the SDK's multipart uploader so
+// arbitrarily large zips don't hit S3's single-PutObject EntityTooLarge
+// ceiling. Returns the ETag, size, and (single-shot path) checksum.
 func (s *S3Storage) Put(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error) {
 	return s.putWithClass(ctx, key, body, size, s.storageClass)
 }
@@ -87,19 +96,21 @@ func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader,
 }
 
 func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
-	in := &s3.PutObjectInput{
+	// Bodies larger than the 5 GiB single-PutObject limit (or of unknown
+	// size) must go through the multipart uploader; PutObject would reject
+	// them with EntityTooLarge.
+	if size < 0 || size > s3SinglePartLimit {
+		return s.uploadMultipart(ctx, key, body, size, class)
+	}
+
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		Body:              body,
+		ContentLength:     aws.Int64(size),
 		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
 		StorageClass:      class,
-	}
-	// ContentLength must be omitted when size is unknown (-1). Forwarding
-	// a negative length to S3 is rejected by the API / signing layer.
-	if size >= 0 {
-		in.ContentLength = aws.Int64(size)
-	}
-	out, err := s.client.PutObject(ctx, in)
+	})
 	if err != nil {
 		return PutResult{}, err
 	}
@@ -111,6 +122,34 @@ func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader
 	if out.ChecksumSHA256 != nil {
 		// S3 returns the checksum base64-encoded; convert to hex for our
 		// DB column so we can compare against a local sha256 hex digest.
+		if hx, err := base64ToHex(*out.ChecksumSHA256); err == nil {
+			res.ChecksumSHA256 = hx
+		} else {
+			res.ChecksumSHA256 = *out.ChecksumSHA256
+		}
+	}
+	return res, nil
+}
+
+// uploadMultipart uses the SDK's transfer manager to split body into part
+// uploads. ChecksumAlgorithm cannot be set on multipart per-part metadata
+// the same way as single-shot PutObject — the manager handles per-part
+// checksums internally.
+func (s *S3Storage) uploadMultipart(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
+	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(key),
+		Body:         body,
+		StorageClass: class,
+	})
+	if err != nil {
+		return PutResult{}, err
+	}
+	res := PutResult{Key: key, Size: size}
+	if out.ETag != nil {
+		res.ETag = *out.ETag
+	}
+	if out.ChecksumSHA256 != nil {
 		if hx, err := base64ToHex(*out.ChecksumSHA256); err == nil {
 			res.ChecksumSHA256 = hx
 		} else {

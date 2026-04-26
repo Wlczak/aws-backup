@@ -158,6 +158,36 @@ func (db *DB) MarkUploaded(ctx context.Context, id int64, md5, s3Key string, upl
 // SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; stay well under it.
 const sqlChunkSize = 500
 
+// MarkZipUploadedBatch attaches a zip_name and flips many ids straight to
+// 'uploaded' (md5/s3_key/uploaded_at populated) in a single transaction.
+// Used by the engine after a successful zip+sidecar upload so the rows
+// don't sit in the intermediate 'zipped' state if the second of two
+// updates fails.
+func (db *DB) MarkZipUploadedBatch(ctx context.Context, ids []int64, zipName, md5, s3Key string, uploadedAt time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(ids) > 0 {
+			chunk := ids
+			if len(chunk) > sqlChunkSize {
+				chunk = ids[:sqlChunkSize]
+			}
+			ids = ids[len(chunk):]
+			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"zip_name":    zipName,
+				"md5":         md5,
+				"s3_key":      s3Key,
+				"uploaded_at": uploadedAt,
+				"status":      StatusUploaded,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // MarkUploadedBatch flips many ids to 'uploaded' sharing a single md5/s3_key.
 func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key string, uploadedAt time.Time) error {
 	for len(ids) > 0 {
