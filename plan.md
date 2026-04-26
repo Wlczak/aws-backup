@@ -311,6 +311,11 @@ When fixing a GitHub issue:
 | #89 | 031f359 | `handlePutSettings` surfaces rollback errors instead of dropping them |
 | #90 | 031f359 | `source.Scan` cancels walker via `WithCancelCause` on flush failure |
 | #96 | 031f359 | `LoadCloudIndex` skips `.index.txt` sidecars whose zip is missing |
+| #58 | 8589466 | S3 `putWithClass` populates `PutResult.Size` |
+| #59 | 8589466 | S3 `putWithClass` omits `ContentLength` when size is unknown |
+| #60 | 8589466 | CLI `runBackup` passes `MinZipDirFiles` to `engine.New` |
+| #95 | 8589466 | `processZipGroup` uploads `.index.txt` sidecar before the zip |
+| #98 | 8589466 | `handleRestoreEstimate` filters by `uploaded`/`zipped` status |
 
 ---
 
