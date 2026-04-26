@@ -353,7 +353,7 @@ When fixing a GitHub issue:
 | #121 | ebfb6c5 | `reconcileFromS3` deletes orphan `.index.txt` sidecars whose backing zip is missing |
 | #42 | 5e0decd | `handleTestStorage` does a real `HeadBucket` round-trip; works against AWS and S3-compatible endpoints; `Validate` rejects Glacier-tier classes when `s3.endpoint` is set; default `storage_class` is `STANDARD` to match the MinIO default endpoint |
 | #122 | 29dd2d3 | `config.Default()` ships `Backup.Schedule = ""` so fresh installs do not silently run a hidden 02:00 cron; users opt in via Settings |
-| #123 | (pending) | New `upload_progress` SSE event with key/bytes_uploaded/size/percent; engine wraps upload bodies in a throttled `progressReader`; Dashboard renders per-file live progress bars |
+| #123 | f74932e | New `upload_progress` SSE event with key/bytes_uploaded/size/percent; engine wraps upload bodies in a throttled `progressReader`; Dashboard renders per-file live progress bars |
 
 ---
 
