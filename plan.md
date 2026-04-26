@@ -258,7 +258,12 @@ When fixing a GitHub issue:
 ### Bug
 | # | Title |
 |---|---|
-| #37 | StoragePrefix goes stale after settings hot-swap |
+| (none open) | All bug issues resolved as of 2026-04-26 |
+
+### Bug (formerly open, now closed)
+| # | Title |
+|---|---|
+| #37 | StoragePrefix goes stale after settings hot-swap (now covered by #91 fix) |
 
 ### Security
 | # | Title |
@@ -321,6 +326,11 @@ When fixing a GitHub issue:
 | #81 | 9d88159 | Per-file upload errors skipped; only all-groups-failed marks run failed |
 | #83 | 9d88159 | `writeBuffer.flush` requeues on error; inline flushes log + retry |
 | #84 | 9d88159 | `MarkZipUploadedBatch` collapses zip+upload DB writes into one txn |
+| #63 | e96f640 | `applySettings` closes swapped-out source/storage; PUT refuses while run in flight |
+| #85 | e96f640 | `Server.Shutdown` cancels run + waits on `runWg` before DB/storage teardown |
+| #88 | e96f640 | SMB.Open transparently re-dials + remounts on session-level errors |
+| #91 | e96f640 | `StoragePrefix` accessed via `cfgMu`-guarded `storagePrefix()` |
+| #94 | e96f640 | `deps.Config` accessed via `cfgMu`-guarded `snapshotConfig()` / `updateConfig()` |
 
 ---
 
