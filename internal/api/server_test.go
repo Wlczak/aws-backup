@@ -358,9 +358,15 @@ func TestRestoreEstimate(t *testing.T) {
 	ts, deps := newTestServer(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	_, _ = deps.DB.UpsertFile(ctx, "photos/a.jpg", 1024*1024*1024, now, now) // 1 GB
-	_, _ = deps.DB.UpsertFile(ctx, "photos/b.jpg", 1024*1024*1024, now, now)
-	_, _ = deps.DB.UpsertFile(ctx, "docs/x.pdf", 500, now, now)
+	a, _ := deps.DB.UpsertFile(ctx, "photos/a.jpg", 1024*1024*1024, now, now) // 1 GB
+	b, _ := deps.DB.UpsertFile(ctx, "photos/b.jpg", 1024*1024*1024, now, now)
+	c, _ := deps.DB.UpsertFile(ctx, "docs/x.pdf", 500, now, now)
+	// Only uploaded/zipped files are restorable. Mark the photos uploaded
+	// (one individual, one zipped) and leave docs/x.pdf as pending; it
+	// must NOT contribute to the estimate.
+	_ = deps.DB.MarkUploaded(ctx, a.ID, "m", "k1", now)
+	_ = deps.DB.SetZipName(ctx, []int64{b.ID}, "photos/photos_1.zip")
+	_ = c // unused; left as pending
 
 	body := strings.NewReader(`{"paths":["photos","unknown/dir"]}`)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/estimate", "application/json", body)

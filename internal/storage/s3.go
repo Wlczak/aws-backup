@@ -87,19 +87,24 @@ func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader,
 }
 
 func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader, size int64, class s3types.StorageClass) (PutResult, error) {
-	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	in := &s3.PutObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		Body:              body,
-		ContentLength:     aws.Int64(size),
 		ChecksumAlgorithm: s3types.ChecksumAlgorithmSha256,
 		StorageClass:      class,
-	})
+	}
+	// ContentLength must be omitted when size is unknown (-1). Forwarding
+	// a negative length to S3 is rejected by the API / signing layer.
+	if size >= 0 {
+		in.ContentLength = aws.Int64(size)
+	}
+	out, err := s.client.PutObject(ctx, in)
 	if err != nil {
 		return PutResult{}, err
 	}
 
-	res := PutResult{Key: key}
+	res := PutResult{Key: key, Size: size}
 	if out.ETag != nil {
 		res.ETag = *out.ETag
 	}

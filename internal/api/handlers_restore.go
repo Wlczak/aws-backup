@@ -86,6 +86,12 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		for _, f := range rows {
+			// Only files actually in S3 are restorable. pending/failed/missing
+			// rows aren't backed up yet (or any more), so counting them inflates
+			// the dollar estimate. Mirrors the skip in engine.RestoreToDir.
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+				continue
+			}
 			if allFiles {
 				count++
 				bytes += f.Size

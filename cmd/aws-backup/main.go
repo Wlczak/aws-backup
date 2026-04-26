@@ -327,6 +327,7 @@ func runBackup(cfgPath string) {
 		KeyPrefix:      app.cfg.S3.KeyPrefix,
 		ChunkSize:      app.cfg.Backup.ChunkSize,
 		ZipThresh:      app.cfg.Backup.ZipThreshold,
+		MinZipDirFiles: app.cfg.Backup.MinZipDirFiles,
 		ZipMaxBytes:    app.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: app.cfg.Backup.EnableZipIndex,
 		RetryFailed:    app.cfg.Backup.RetryFailed,

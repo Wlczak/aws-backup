@@ -413,11 +413,32 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 		return 0, 0, err
 	}
 	key := path.Join(e.opts.KeyPrefix, zipRel)
+	indexKey := key + ZipIndexSuffix
 
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
 		Data: map[string]any{"key": key, "size": size, "files": len(g.Files)},
 	})
+
+	// Upload the STANDARD-tier index sidecar BEFORE the zip itself so a
+	// crash between the two uploads can be recovered: the next run's
+	// reconcileFromS3 reads the sidecar to mark files uploaded. Doing it
+	// in the reverse order (the previous behaviour) could leave an
+	// orphaned DEEP_ARCHIVE zip with no DB linkage and no recovery path,
+	// causing the next run to re-zip the same files under a new key.
+	indexUploaded := false
+	if e.opts.EnableZipIndex {
+		indexBody := strings.Join(entries, "\n") + "\n"
+		if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
+			e.emit(Event{
+				Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
+				Data: map[string]any{"key": indexKey, "error": err.Error()},
+			})
+			return 0, 0, fmt.Errorf("upload zip index %s: %w", indexKey, err)
+		}
+		indexUploaded = true
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
+	}
 
 	f, err := os.Open(zipPath)
 	if err != nil {
@@ -430,6 +451,13 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{"key": key, "error": err.Error()},
 		})
+		// Best-effort: remove the orphaned sidecar so a half-uploaded group
+		// doesn't leave a dangling .index.txt pointing at a missing zip.
+		if indexUploaded {
+			if delErr := e.opts.Storage.Delete(ctx, indexKey); delErr != nil {
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("cleanup orphan index %s: %v", indexKey, delErr))
+			}
+		}
 		return 0, 0, fmt.Errorf("upload %s: %w", key, err)
 	}
 
@@ -450,21 +478,6 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 		Type: EventUploadComplete, RunID: runID, At: now,
 		Data: map[string]any{"key": key, "size": size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256, "files": len(g.Files)},
 	})
-
-	// Upload a plain-text index of the zip's contents to STANDARD so we can
-	// list files in a Deep Archive zip without restoring it. A failure here
-	// leaves the zip intact — log a warning and move on rather than failing
-	// the whole run. Gated so users who don't need remote listing can skip
-	// the extra STANDARD-tier objects.
-	if e.opts.EnableZipIndex {
-		indexKey := key + ZipIndexSuffix
-		indexBody := strings.Join(entries, "\n") + "\n"
-		if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
-			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload zip index %s: %v", indexKey, err))
-		} else {
-			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
-		}
-	}
 
 	return int64(len(g.Files)), size, nil
 }
