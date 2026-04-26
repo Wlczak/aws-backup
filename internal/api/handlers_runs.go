@@ -241,9 +241,35 @@ func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
 
+// handleContinueRun clears a pending graceful-stop request so the run
+// keeps uploading. Inverse of handleStopRun. 404 when there is no run
+// in flight under the given id (avoids resurrecting a flag for a run
+// that has already exited). (#124 follow-up)
+func (s *Server) handleContinueRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid run id"))
+		return
+	}
+	s.runMu.Lock()
+	current := s.currentRun
+	s.runMu.Unlock()
+	if current == 0 || current != id {
+		writeError(w, http.StatusNotFound, errors.New("no running run with that id"))
+		return
+	}
+	s.currentRunStopReq.Store(false)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "continuing"})
+}
+
 type statusResponse struct {
 	Current *runSummary `json:"current"`
 	Last    *runSummary `json:"last"`
+	// StopRequested is true while a graceful stop is pending: the engine
+	// will exit cleanly after the in-flight upload. Lets the UI flip the
+	// Stop button to a Continue affordance and render a "stopping" badge.
+	// (#124 follow-up)
+	StopRequested bool `json:"stop_requested"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +290,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		sum := toSummary(run)
 		resp.Current = &sum
+		resp.StopRequested = s.currentRunStopReq.Load()
 	}
 
 	runs, _, err := s.deps.DB.ListRuns(r.Context(), 1, 1)

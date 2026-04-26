@@ -63,6 +63,7 @@ export interface FileStats {
 export interface Status {
   current?: Run;
   last?: Run;
+  stop_requested?: boolean;
 }
 
 export interface RestoreEstimate {
@@ -155,6 +156,7 @@ export const api = {
     }),
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   stopRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/stop`, { method: 'POST' }),
+  continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
 
   files: (opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {}) => {
     const qs = new URLSearchParams();

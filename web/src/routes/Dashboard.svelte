@@ -152,6 +152,22 @@
     stopping = true;
     try {
       await api.stopRun(status.current.id);
+      // Reflect the new state immediately instead of waiting for the
+      // next 3s status poll, so the button label flips on click.
+      if (status) status.stop_requested = true;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      stopping = false;
+    }
+  }
+
+  async function continueRun() {
+    if (!status?.current || stopping) return;
+    stopping = true;
+    try {
+      await api.continueRun(status.current.id);
+      if (status) status.stop_requested = false;
     } catch (e) {
       err = String(e);
     } finally {
@@ -307,13 +323,20 @@
     <div class="label">Current run</div>
     {#if status?.current}
       <div class="big">
-        run #{status.current.id} <StatusBadge status={status.current.status} />
+        run #{status.current.id}
+        <StatusBadge status={status.stop_requested ? 'stopping' : status.current.status} />
       </div>
       <div class="muted">started {relativeTime(status.current.started_at)}</div>
       <div class="run-actions" style="margin-top: 0.5rem">
-        <button class="primary" onclick={stop} type="button" disabled={stopping} title="Finish the in-flight upload, then stop">
-          {stopping ? 'Stopping…' : 'Stop'}
-        </button>
+        {#if status.stop_requested}
+          <button class="primary" onclick={continueRun} type="button" disabled={stopping} title="Cancel the pending stop and keep uploading">
+            {stopping ? 'Continuing…' : 'Continue'}
+          </button>
+        {:else}
+          <button class="primary" onclick={stop} type="button" disabled={stopping} title="Finish the in-flight upload, then stop">
+            {stopping ? 'Stopping…' : 'Stop'}
+          </button>
+        {/if}
         <button class="danger" onclick={cancel} type="button" title="Kill the in-flight upload immediately">
           Force cancel
         </button>

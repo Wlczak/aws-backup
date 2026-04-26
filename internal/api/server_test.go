@@ -363,6 +363,19 @@ func TestStopRun(t *testing.T) {
 		t.Error("stop flag should be set after /stop")
 	}
 
+	// /continue clears the flag.
+	resp, err = ts.Client().Post(ts.URL+"/api/runs/42/continue", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("/continue status=%d want 202", resp.StatusCode)
+	}
+	if srv.IsStopRequested() {
+		t.Error("stop flag should be clear after /continue")
+	}
+
 	// Idle server: 404.
 	idle := &Server{deps: deps}
 	ts.Config.Handler = idle.Router()
