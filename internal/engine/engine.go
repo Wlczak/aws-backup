@@ -259,6 +259,22 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.MinZipDirFiles, e.opts.ZipMaxBytes)
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("grouped %d files into %d top-level groups", len(pending), len(groups)))
 
+	// Surface the planned upload size up front so the UI can render an
+	// accurate progress denominator instead of "n-1 / n" that only fills
+	// as each upload starts. (#126)
+	var totalBytes int64
+	for _, pf := range pending {
+		totalBytes += pf.Size
+	}
+	e.emit(Event{
+		Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
+		Data: map[string]any{
+			"total_files":  len(pending),
+			"total_groups": len(groups),
+			"total_bytes":  totalBytes,
+		},
+	})
+
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
 		return classify("mkdir tmp", err)
 	}

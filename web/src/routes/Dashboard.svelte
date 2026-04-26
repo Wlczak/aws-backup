@@ -9,7 +9,7 @@
   let stats = $state<FileStats | null>(null);
   let logLines = $state<string[]>([]);
   let scanSeen = $state(0);
-  let uploads = $state({ completed: 0, failed: 0, started: 0 });
+  let uploads = $state({ completed: 0, failed: 0, started: 0, total: 0 });
   let triggering = $state(false);
   let err = $state('');
 
@@ -67,6 +67,7 @@
       const d = data as any;
       const payload = d?.data ?? {};
       if (type === 'scan_complete') scanSeen = payload.seen ?? 0;
+      if (type === 'upload_plan') uploads.total = payload.total_files ?? 0;
       if (type === 'upload_start') {
         uploads.started++;
         if (payload.key) {
@@ -107,6 +108,7 @@
       }
       if (type === 'run_start') {
         itemProgress = {};
+        uploads = { completed: 0, failed: 0, started: 0, total: 0 };
       }
       const line = `[${type}] ${JSON.stringify(d.data ?? d)}`;
       logLines = [...logLines.slice(-49), line];
@@ -124,7 +126,7 @@
     err = '';
     try {
       await api.triggerRun({ mode });
-      uploads = { completed: 0, failed: 0, started: 0 };
+      uploads = { completed: 0, failed: 0, started: 0, total: 0 };
       scanSeen = 0;
       logLines = [];
       itemProgress = {};
@@ -500,8 +502,8 @@
       <span>completed: <strong>{uploads.completed}</strong></span>
       <span>failed: <strong>{uploads.failed}</strong></span>
     </div>
-    {#if uploads.started > 0}
-      <ProgressBar value={uploads.completed} max={uploads.started} label="Uploads" />
+    {#if uploads.total > 0 || uploads.started > 0}
+      <ProgressBar value={uploads.completed} max={uploads.total || uploads.started} label="Uploads" />
     {/if}
     {#if itemList.length > 0}
       <div class="items">

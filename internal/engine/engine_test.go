@@ -118,6 +118,19 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 		t.Errorf("want 4 starts/4 completes, got %d/%d", len(starts), len(completes))
 	}
 
+	// upload_plan must arrive once with the full file count so the UI
+	// progress bar's denominator is correct from the first byte. (#126)
+	plans := col.byType(EventUploadPlan)
+	if len(plans) != 1 {
+		t.Fatalf("want exactly 1 upload_plan event, got %d", len(plans))
+	}
+	if got := plans[0].Data["total_files"]; got != 6 {
+		t.Errorf("upload_plan.total_files = %v, want 6", got)
+	}
+	if got := plans[0].Data["total_groups"]; got != 3 {
+		t.Errorf("upload_plan.total_groups = %v, want 3", got)
+	}
+
 	// Exactly one zip object in storage, one matching .index.txt sidecar,
 	// and the rest are per-file keys.
 	keys := store.Keys()
