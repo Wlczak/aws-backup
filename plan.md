@@ -301,6 +301,11 @@ When fixing a GitHub issue:
 | #39 | f1880af | `currentRun` leak + `discardResponse` header on panic |
 | #43 | b223d84 | Reconcile DB from S3 zip indexes at backup start |
 | #44 | de9b06e | `hasPrefixPath` extracted to shared `pathutil` package |
+| #87 | ac6714a | `HasPrefixPath` tolerates trailing slash on prefix |
+| #92 | ac6714a | Upload loop uses partial `UpdateUploadStats`, preserves scan count |
+| #93 | ac6714a | `runWithID` returns real `runErr` even when `FinishRun` fails |
+| #97 | ac6714a | `Storage.List` callers normalize prefix via `pathutil.NormalizeS3ListPrefix` |
+| #100 | ac6714a | `handleTriggerRun` goroutine defers `cancel()` to release run context |
 
 ---
 
