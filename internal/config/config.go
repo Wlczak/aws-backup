@@ -18,6 +18,8 @@ const (
 	SourceSMB      = "smb"
 
 	StorageClassDeepArchive = "DEEP_ARCHIVE"
+	StorageClassGlacier     = "GLACIER"
+	StorageClassGlacierIR   = "GLACIER_IR"
 	StorageClassStandard    = "STANDARD"
 
 	RedactedMarker = "***"
@@ -88,7 +90,10 @@ type ServerConfig struct {
 }
 
 // Default returns a Config wired for local development (localdir source,
-// MinIO endpoint, DeepArchive storage class, 2am daily schedule).
+// MinIO endpoint, Standard storage class, 2am daily schedule). The
+// storage class is STANDARD rather than DEEP_ARCHIVE because MinIO does
+// not implement Glacier tiers — switching to real AWS S3 (clear endpoint)
+// is the prompt to also pick DEEP_ARCHIVE in the Settings UI.
 func Default() Config {
 	return Config{
 		Source: SourceConfig{
@@ -103,7 +108,7 @@ func Default() Config {
 			Region:          "us-east-1",
 			AccessKeyID:     "minioadmin",
 			SecretAccessKey: "minioadmin",
-			StorageClass:    StorageClassDeepArchive,
+			StorageClass:    StorageClassStandard,
 			KeyPrefix:       "backups/",
 		},
 		Backup: BackupConfig{
@@ -233,6 +238,19 @@ func (c Config) Validate() error {
 	}
 	if c.S3.StorageClass == "" {
 		errs = append(errs, errors.New("s3.storage_class is required"))
+	}
+	// Glacier-tier classes are AWS-only; S3-compatible endpoints (MinIO,
+	// etc.) reject them with InvalidStorageClass on first upload. Catch it
+	// at config time so the foot-gun shows up in the Settings UI instead
+	// of the next backup run.
+	if c.S3.Endpoint != "" {
+		switch c.S3.StorageClass {
+		case StorageClassDeepArchive, StorageClassGlacier, StorageClassGlacierIR:
+			errs = append(errs, fmt.Errorf(
+				"s3.storage_class %q requires AWS S3 (leave s3.endpoint empty); S3-compatible endpoints typically only support STANDARD",
+				c.S3.StorageClass,
+			))
+		}
 	}
 
 	if c.Backup.ChunkSize <= 0 {

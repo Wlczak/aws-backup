@@ -82,6 +82,36 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
+func TestValidateGlacierClassRequiresAWS(t *testing.T) {
+	// Custom endpoint + Glacier-tier class is rejected because S3-compatible
+	// services don't implement those tiers.
+	for _, class := range []string{StorageClassDeepArchive, StorageClassGlacier, StorageClassGlacierIR} {
+		t.Run("reject_"+class+"_with_endpoint", func(t *testing.T) {
+			cfg := Default()
+			cfg.Source.LocalDir.Root = "/tmp/x"
+			cfg.S3.Endpoint = "http://minio:9000"
+			cfg.S3.StorageClass = class
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "requires AWS S3") {
+				t.Fatalf("expected 'requires AWS S3' error for class %q, got %v", class, err)
+			}
+		})
+	}
+
+	// Empty endpoint (real AWS) accepts every storage class.
+	for _, class := range []string{StorageClassDeepArchive, StorageClassGlacier, StorageClassGlacierIR, StorageClassStandard} {
+		t.Run("accept_"+class+"_on_aws", func(t *testing.T) {
+			cfg := Default()
+			cfg.Source.LocalDir.Root = "/tmp/x"
+			cfg.S3.Endpoint = ""
+			cfg.S3.StorageClass = class
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("class %q on real AWS should validate, got %v", class, err)
+			}
+		})
+	}
+}
+
 func TestRedacted(t *testing.T) {
 	cfg := Default()
 	cfg.Source.SMB.Password = "hunter2"

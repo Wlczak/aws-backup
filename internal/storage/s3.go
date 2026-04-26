@@ -239,6 +239,16 @@ func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 	return r, nil
 }
 
+// HeadBucket verifies the bucket is reachable with the configured
+// credentials and returns the underlying SDK error otherwise. Used by
+// the API connectivity-test endpoint.
+func (s *S3Storage) HeadBucket(ctx context.Context) error {
+	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
+	return err
+}
+
 // Restore triggers a Glacier restore for the given key. This is the only
 // code path that will talk to real AWS in production; it remains unused
 // until the Restore feature (19) is enabled.

@@ -148,12 +148,14 @@
     </div>
     <div class="row-2">
       <label>
-        <span>Endpoint (leave empty for AWS)</span>
+        <span>Endpoint</span>
         <input type="text" bind:value={cfg.s3.endpoint} placeholder="http://localhost:9000" />
+        <small class="muted">Leave empty to use real AWS S3. Set for MinIO or other S3-compatible services.</small>
       </label>
       <label class="checkbox">
         <input type="checkbox" bind:checked={cfg.s3.use_path_style} />
-        <span>Use path-style addressing (MinIO)</span>
+        <span>Use path-style addressing</span>
+        <small class="muted">Required by MinIO and most S3-compatible services. Disable for real AWS S3.</small>
       </label>
     </div>
     <label>
@@ -166,11 +168,13 @@
         <option value="DEEP_ARCHIVE">Glacier Deep Archive (cheapest, 180-day min, slow retrieve)</option>
         <option value="STANDARD">Standard (instant, most expensive)</option>
       </select>
+      <small class="muted">DEEP_ARCHIVE / GLACIER / GLACIER_IR are only supported on real AWS S3.</small>
     </label>
     <div class="row-2">
       <label>
         <span>Access key ID</span>
         <input type="text" bind:value={cfg.s3.access_key_id} autocomplete="off" />
+        <small class="muted">Leave empty to use the default AWS credential chain (env vars, IAM role, ~/.aws/credentials).</small>
       </label>
       <label>
         <span>Secret access key</span>
