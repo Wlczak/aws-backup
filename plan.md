@@ -354,6 +354,9 @@ When fixing a GitHub issue:
 | #42 | 5e0decd | `handleTestStorage` does a real `HeadBucket` round-trip; works against AWS and S3-compatible endpoints; `Validate` rejects Glacier-tier classes when `s3.endpoint` is set; default `storage_class` is `STANDARD` to match the MinIO default endpoint |
 | #122 | 29dd2d3 | `config.Default()` ships `Backup.Schedule = ""` so fresh installs do not silently run a hidden 02:00 cron; users opt in via Settings |
 | #123 | f74932e | New `upload_progress` SSE event with key/bytes_uploaded/size/percent; engine wraps upload bodies in a throttled `progressReader`; Dashboard renders per-file live progress bars |
+| #125 | 86a44f7 | `syncDBToS3` calls `Storage.PutStandard` so the DB sidecar lands in STANDARD tier (read on every restart) |
+| #126 | 2613de2 | New `upload_plan` event carries `{total_files, total_groups, total_bytes}` after `listPending` + `GroupFiles`; Dashboard ProgressBar uses this as denominator instead of `uploads.started` |
+| #124 | 601cce6 | New `POST /api/runs/:id/stop` graceful-stop endpoint + `db.RunStopped` status; engine polls `Options.StopRequested` between groups/files and exits cleanly via `ErrStopRequested`; UI gains separate **Stop** + **Force cancel** buttons |
 
 ---
 
