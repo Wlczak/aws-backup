@@ -18,9 +18,12 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// s3SinglePartLimit is the SDK's hard ceiling on a single PutObject body.
-// Above it (or when size is unknown) we go through the multipart uploader.
-const s3SinglePartLimit = 5 * 1024 * 1024 * 1024 // 5 GiB
+// defaultMultipartThreshold is the SDK's hard ceiling on a single
+// PutObject body. Above it (or when size is unknown) we go through
+// the multipart uploader. Operators can lower the threshold via
+// S3Config.MultipartThreshold to get parallel-part throughput and
+// finer-grained retry on medium-sized objects.
+const defaultMultipartThreshold = 5 * 1024 * 1024 * 1024 // 5 GiB
 
 // S3Config holds everything S3Storage needs. The Endpoint field is what
 // points the client at MinIO (or another S3-compatible service); set to
@@ -33,14 +36,19 @@ type S3Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	StorageClass    string // e.g. DEEP_ARCHIVE, STANDARD
+	// MultipartThreshold is the byte size at or above which Put bodies
+	// route through the multipart uploader instead of single PutObject.
+	// 0 (or any non-positive value) selects defaultMultipartThreshold.
+	MultipartThreshold int64
 }
 
 // S3Storage is the real S3 / MinIO backend.
 type S3Storage struct {
-	client       *s3.Client
-	uploader     *transfermanager.Client
-	bucket       string
-	storageClass s3types.StorageClass
+	client             *s3.Client
+	uploader           *transfermanager.Client
+	bucket             string
+	storageClass       s3types.StorageClass
+	multipartThreshold int64
 }
 
 // NewS3Storage builds an S3 client from cfg. When Endpoint is set the
@@ -73,11 +81,16 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 		o.UsePathStyle = cfg.UsePathStyle
 	})
 
+	mt := cfg.MultipartThreshold
+	if mt <= 0 {
+		mt = defaultMultipartThreshold
+	}
 	return &S3Storage{
-		client:       client,
-		uploader:     transfermanager.New(client),
-		bucket:       cfg.Bucket,
-		storageClass: s3types.StorageClass(cfg.StorageClass),
+		client:             client,
+		uploader:           transfermanager.New(client),
+		bucket:             cfg.Bucket,
+		storageClass:       s3types.StorageClass(cfg.StorageClass),
+		multipartThreshold: mt,
 	}, nil
 }
 
@@ -105,7 +118,7 @@ func (s *S3Storage) PutStandard(ctx context.Context, key string, body io.Reader,
 // fall back to a HEAD probe + regular put, which is racy but matches
 // what bucket-versioning would catch operationally. (#116)
 func (s *S3Storage) PutIfAbsent(ctx context.Context, key string, body io.Reader, size int64) (PutResult, error) {
-	if size < 0 || size > s3SinglePartLimit {
+	if size < 0 || size > s.multipartThreshold {
 		// Best-effort race-y path for huge / unknown-size bodies.
 		if _, err := s.Head(ctx, key); err == nil {
 			return PutResult{}, ErrAlreadyExists
@@ -153,7 +166,7 @@ func (s *S3Storage) putWithClass(ctx context.Context, key string, body io.Reader
 	// Bodies larger than the 5 GiB single-PutObject limit (or of unknown
 	// size) must go through the multipart uploader; PutObject would reject
 	// them with EntityTooLarge.
-	if size < 0 || size > s3SinglePartLimit {
+	if size < 0 || size > s.multipartThreshold {
 		return s.uploadMultipart(ctx, key, body, size, class)
 	}
 

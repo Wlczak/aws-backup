@@ -70,6 +70,8 @@ func TestValidateErrors(t *testing.T) {
 		{"bad chunk size", func(c *Config) { c.Backup.ChunkSize = 0 }, "chunk_size"},
 		{"bad cron", func(c *Config) { c.Backup.Schedule = "definitely not cron" }, "schedule invalid"},
 		{"bad port", func(c *Config) { c.Server.Port = 70000 }, "server.port"},
+		{"negative multipart threshold", func(c *Config) { c.S3.MultipartThreshold = -1 }, "multipart_threshold"},
+		{"multipart threshold over 5 GiB", func(c *Config) { c.S3.MultipartThreshold = 5*1024*1024*1024 + 1 }, "5 GiB single-PutObject ceiling"},
 	}
 
 	for _, tc := range cases {
@@ -85,6 +87,17 @@ func TestValidateErrors(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateMultipartThresholdAccepts(t *testing.T) {
+	for _, v := range []int64{0, 16 * 1024 * 1024, 5 * 1024 * 1024 * 1024} {
+		cfg := Default()
+		cfg.Source.LocalDir.Root = "/tmp/x"
+		cfg.S3.MultipartThreshold = v
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("threshold=%d: unexpected error %v", v, err)
+		}
 	}
 }
 

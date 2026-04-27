@@ -113,13 +113,14 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}
 
 	store, err := storage.NewS3Storage(ctx, storage.S3Config{
-		Endpoint:        cfg.S3.Endpoint,
-		UsePathStyle:    cfg.S3.UsePathStyle,
-		Region:          cfg.S3.Region,
-		Bucket:          cfg.S3.Bucket,
-		AccessKeyID:     cfg.S3.AccessKeyID,
-		SecretAccessKey: cfg.S3.SecretAccessKey,
-		StorageClass:    cfg.S3.StorageClass,
+		Endpoint:           cfg.S3.Endpoint,
+		UsePathStyle:       cfg.S3.UsePathStyle,
+		Region:             cfg.S3.Region,
+		Bucket:             cfg.S3.Bucket,
+		AccessKeyID:        cfg.S3.AccessKeyID,
+		SecretAccessKey:    cfg.S3.SecretAccessKey,
+		StorageClass:       cfg.S3.StorageClass,
+		MultipartThreshold: cfg.S3.MultipartThreshold,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init storage: %w", err)
@@ -350,13 +351,14 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	}
 	if s3Changed {
 		s, err := storage.NewS3Storage(ctx, storage.S3Config{
-			Endpoint:        next.S3.Endpoint,
-			UsePathStyle:    next.S3.UsePathStyle,
-			Region:          next.S3.Region,
-			Bucket:          next.S3.Bucket,
-			AccessKeyID:     next.S3.AccessKeyID,
-			SecretAccessKey: next.S3.SecretAccessKey,
-			StorageClass:    next.S3.StorageClass,
+			Endpoint:           next.S3.Endpoint,
+			UsePathStyle:       next.S3.UsePathStyle,
+			Region:             next.S3.Region,
+			Bucket:             next.S3.Bucket,
+			AccessKeyID:        next.S3.AccessKeyID,
+			SecretAccessKey:    next.S3.SecretAccessKey,
+			StorageClass:       next.S3.StorageClass,
+			MultipartThreshold: next.S3.MultipartThreshold,
 		})
 		if err != nil {
 			if newSrc != nil {

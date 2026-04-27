@@ -106,6 +106,7 @@ export interface S3Config {
   secret_access_key: string;
   storage_class: 'DEEP_ARCHIVE' | 'STANDARD' | '';
   key_prefix: string;
+  multipart_threshold: number;
 }
 export interface BackupConfig {
   chunk_size: number;

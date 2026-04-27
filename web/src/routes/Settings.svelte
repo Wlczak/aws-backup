@@ -170,6 +170,11 @@
       </select>
       <small class="muted">DEEP_ARCHIVE / GLACIER / GLACIER_IR are only supported on real AWS S3.</small>
     </label>
+    <label>
+      <span>Multipart threshold (bytes; 0 = default 5&nbsp;GiB; lower for parallel parts)</span>
+      <input type="number" min="0" max={5 * 1024 * 1024 * 1024} bind:value={cfg.s3.multipart_threshold} />
+      <small class="muted">Bodies at or above this size route through the multipart uploader. Lowering it earns parallel-part throughput and finer-grained retry on medium-sized objects.</small>
+    </label>
     <div class="row-2">
       <label>
         <span>Access key ID</span>

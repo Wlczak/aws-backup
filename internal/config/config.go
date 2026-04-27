@@ -54,14 +54,20 @@ type SMBConfig struct {
 }
 
 type S3Config struct {
-	Endpoint        string `json:"endpoint"`         // empty = real AWS; set for MinIO
-	UsePathStyle    bool   `json:"use_path_style"`   // true for MinIO
+	Endpoint        string `json:"endpoint"`       // empty = real AWS; set for MinIO
+	UsePathStyle    bool   `json:"use_path_style"` // true for MinIO
 	Bucket          string `json:"bucket"`
 	Region          string `json:"region"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
 	StorageClass    string `json:"storage_class"`
 	KeyPrefix       string `json:"key_prefix"`
+	// MultipartThreshold is the byte size at or above which uploads go
+	// through the SDK's multipart transfer manager instead of a single
+	// PutObject. 0 = default (5 GiB, S3's hard ceiling for single Put).
+	// Lowering it earns parallel-part throughput and finer-grained retry
+	// for medium-sized objects at the cost of slightly more S3 requests.
+	MultipartThreshold int64 `json:"multipart_threshold"`
 }
 
 type BackupConfig struct {
@@ -238,6 +244,12 @@ func (c Config) Validate() error {
 	}
 	if c.S3.StorageClass == "" {
 		errs = append(errs, errors.New("s3.storage_class is required"))
+	}
+	if c.S3.MultipartThreshold < 0 {
+		errs = append(errs, fmt.Errorf("s3.multipart_threshold must be >= 0 (got %d)", c.S3.MultipartThreshold))
+	}
+	if c.S3.MultipartThreshold > 5*1024*1024*1024 {
+		errs = append(errs, fmt.Errorf("s3.multipart_threshold %d exceeds S3's 5 GiB single-PutObject ceiling", c.S3.MultipartThreshold))
 	}
 	// Glacier-tier classes are AWS-only; S3-compatible endpoints (MinIO,
 	// etc.) reject them with InvalidStorageClass on first upload. Catch it
