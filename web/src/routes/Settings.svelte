@@ -13,6 +13,7 @@
   async function load() {
     try {
       cfg = (await api.settings()) as Config;
+      decodeMultipart();
       scheduleHuman = humanize(cfg.backup.schedule);
       err = '';
       msg = '';
@@ -28,6 +29,7 @@
     msg = '';
     try {
       cfg = (await api.updateSettings(cfg)) as Config;
+      decodeMultipart();
       scheduleHuman = humanize(cfg.backup.schedule);
       msg = 'Saved.';
     } catch (e) {
@@ -47,6 +49,46 @@
     try { storageTest = await api.testStorage(); }
     catch (e) { storageTest = { ok: false, message: String(e) }; }
   }
+
+  // Multipart threshold UI state — the wire format is bytes, but the
+  // user picks a value + unit so they don't have to compute "16 MiB =
+  // 16777216" by hand. The unit defaults to the largest one that
+  // divides the stored byte value cleanly, falling back to MiB for 0.
+  type ByteUnit = 'B' | 'KiB' | 'MiB' | 'GiB';
+  const byteUnitMul: Record<ByteUnit, number> = {
+    B: 1,
+    KiB: 1024,
+    MiB: 1024 * 1024,
+    GiB: 1024 * 1024 * 1024,
+  };
+  let multipartValue = $state(0);
+  let multipartUnit = $state<ByteUnit>('MiB');
+
+  function decodeBytes(b: number): { value: number; unit: ByteUnit } {
+    if (!b) return { value: 0, unit: 'MiB' };
+    const order: ByteUnit[] = ['GiB', 'MiB', 'KiB', 'B'];
+    for (const u of order) {
+      if (b % byteUnitMul[u] === 0) return { value: b / byteUnitMul[u], unit: u };
+    }
+    return { value: b, unit: 'B' };
+  }
+
+  function decodeMultipart() {
+    if (!cfg) return;
+    const { value, unit } = decodeBytes(cfg.s3.multipart_threshold);
+    multipartValue = value;
+    multipartUnit = unit;
+  }
+
+  let multipartMax = $derived(Math.floor((5 * byteUnitMul.GiB) / byteUnitMul[multipartUnit]));
+
+  // Single direction of truth: changes to value/unit recompute the
+  // bytes we send on save. Initial decoding happens after each load /
+  // save when the server's authoritative cfg arrives.
+  $effect(() => {
+    if (!cfg) return;
+    cfg.s3.multipart_threshold = multipartValue * byteUnitMul[multipartUnit];
+  });
 
   function humanize(expr: string): string {
     if (!expr) return '(no schedule — manual only)';
@@ -171,8 +213,16 @@
       <small class="muted">DEEP_ARCHIVE / GLACIER / GLACIER_IR are only supported on real AWS S3.</small>
     </label>
     <label>
-      <span>Multipart threshold (bytes; 0 = default 5&nbsp;GiB; lower for parallel parts)</span>
-      <input type="number" min="0" max={5 * 1024 * 1024 * 1024} bind:value={cfg.s3.multipart_threshold} />
+      <span>Multipart threshold (0 = default 5&nbsp;GiB; lower for parallel parts)</span>
+      <div class="row-2">
+        <input type="number" min="0" max={multipartMax} bind:value={multipartValue} />
+        <select bind:value={multipartUnit}>
+          <option value="B">B</option>
+          <option value="KiB">KiB</option>
+          <option value="MiB">MiB</option>
+          <option value="GiB">GiB</option>
+        </select>
+      </div>
       <small class="muted">Bodies at or above this size route through the multipart uploader. Lowering it earns parallel-part throughput and finer-grained retry on medium-sized objects.</small>
     </label>
     <div class="row-2">
