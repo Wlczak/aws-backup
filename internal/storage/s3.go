@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -74,11 +75,21 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 
+	// Custom HTTP client whose RoundTripper wraps each request body in a
+	// counting reader iff the request's context carries a ProgressFunc.
+	// This is what gives us upload-progress events at HTTP-frame
+	// granularity (16-32 KiB per Read) instead of the SDK's per-part
+	// granularity (which can be 64 MiB+ for multipart) — i.e. a smooth
+	// bar instead of one update per part. (#)
+	httpClient := &http.Client{
+		Transport: &progressTransport{inner: http.DefaultTransport},
+	}
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		}
 		o.UsePathStyle = cfg.UsePathStyle
+		o.HTTPClient = httpClient
 	})
 
 	mt := cfg.MultipartThreshold

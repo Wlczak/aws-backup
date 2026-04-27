@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -603,7 +604,7 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	// a prior DEEP_ARCHIVE object whose content may differ. The caller
 	// catches ErrAlreadyExists and advances to the next counter slot.
 	// (#116)
-	res, err := e.opts.Storage.PutIfAbsent(ctx, key, e.progressBody(runID, key, f, size), size)
+	res, err := e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, key, size), key, f, size)
 	f.Close()
 	if err != nil {
 		e.emit(Event{
@@ -710,7 +711,7 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	if err != nil {
 		return 0, err
 	}
-	res, err := e.opts.Storage.Put(ctx, key, e.progressBody(runID, key, f, size), size)
+	res, err := e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, key, size), key, f, size)
 	f.Close()
 	if err != nil {
 		e.emit(Event{
@@ -805,29 +806,51 @@ func (e *Engine) copyWrapZip(runID int64, key string, total int64) func(io.Reade
 	}
 }
 
-// progressBody wraps body so each Read advances a throttled
-// EventUploadProgress event for key. The wrapper deliberately exposes
-// only io.Reader (not Seeker / ReaderAt) so the AWS SDK reads bytes
-// serially through Read and we observe every chunk; concurrent
-// multipart uploads then run from the SDK's internal part buffers.
-func (e *Engine) progressBody(runID int64, key string, body io.Reader, size int64) io.Reader {
-	return newProgressReader(body, size, defaultProgressInterval, func(read, total int64) {
-		var pct float64
-		if total > 0 {
-			pct = float64(read) / float64(total) * 100
-			if pct > 100 {
-				pct = 100
-			}
+// emitUploadProgress publishes an EventUploadProgress sample for key.
+// Mirrors emitCopyProgress so consumers see a consistent payload shape.
+func (e *Engine) emitUploadProgress(runID int64, key string, read, total int64) {
+	var pct float64
+	if total > 0 {
+		pct = float64(read) / float64(total) * 100
+		if pct > 100 {
+			pct = 100
 		}
-		e.emit(Event{
-			Type: EventUploadProgress, RunID: runID, At: e.opts.Now(),
-			Data: map[string]any{
-				"key":            key,
-				"bytes_uploaded": read,
-				"size":           total,
-				"percent":        pct,
-			},
-		})
+	}
+	e.emit(Event{
+		Type: EventUploadProgress, RunID: runID, At: e.opts.Now(),
+		Data: map[string]any{
+			"key":            key,
+			"bytes_uploaded": read,
+			"size":           total,
+			"percent":        pct,
+		},
+	})
+}
+
+// uploadProgressCtx returns a context that, when passed to Storage.Put*,
+// produces upload_progress events at HTTP-frame granularity. The S3
+// client's transport (installed by NewS3Storage) wraps each request body
+// in a counting reader keyed off the context callback. Multipart parts
+// run concurrently, so we use atomic counters; emits are CAS-throttled
+// to one per defaultProgressInterval to avoid flooding the bus.
+func (e *Engine) uploadProgressCtx(ctx context.Context, runID int64, key string, size int64) context.Context {
+	if e.opts.Emit == nil {
+		return ctx
+	}
+	var sent atomic.Int64
+	var lastEmitNs atomic.Int64
+	return storage.WithUploadProgress(ctx, func(n int64) {
+		total := sent.Add(n)
+		nowNs := e.opts.Now().UnixNano()
+		isFinal := size > 0 && total >= size
+		last := lastEmitNs.Load()
+		if !isFinal && last != 0 && nowNs-last < int64(defaultProgressInterval) {
+			return
+		}
+		if !lastEmitNs.CompareAndSwap(last, nowNs) {
+			return
+		}
+		e.emitUploadProgress(runID, key, total, size)
 	})
 }
 

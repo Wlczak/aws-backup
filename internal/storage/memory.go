@@ -32,20 +32,20 @@ func NewMemStorage() *MemStorage {
 }
 
 // Put stores body under key and returns a fake ETag = sha256(data) prefix.
-func (m *MemStorage) Put(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
-	return m.put(key, body, "DEEP_ARCHIVE")
+func (m *MemStorage) Put(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return m.put(ctx, key, body, "DEEP_ARCHIVE")
 }
 
 // PutStandard stores body under key, tagging it STANDARD so tests can
 // verify that index sidecars bypass the cold-tier default.
-func (m *MemStorage) PutStandard(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
-	return m.put(key, body, "STANDARD")
+func (m *MemStorage) PutStandard(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	return m.put(ctx, key, body, "STANDARD")
 }
 
 // PutIfAbsent fails with ErrAlreadyExists when key is already populated;
 // otherwise behaves like Put. Mirrors S3's IfNoneMatch="*" precondition
 // for tests that exercise the engine's collision-detection path. (#116)
-func (m *MemStorage) PutIfAbsent(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+func (m *MemStorage) PutIfAbsent(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
 	m.mu.Lock()
 	if _, exists := m.objects[key]; exists {
 		m.mu.Unlock()
@@ -53,10 +53,17 @@ func (m *MemStorage) PutIfAbsent(_ context.Context, key string, body io.Reader, 
 		return PutResult{}, ErrAlreadyExists
 	}
 	m.mu.Unlock()
-	return m.put(key, body, "DEEP_ARCHIVE")
+	return m.put(ctx, key, body, "DEEP_ARCHIVE")
 }
 
-func (m *MemStorage) put(key string, body io.Reader, class string) (PutResult, error) {
+func (m *MemStorage) put(ctx context.Context, key string, body io.Reader, class string) (PutResult, error) {
+	// Mirror the S3 transport's behaviour: if the caller attached a
+	// ProgressFunc via WithUploadProgress, fire it on every Read so engine
+	// tests still observe upload_progress events without needing a real
+	// HTTP transport.
+	if fn, _ := ctx.Value(progressKey{}).(ProgressFunc); fn != nil {
+		body = &countingReader{r: body, fn: fn}
+	}
 	buf, err := io.ReadAll(body)
 	if err != nil {
 		return PutResult{}, err
