@@ -38,9 +38,12 @@ type Deps struct {
 	// caller can hot-swap source/storage/scheduler. Returning an error
 	// rolls back the save. nil means "nothing to apply" (tests).
 	ApplySettings func(prev, next config.Config) error
-	// Storage and StoragePrefix are used by the sync handler to list S3
-	// objects and compare them against the DB index.
-	Storage       storage.Storage
+	// Storage returns the live storage handle. Each handler invocation
+	// calls this so a settings hot-swap (PUT /api/settings) is picked up
+	// without a service restart — Deps used to cache the storage by
+	// value, which left sync/restore handlers calling the old endpoint
+	// after the user changed config. (#131)
+	Storage       func() storage.Storage
 	StoragePrefix string
 	// SyncDBToS3, when non-nil, is called after a backup run when the user
 	// either let it complete, clicked Stop, or clicked Cancel. The reason
@@ -111,6 +114,17 @@ func (s *Server) storagePrefix() string {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.deps.StoragePrefix
+}
+
+// storage returns the live storage handle, or nil when none is wired.
+// Handlers should snapshot this once per request and use the local for
+// the rest of their work so a concurrent settings hot-swap doesn't
+// surface a half-old, half-new client mid-handler. (#131)
+func (s *Server) storage() storage.Storage {
+	if s.deps.Storage == nil {
+		return nil
+	}
+	return s.deps.Storage()
 }
 
 // updateConfig atomically replaces both deps.Config (pointee) and

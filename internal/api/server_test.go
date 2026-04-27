@@ -527,6 +527,70 @@ func TestCancelRunSetsCancelReq(t *testing.T) {
 	}
 }
 
+// TestStorageHotSwap is the regression test for #131: changing the
+// underlying storage handle (via Deps.Storage callback) must take effect
+// on the next request without a server restart. Before the fix, Deps
+// captured storage by value, so /api/sync etc. kept calling the old
+// endpoint after a settings hot-swap.
+func TestStorageHotSwap(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	now := time.Now().UTC()
+	r, err := d.UpsertFile(ctx, "z.txt", 1, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r.ID, "md5", "z.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	old := storage.NewMemStorage()
+	current := storage.NewMemStorage()
+	// Seed only `current` with z.txt — `old` is empty. After the swap,
+	// /api/sync should see z.txt and NOT mark it pending. Before the
+	// swap it would mark it missing.
+	if _, err := current.PutStandard(ctx, "z.txt", strings.NewReader("x"), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	var live storage.Storage = old
+	srv := NewServer(Deps{
+		DB:      d,
+		Bus:     events.NewBus(16),
+		Config:  &cfg,
+		Storage: func() storage.Storage { return live },
+	})
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	// Hot-swap the storage handle that the getter returns.
+	live = current
+
+	resp, err := ts.Client().Post(ts.URL+"/api/sync", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got syncResponse
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	if got.MissingIndividual != 0 {
+		t.Errorf("missing_individual=%d want 0 (hot-swapped storage has the key)", got.MissingIndividual)
+	}
+	if got.KeysInS3 != 1 {
+		t.Errorf("keys_in_s3=%d want 1 (post-swap storage)", got.KeysInS3)
+	}
+}
+
 func TestTriggerRunConflict(t *testing.T) {
 	ts, deps := newTestServer(t)
 

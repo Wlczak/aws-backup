@@ -36,7 +36,7 @@ func newSyncTestServer(t *testing.T) (*httptest.Server, *db.DB, *storage.MemStor
 		DB:            d,
 		Bus:           events.NewBus(16),
 		Config:        &cfg,
-		Storage:       store,
+		Storage:       func() storage.Storage { return store },
 		StoragePrefix: "backups/",
 	})
 	ts := httptest.NewServer(srv.Router())

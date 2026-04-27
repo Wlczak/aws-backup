@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/pathutil"
+	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
 type syncResponse struct {
@@ -45,11 +47,12 @@ const fullSyncListCap = 1000
 // Zipped files are matched by zip_name; individually-uploaded files by s3_key.
 // Missing objects are reset to pending so the next run re-uploads them.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Storage == nil {
+	st := s.storage()
+	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
-	resp, err := s.runSyncExistenceCheck(r.Context())
+	resp, err := s.runSyncExistenceCheck(r.Context(), st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -63,7 +66,8 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 // handleSync — it downloads every .index.txt sidecar — so it's exposed on
 // a separate route rather than folded into the default sync.
 func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Storage == nil {
+	st := s.storage()
+	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
@@ -71,7 +75,7 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 
 	// Start from the same existence check handleSync does so callers get
 	// both views in one call; reuse helpers rather than duplicating logic.
-	base, err := s.runSyncExistenceCheck(ctx)
+	base, err := s.runSyncExistenceCheck(ctx, st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -84,7 +88,7 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prefix := s.storagePrefix()
-	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, prefix, indivKeys)
+	idx, err := engine.LoadCloudIndex(ctx, st, prefix, indivKeys)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
 		return
@@ -161,7 +165,8 @@ type deleteCloudPathsResponse struct {
 // removal); zips that contain a mix of targeted and non-targeted files are
 // skipped and reported in skipped_partial_zip.
 func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Storage == nil {
+	st := s.storage()
+	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
@@ -183,7 +188,7 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	prefix := s.storagePrefix()
-	idx, err := engine.LoadCloudIndex(ctx, s.deps.Storage, prefix, indivKeys)
+	idx, err := engine.LoadCloudIndex(ctx, st, prefix, indivKeys)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
 		return
@@ -210,7 +215,7 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		if !ok || cf.S3Key == "" {
 			continue
 		}
-		if err := s.deps.Storage.Delete(ctx, cf.S3Key); err != nil {
+		if err := st.Delete(ctx, cf.S3Key); err != nil {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("delete %s: %v", cf.S3Key, err))
 		} else {
 			resp.DeletedStandalone++
@@ -241,11 +246,11 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		}
 		// Delete the zip and its .index.txt sidecar.
 		zipS3Key := pathutil.JoinKey(prefix, cf.ZipKey)
-		if err := s.deps.Storage.Delete(ctx, zipS3Key); err != nil {
+		if err := st.Delete(ctx, zipS3Key); err != nil {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("delete zip %s: %v", zipS3Key, err))
 			continue
 		}
-		_ = s.deps.Storage.Delete(ctx, zipS3Key+engine.ZipIndexSuffix) // best-effort
+		_ = st.Delete(ctx, zipS3Key+engine.ZipIndexSuffix) // best-effort
 		deletedZips[cf.ZipKey] = struct{}{}
 		resp.DeletedZips++
 	}
@@ -257,7 +262,12 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 // POST /api/sync and POST /api/sync/full) and resets any files whose S3
 // objects have gone missing. Returns the summary fields without writing
 // an HTTP response so callers can embed it in a larger payload.
-func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error) {
+//
+// st is taken as an argument so callers can snapshot the live storage
+// once per request and reuse the same handle here, rather than each
+// helper re-fetching from deps and risking a half-old, half-new view
+// across a concurrent settings hot-swap. (#131)
+func (s *Server) runSyncExistenceCheck(ctx context.Context, st storage.Storage) (syncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
 		return syncResponse{}, fmt.Errorf("list zip names: %w", err)
@@ -269,7 +279,7 @@ func (s *Server) runSyncExistenceCheck(ctx context.Context) (syncResponse, error
 	}
 
 	prefix := s.storagePrefix()
-	s3Keys, err := s.deps.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(prefix))
+	s3Keys, err := st.List(ctx, pathutil.NormalizeS3ListPrefix(prefix))
 	if err != nil {
 		return syncResponse{}, fmt.Errorf("list s3 keys: %w", err)
 	}

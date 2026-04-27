@@ -193,6 +193,15 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	return os.Rename(tmp, dst)
 }
 
+// liveStorage returns the currently-active storage handle. The API
+// server calls this on every request so a settings hot-swap (PUT
+// /api/settings) is observed without a service restart. (#131)
+func (a *appState) liveStorage() storage.Storage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.store
+}
+
 // syncDBToS3 checkpoints the WAL and uploads the DB file to S3, emitting
 // db_sync_* progress events through the bus so the dashboard can render
 // a progress bar (the index can grow to hundreds of MB). reason is
@@ -202,6 +211,14 @@ func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) e
 	if err := a.db.Checkpoint(ctx); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
+	// Snapshot the live storage and key prefix together so a concurrent
+	// applySettings hot-swap can't make us upload to a closed handle or
+	// pair the new client with the old prefix. (#131)
+	a.mu.Lock()
+	store := a.store
+	keyPrefix := a.cfg.S3.KeyPrefix
+	a.mu.Unlock()
+
 	f, err := os.Open(a.dbPath)
 	if err != nil {
 		return err
@@ -247,7 +264,7 @@ func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) e
 	// STANDARD tier: the DB sidecar is read on every restart to seed the
 	// local index, so it must be instantly readable without a Glacier
 	// restore — same reasoning as the zip .index.txt sidecars. (#125)
-	_, putErr := a.store.PutStandard(ctx, dbS3Key(a.cfg.S3.KeyPrefix), body, size)
+	_, putErr := store.PutStandard(ctx, dbS3Key(keyPrefix), body, size)
 	if putErr != nil {
 		publish(engine.Event{
 			Type:  engine.EventDBSyncFailed,
@@ -452,7 +469,7 @@ func runServe(cfgPath string) {
 		Config:        &app.cfg,
 		ConfigPath:    app.cfgPath,
 		BuildEngine:   app.buildEngine,
-		Storage:       app.store,
+		Storage:       app.liveStorage,
 		StoragePrefix: app.cfg.S3.KeyPrefix,
 		SyncDBToS3:    app.syncDBToS3,
 		ApplySettings: func(prev, next config.Config) error {

@@ -165,7 +165,8 @@ type restoreTriggerResponse struct {
 // the response. Wiring s3:RestoreObject + readiness polling is a
 // follow-up (see the "feature 19" note).
 func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Storage == nil {
+	st := s.storage()
+	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
@@ -190,7 +191,7 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
 		DB:        s.deps.DB,
-		Storage:   s.deps.Storage,
+		Storage:   st,
 		KeyPrefix: s.storagePrefix(),
 		TargetDir: req.TargetDir,
 		Paths:     req.Paths,
