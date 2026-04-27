@@ -182,6 +182,46 @@ func TestListFilesFilter(t *testing.T) {
 	}
 }
 
+// TestListFilesFilterLikeEscaping covers #67: LIKE wildcards in user
+// search input must be treated as literal characters, not pattern
+// metacharacters. Without escaping, "?search=%" returned every row.
+func TestListFilesFilterLikeEscaping(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+	for _, p := range []string{
+		"alpha.txt",
+		"with%percent.txt",
+		"with_underscore.txt",
+	} {
+		if _, err := d.UpsertFile(ctx, p, 1, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// "%" alone must NOT match every row — it's a literal now.
+	_, total, err := d.ListFiles(ctx, FilesFilter{Search: "%"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("search '%%' total=%d want 1 (literal match)", total)
+	}
+
+	// "_" alone must match only the file with a literal underscore, not
+	// any single-character substring.
+	_, total, _ = d.ListFiles(ctx, FilesFilter{Search: "_"})
+	if total != 1 {
+		t.Errorf("search '_' total=%d want 1 (literal match)", total)
+	}
+
+	// Plain substring search must still work.
+	files, _, _ := d.ListFiles(ctx, FilesFilter{Search: "alpha"})
+	if len(files) != 1 || files[0].Path != "alpha.txt" {
+		t.Errorf("search 'alpha' want alpha.txt, got %+v", files)
+	}
+}
+
 func TestSetZipName(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

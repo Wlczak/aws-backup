@@ -3,10 +3,17 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// likeEscape escapes the LIKE meta-characters % and _ (plus the escape
+// character itself) in a user-supplied search term so a query like
+// "?search=%" doesn't return every row, and paths containing literal
+// % or _ match correctly. (#67)
+var likeEscape = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // File statuses — authoritative list.
 const (
@@ -300,7 +307,7 @@ func (db *DB) ListFiles(ctx context.Context, f FilesFilter) ([]File, int64, erro
 			q = q.Where("status = ?", f.Status)
 		}
 		if f.Search != "" {
-			q = q.Where("path LIKE ?", "%"+f.Search+"%")
+			q = q.Where(`path LIKE ? ESCAPE '\'`, "%"+likeEscape.Replace(f.Search)+"%")
 		}
 		return q
 	}
