@@ -5,7 +5,7 @@ LDFLAGS     := -X main.version=$(VERSION)
 COMPOSE     := docker compose -f deploy/docker-compose.yml
 WEB_SRC     := $(shell find web/src web/index.html web/vite.config.ts web/package.json web/package-lock.json 2>/dev/null -type f)
 
-.PHONY: all build build-linux build-windows build-go test tidy run clean dev dev-up dev-down dev-logs fmt vet web web-dev web-install
+.PHONY: all build build-linux build-windows build-go test tidy run clean dev dev-up dev-down dev-logs fmt vet vuln web web-dev web-install
 
 all: build
 
@@ -51,6 +51,10 @@ fmt:
 
 vet:
 	go vet ./...
+
+vuln:
+	go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
 
 run: build
 	./$(BINARY)
