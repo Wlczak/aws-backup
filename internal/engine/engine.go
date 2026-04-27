@@ -509,6 +509,10 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 		groupTotalBytes += f.Size
 	}
 
+	if err := ensureTmpSpace(e.opts.TmpDir, groupTotalBytes); err != nil {
+		return 0, 0, fmt.Errorf("zip group %s: %w", zipRel, err)
+	}
+
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipRel))
 	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath, e.copyWrapZip(runID, key, groupTotalBytes))
 	if err != nil {
@@ -628,6 +632,10 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	defer os.Remove(tmp)
 
 	key := path.Join(e.opts.KeyPrefix, pf.RelPath)
+
+	if err := ensureTmpSpace(e.opts.TmpDir, pf.Size); err != nil {
+		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
+	}
 
 	// Copy source -> tmp so we can compute MD5 and then upload from a file.
 	// Wrap the source reader so bytes flowing through emit copy_progress
