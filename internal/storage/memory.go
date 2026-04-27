@@ -20,9 +20,10 @@ type MemStorage struct {
 }
 
 type memObject struct {
-	data         []byte
-	etag         string
-	storageClass string
+	data           []byte
+	etag           string
+	storageClass   string
+	checksumSHA256 string
 }
 
 // NewMemStorage returns an empty in-memory storage.
@@ -64,7 +65,7 @@ func (m *MemStorage) put(key string, body io.Reader, class string) (PutResult, e
 	sumHex := hex.EncodeToString(sum[:])
 
 	m.mu.Lock()
-	m.objects[key] = memObject{data: buf, etag: sumHex[:32], storageClass: class}
+	m.objects[key] = memObject{data: buf, etag: sumHex[:32], storageClass: class, checksumSHA256: sumHex}
 	m.mu.Unlock()
 
 	return PutResult{
@@ -87,7 +88,7 @@ func (m *MemStorage) Head(_ context.Context, key string) (HeadResult, error) {
 	if class == "" {
 		class = "DEEP_ARCHIVE"
 	}
-	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: class}, nil
+	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: class, ChecksumSHA256: o.checksumSHA256}, nil
 }
 
 // List returns keys matching prefix, sorted, satisfying the Storage interface.

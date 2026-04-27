@@ -35,6 +35,9 @@ func TestMemStorageRoundTrip(t *testing.T) {
 	if h.Size != int64(len(body)) {
 		t.Errorf("head size=%d", h.Size)
 	}
+	if h.ChecksumSHA256 != wantHex {
+		t.Errorf("head sha256 mismatch: got %s want %s", h.ChecksumSHA256, wantHex)
+	}
 
 	got, ok := m.GetBytes("backups/x.zip")
 	if !ok {

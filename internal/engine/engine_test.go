@@ -518,6 +518,137 @@ func TestEngineReconcileFromS3(t *testing.T) {
 	}
 }
 
+// TestEngineSkipsIndividualWhenSHA256Matches: when a pending individual
+// file is re-run and S3 already holds an object at the same key with a
+// matching SHA256, the engine must skip the upload, mark the row
+// uploaded, and emit upload_complete with skipped=true (no
+// upload_start / no upload_progress for that key). (#133)
+func TestEngineSkipsIndividualWhenSHA256Matches(t *testing.T) {
+	eng, d, _, store, root, col := newTestEngine(t, 100) // threshold high → individual path
+	ctx := context.Background()
+	writeFile(t, root, "alpha.txt", "alpha-content")
+
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	// Reset the row to pending so the next run hits the upload path again.
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	if len(files) != 1 {
+		t.Fatalf("want 1 file, got %d", len(files))
+	}
+	if _, err := d.MarkPendingByIDs(ctx, []int64{files[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture the existing object's bytes — they must not change after the
+	// skipped run.
+	const key = "backups/alpha.txt"
+	bytesBefore, ok := store.GetBytes(key)
+	if !ok {
+		t.Fatalf("missing object at %s after first run", key)
+	}
+
+	col.events = nil
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	bytesAfter, _ := store.GetBytes(key)
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("object bytes changed across skipped run")
+	}
+
+	// No upload_start for the dedup'd key; upload_complete must carry skipped=true.
+	for _, ev := range col.byType(EventUploadStart) {
+		if ev.Data["key"] == key {
+			t.Errorf("unexpected upload_start for %s on skipped run", key)
+		}
+	}
+	var sawSkipped bool
+	for _, ev := range col.byType(EventUploadComplete) {
+		if ev.Data["key"] == key && ev.Data["skipped"] == true {
+			sawSkipped = true
+		}
+	}
+	if !sawSkipped {
+		t.Errorf("expected upload_complete with skipped=true for %s", key)
+	}
+
+	// DB row marked uploaded.
+	files2, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	if files2[0].Status != db.StatusUploaded {
+		t.Errorf("row status=%q want uploaded", files2[0].Status)
+	}
+}
+
+// TestEngineUploadsWhenSHA256Differs: a re-run of a pending file whose
+// destination key already holds a *different* object must still upload —
+// dedup is byte-identical-only. (#133)
+func TestEngineUploadsWhenSHA256Differs(t *testing.T) {
+	eng, d, _, store, root, col := newTestEngine(t, 100)
+	ctx := context.Background()
+	writeFile(t, root, "beta.txt", "new-content")
+
+	const key = "backups/beta.txt"
+	// Pre-seed with different bytes so SHA256 won't match.
+	if _, err := store.Put(ctx, key, bytes.NewReader([]byte("STALE-PRESEED")), -1); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := store.GetBytes(key)
+	if string(got) != "new-content" {
+		t.Errorf("object not replaced: got %q want %q", string(got), "new-content")
+	}
+	for _, ev := range col.byType(EventUploadComplete) {
+		if ev.Data["key"] == key && ev.Data["skipped"] == true {
+			t.Errorf("upload_complete should not be skipped when SHA256 differs")
+		}
+	}
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	if files[0].Status != db.StatusUploaded {
+		t.Errorf("row status=%q want uploaded", files[0].Status)
+	}
+}
+
+// TestSkipIfMatches exercises the dedup primitive directly: it must
+// return true only when S3 already holds an object whose SHA256
+// matches the supplied hex, and false in every other case (key
+// missing, checksum unknown, content differs, empty input). Call
+// sites at engine.go's three Put points wrap this verbatim. (#133)
+func TestSkipIfMatches(t *testing.T) {
+	eng, _, _, store, _, _ := newTestEngine(t, 100)
+	ctx := context.Background()
+
+	const key = "backups/probe.bin"
+	body := []byte("identical-content")
+	res, err := store.Put(ctx, key, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchHex := res.ChecksumSHA256
+	if matchHex == "" {
+		t.Fatal("MemStorage.Put didn't echo a SHA256 — fixture broken")
+	}
+
+	if !eng.skipIfMatches(ctx, key, matchHex) {
+		t.Errorf("expected true for matching SHA256 at existing key")
+	}
+	if eng.skipIfMatches(ctx, key, "0000000000000000000000000000000000000000000000000000000000000000") {
+		t.Errorf("expected false when SHA256 differs from existing object")
+	}
+	if eng.skipIfMatches(ctx, "backups/missing.bin", matchHex) {
+		t.Errorf("expected false for non-existent key")
+	}
+	if eng.skipIfMatches(ctx, key, "") {
+		t.Errorf("expected false for empty local SHA256")
+	}
+}
+
 func TestEngineUsesClock(t *testing.T) {
 	eng, d, _, _, root, _ := newTestEngine(t, 10)
 	writeFile(t, root, "a.txt", "hi")

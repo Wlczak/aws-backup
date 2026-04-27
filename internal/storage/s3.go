@@ -216,11 +216,14 @@ func (s *S3Storage) uploadMultipart(ctx context.Context, key string, body io.Rea
 	return res, nil
 }
 
-// Head returns object metadata or ErrNotFound.
+// Head returns object metadata or ErrNotFound. ChecksumMode=ENABLED so
+// AWS includes the stored SHA256 in the response when present — callers
+// use it to dedup byte-identical re-uploads. (#133)
 func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(key),
+		ChecksumMode: s3types.ChecksumModeEnabled,
 	})
 	if err != nil {
 		var apiErr smithy.APIError
@@ -235,6 +238,13 @@ func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 	r := HeadResult{Key: key, ETag: aws.ToString(out.ETag), StorageClass: string(out.StorageClass)}
 	if out.ContentLength != nil {
 		r.Size = *out.ContentLength
+	}
+	if out.ChecksumSHA256 != nil {
+		if hx, err := base64ToHex(*out.ChecksumSHA256); err == nil {
+			r.ChecksumSHA256 = hx
+		} else {
+			r.ChecksumSHA256 = *out.ChecksumSHA256
+		}
 	}
 	return r, nil
 }

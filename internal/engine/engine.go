@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -534,6 +535,10 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	if err != nil {
 		return 0, 0, err
 	}
+	zipSHA256, err := sha256File(zipPath)
+	if err != nil {
+		return 0, 0, err
+	}
 
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
@@ -549,15 +554,45 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 	indexUploaded := false
 	if e.opts.EnableZipIndex {
 		indexBody := strings.Join(entries, "\n") + "\n"
-		if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
-			e.emit(Event{
-				Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
-				Data: map[string]any{"key": indexKey, "error": err.Error()},
-			})
-			return 0, 0, fmt.Errorf("upload zip index %s: %w", indexKey, err)
+		indexSum := sha256.Sum256([]byte(indexBody))
+		indexSHA256 := hex.EncodeToString(indexSum[:])
+		if e.skipIfMatches(ctx, indexKey, indexSHA256) {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip index %s: SHA256 matches existing object", indexKey))
+			indexUploaded = true
+		} else {
+			if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
+				e.emit(Event{
+					Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
+					Data: map[string]any{"key": indexKey, "error": err.Error()},
+				})
+				return 0, 0, fmt.Errorf("upload zip index %s: %w", indexKey, err)
+			}
+			indexUploaded = true
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
 		}
-		indexUploaded = true
-		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
+	}
+
+	now := e.opts.Now()
+	ids := make([]int64, 0, len(g.Files))
+	for _, f := range g.Files {
+		ids = append(ids, f.ID)
+	}
+
+	// Dedup: if S3 already holds the zip with the same SHA256, skip the
+	// PutIfAbsent entirely — saves a redundant version on a versioned
+	// bucket. A *different* SHA256 at this key still falls through to
+	// PutIfAbsent, which returns ErrAlreadyExists so the caller advances
+	// to the next counter slot exactly as before. (#133, #116)
+	if e.skipIfMatches(ctx, key, zipSHA256) {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip upload %s: SHA256 matches existing object", key))
+		if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, zipRel, md5hex, key, now); err != nil {
+			return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipRel, err)
+		}
+		e.emit(Event{
+			Type: EventUploadComplete, RunID: runID, At: now,
+			Data: map[string]any{"key": key, "size": size, "checksum_sha256": zipSHA256, "files": len(g.Files), "skipped": true},
+		})
+		return int64(len(g.Files)), size, nil
 	}
 
 	f, err := os.Open(zipPath)
@@ -585,11 +620,6 @@ func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN
 		return 0, 0, fmt.Errorf("upload %s: %w", key, err)
 	}
 
-	now := e.opts.Now()
-	ids := make([]int64, 0, len(g.Files))
-	for _, f := range g.Files {
-		ids = append(ids, f.ID)
-	}
 	// Single transactional write so a partial failure can't leave files
 	// stuck in the intermediate 'zipped' state with no md5/s3_key.
 	if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, zipRel, md5hex, key, now); err != nil {
@@ -651,11 +681,26 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	// Wrap the source reader so bytes flowing through emit copy_progress
 	// events; key matches the upload phase so the UI keeps one entry per
 	// item with a phase field.
-	size, md5hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+	size, md5hex, sha256hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
 	if err != nil {
 		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
 	}
 	e.emitCopyProgress(runID, key, size, size) // belt-and-braces final 100% sample
+
+	// Dedup: if S3 already holds an object at this key whose SHA256
+	// matches the local content, skip the upload to avoid creating a
+	// redundant new version on a versioned bucket. (#133)
+	if e.skipIfMatches(ctx, key, sha256hex) {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip upload %s: SHA256 matches existing object", key))
+		now := e.opts.Now()
+		e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
+		e.emit(Event{
+			Type: EventUploadComplete, RunID: runID, At: now,
+			Data: map[string]any{"key": key, "size": size, "checksum_sha256": sha256hex, "skipped": true},
+		})
+		return size, nil
+	}
+
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
 		Data: map[string]any{"key": key, "size": size},
@@ -794,21 +839,23 @@ func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {
 	_ = e.opts.DB.AppendLog(ctx, runID, level, msg, e.opts.Now())
 }
 
-// copyAndHash copies a source entry to disk, computing md5 on the way.
-// Returns the copied size and lowercase hex md5. wrap, if non-nil,
-// wraps the source reader before bytes flow into the writer — the
-// engine uses this to inject a progressReader that emits live
-// copy_progress events for slow / large source reads.
-func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap func(io.Reader) io.Reader) (int64, string, error) {
+// copyAndHash copies a source entry to disk, computing both md5 and
+// sha256 on the way. md5 is what we persist in the DB for legacy
+// reasons; sha256 is used transiently by the dedup check that skips
+// the upload when S3 already holds an object with the same SHA256.
+// (#133) wrap, if non-nil, wraps the source reader before bytes flow
+// into the writer — the engine uses this to inject a progressReader
+// that emits live copy_progress events for slow / large source reads.
+func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap func(io.Reader) io.Reader) (int64, string, string, error) {
 	rc, err := src.Open(ctx, rel)
 	if err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
 	defer rc.Close()
 
 	out, err := os.Create(tmp)
 	if err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
 	defer out.Close()
 
@@ -817,15 +864,16 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap f
 		reader = wrap(rc)
 	}
 
-	h := md5.New()
-	n, err := io.Copy(io.MultiWriter(out, h), reader)
+	hMD5 := md5.New()
+	hSHA := sha256.New()
+	n, err := io.Copy(io.MultiWriter(out, hMD5, hSHA), reader)
 	if err != nil {
-		return n, "", err
+		return n, "", "", err
 	}
 	if err := out.Sync(); err != nil {
-		return n, "", err
+		return n, "", "", err
 	}
-	return n, hex.EncodeToString(h.Sum(nil)), nil
+	return n, hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), nil
 }
 
 func md5File(p string) (string, error) {
@@ -835,6 +883,36 @@ func md5File(p string) (string, error) {
 	}
 	defer f.Close()
 	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// skipIfMatches reports whether S3 already holds an object at key whose
+// ChecksumSHA256 equals sha256hex — the signal callers use to skip a
+// byte-identical re-upload. Any other outcome (object missing, checksum
+// unknown because the backend didn't echo one, content differs, transient
+// HEAD error) returns false so the regular upload path runs and the
+// upload itself surfaces any genuine network problem. (#133)
+func (e *Engine) skipIfMatches(ctx context.Context, key, sha256hex string) bool {
+	if sha256hex == "" {
+		return false
+	}
+	h, err := e.opts.Storage.Head(ctx, key)
+	if err != nil {
+		return false
+	}
+	return h.ChecksumSHA256 != "" && h.ChecksumSHA256 == sha256hex
+}
+
+func sha256File(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

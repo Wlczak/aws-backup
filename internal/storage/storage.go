@@ -29,10 +29,11 @@ type PutResult struct {
 
 // HeadResult is metadata returned by Head.
 type HeadResult struct {
-	Key          string
-	Size         int64
-	ETag         string
-	StorageClass string
+	Key            string
+	Size           int64
+	ETag           string
+	StorageClass   string
+	ChecksumSHA256 string // hex-encoded; empty if backend didn't echo it
 }
 
 // Storage is the subset of S3-like operations aws-backup needs.
