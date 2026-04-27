@@ -665,3 +665,159 @@ func TestEngineUsesClock(t *testing.T) {
 		t.Errorf("StartedAt=%v want %v", run.StartedAt, fixed)
 	}
 }
+
+// indTmpPath finds the engine's stable per-file tmp path for the row
+// matching rel. Encapsulates the naming convention so tests don't have
+// to hard-code it. (#127)
+func indTmpPath(t *testing.T, d *db.DB, tmpDir, rel string) string {
+	t.Helper()
+	files, _, _ := d.ListFiles(context.Background(), db.FilesFilter{})
+	for _, f := range files {
+		if f.Path == rel {
+			return filepath.Join(tmpDir, fmt.Sprintf("ind-%d", f.ID))
+		}
+	}
+	t.Fatalf("no DB row for %s", rel)
+	return ""
+}
+
+// TestEngineKeepsTmpOnUploadFailure: when the source→tmp copy succeeds
+// but the S3 upload fails, the tmp file must survive so the next run
+// can re-upload from it without re-reading the (potentially slow)
+// source. (#127)
+func TestEngineKeepsTmpOnUploadFailure(t *testing.T) {
+	eng, d, _, _, root, _ := newTestEngine(t, 100) // high threshold → individual
+	writeFile(t, root, "big.bin", "the-payload")
+
+	mem := storage.NewMemStorage()
+	failing := &failingStorage{Storage: mem, putErr: errors.New("boom"), failKeys: map[string]bool{"backups/big.bin": true}}
+	eng.opts.Storage = failing
+
+	ctx := context.Background()
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	tmp := indTmpPath(t, d, eng.opts.TmpDir, "big.bin")
+	info, err := os.Stat(tmp)
+	if err != nil {
+		t.Fatalf("tmp %s should survive upload failure, got: %v", tmp, err)
+	}
+	if info.Size() != int64(len("the-payload")) {
+		t.Errorf("tmp size=%d want %d", info.Size(), len("the-payload"))
+	}
+}
+
+// TestEngineReusesTmpOnSecondRun: after a run-1 upload failure leaves a
+// cached tmp, run 2 must skip copyAndHash entirely (no copy_progress
+// events for that key) and still mark the row uploaded. The wire signal
+// that copyAndHash didn't run is the absence of copy_progress for that
+// key — copyAndHash is the sole emitter for individual files. (#127)
+func TestEngineReusesTmpOnSecondRun(t *testing.T) {
+	eng, d, _, _, root, col := newTestEngine(t, 100)
+	eng.opts.RetryFailed = true // mirror config default so the failed row re-queues
+	writeFile(t, root, "big.bin", "the-payload")
+
+	mem := storage.NewMemStorage()
+	failing := &failingStorage{Storage: mem, putErr: errors.New("boom"), failKeys: map[string]bool{"backups/big.bin": true}}
+	eng.opts.Storage = failing
+
+	ctx := context.Background()
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	// Run 2 with normal storage → upload should succeed and reuse tmp.
+	eng.opts.Storage = mem
+	col.events = nil
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	// File ends uploaded.
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	if files[0].Status != db.StatusUploaded {
+		t.Errorf("status=%q want uploaded", files[0].Status)
+	}
+
+	// No copy_progress event for our key → tryReuseTmp short-circuited.
+	for _, ev := range col.byType(EventCopyProgress) {
+		if k, _ := ev.Data["key"].(string); k == "backups/big.bin" {
+			t.Errorf("unexpected copy_progress for backups/big.bin on reused-tmp run: %+v", ev.Data)
+		}
+	}
+
+	// And the upload still happened (object exists in mem).
+	if _, ok := mem.GetBytes("backups/big.bin"); !ok {
+		t.Errorf("expected object backups/big.bin to be uploaded on run 2")
+	}
+}
+
+// TestEngineRecopiesWhenSourceChangedAfterTmp: if the source file is
+// modified between the failed run-1 and run 2, source.Scan advances the
+// DB row's mtime past the cached tmp's mtime; tryReuseTmp must reject
+// the cached tmp and let copyAndHash overwrite it with the new
+// content. (#127)
+func TestEngineRecopiesWhenSourceChangedAfterTmp(t *testing.T) {
+	eng, d, _, _, root, _ := newTestEngine(t, 100)
+	eng.opts.RetryFailed = true
+	writeFile(t, root, "big.bin", "old-content")
+
+	mem := storage.NewMemStorage()
+	failing := &failingStorage{Storage: mem, putErr: errors.New("boom"), failKeys: map[string]bool{"backups/big.bin": true}}
+	eng.opts.Storage = failing
+
+	ctx := context.Background()
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	// Modify source: new content + advanced mtime.
+	writeFile(t, root, "big.bin", "new-content-different-length")
+	newMTime := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "big.bin"), newMTime, newMTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 2 with normal storage — must upload the NEW content.
+	eng.opts.Storage = mem
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	got, ok := mem.GetBytes("backups/big.bin")
+	if !ok {
+		t.Fatal("object missing after run 2")
+	}
+	if string(got) != "new-content-different-length" {
+		t.Errorf("uploaded bytes = %q, want new content; tryReuseTmp must have rejected the stale tmp", string(got))
+	}
+
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	if files[0].Status != db.StatusUploaded {
+		t.Errorf("status=%q want uploaded", files[0].Status)
+	}
+}
+
+// TestEngineSweepsOrphanTmps: an `ind-{N}` file in tmp whose ID is not
+// in the current pending list must be removed by the upload-phase
+// orphan sweep. Without this, every leave-on-failure tmp would leak
+// across many runs. (#127)
+func TestEngineSweepsOrphanTmps(t *testing.T) {
+	eng, _, _, _, root, _ := newTestEngine(t, 100)
+	writeFile(t, root, "real.txt", "x") // gives the run something to do so it reaches the upload phase
+
+	// Pre-seed an orphan tmp with a fileID that won't exist in the DB.
+	orphan := filepath.Join(eng.opts.TmpDir, "ind-999999")
+	if err := os.WriteFile(orphan, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := eng.Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("orphan tmp %s should have been swept; stat err=%v", orphan, err)
+	}
+}

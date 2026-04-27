@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -301,6 +302,17 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		return classify("mkdir tmp", err)
 	}
 
+	// Sweep tmp dir of orphan ind-N files whose IDs aren't pending any
+	// more (e.g. the row got marked uploaded by reconcileFromS3 between
+	// runs, or the file was removed from the source). Without this
+	// sweep, every "leave-tmp-on-failure" path could leak indefinitely
+	// across many runs. Cheap: one ReadDir + a few unlinks. (#127)
+	keepIDs := make(map[int64]struct{}, len(pending))
+	for _, pf := range pending {
+		keepIDs[pf.ID] = struct{}{}
+	}
+	e.sweepOrphanTmps(ctx, runID, e.opts.TmpDir, keepIDs)
+
 	// Seed per-directory zip counters so new zips continue the sequence
 	// (_2, _3, …) instead of restarting at _1 and silently overwriting the
 	// previous archive. We consult both the DB and S3 and take the max, so
@@ -494,7 +506,7 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 	}
 	out := make([]PendingFile, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size})
+		out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size, MTime: r.MTime})
 	}
 	return out, nil
 }
@@ -669,30 +681,49 @@ func (e *Engine) processIndividualGroup(ctx context.Context, runID int64, g Grou
 }
 
 func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFile) (int64, error) {
-	tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d-%d", runID, pf.ID))
-	defer os.Remove(tmp)
-
+	// Stable tmp name (no runID prefix) so a leftover from a failed
+	// upload in run N is found and reused by run N+1. Engine refuses
+	// concurrent runs, so two runs never share tmp. (#127)
+	tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d", pf.ID))
 	key := path.Join(e.opts.KeyPrefix, pf.RelPath)
 
-	if err := ensureTmpSpace(e.opts.TmpDir, pf.Size); err != nil {
-		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
-	}
-
-	// Copy source -> tmp so we can compute MD5 and then upload from a file.
-	// Wrap the source reader so bytes flowing through emit copy_progress
-	// events; key matches the upload phase so the UI keeps one entry per
-	// item with a phase field.
-	size, md5hex, sha256hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+	// Resume path: if a previous run left a complete tmp here that's still
+	// fresh against the current DB row, skip the source read entirely. A
+	// stale or incomplete tmp is removed by tryReuseTmp itself so the
+	// fallback copy starts clean. (#127)
+	size, md5hex, sha256hex, reused, err := uploadHashes(tmp, pf)
 	if err != nil {
-		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
+		return 0, fmt.Errorf("inspect cached tmp %s: %w", tmp, err)
 	}
-	e.emitCopyProgress(runID, key, size, size) // belt-and-braces final 100% sample
+	if reused {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reusing cached tmp %s for %s", tmp, pf.RelPath))
+		// No copy_progress emit on reuse — there was no source read.
+		// upload_start below moves the dashboard's per-item phase
+		// straight to 'upload', skipping the brief 'copying' label.
+	} else {
+		if err := ensureTmpSpace(e.opts.TmpDir, pf.Size); err != nil {
+			return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
+		}
+		// Copy source -> tmp so we can compute MD5 and then upload from a file.
+		// Wrap the source reader so bytes flowing through emit copy_progress
+		// events; key matches the upload phase so the UI keeps one entry per
+		// item with a phase field.
+		size, md5hex, sha256hex, err = copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+		if err != nil {
+			// Partial copy is unusable for next run's resume; remove now so
+			// we don't poison a future tryReuseTmp with a wrong-sized tmp.
+			_ = os.Remove(tmp)
+			return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
+		}
+		e.emitCopyProgress(runID, key, size, size) // belt-and-braces final 100% sample
+	}
 
 	// Dedup: if S3 already holds an object at this key whose SHA256
 	// matches the local content, skip the upload to avoid creating a
 	// redundant new version on a versioned bucket. (#133)
 	if e.skipIfMatches(ctx, key, sha256hex) {
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip upload %s: SHA256 matches existing object", key))
+		_ = os.Remove(tmp) // upload didn't happen but content is in S3 — don't leak
 		now := e.opts.Now()
 		e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
 		e.emit(Event{
@@ -714,6 +745,10 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	res, err := e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, key, size), key, f, size)
 	f.Close()
 	if err != nil {
+		// Leave tmp in place — next run can reuse it instead of re-reading
+		// the source. A genuinely-broken tmp gets cleaned up on the next
+		// run's tryReuseTmp size/mtime check or by sweepOrphanTmps if the
+		// row leaves the pending list. (#127)
 		e.emit(Event{
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{"key": key, "error": err.Error()},
@@ -729,11 +764,28 @@ func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFi
 	// commits this in a batch alongside the other individual uploads.
 	e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
 
+	// Successful upload — free the tmp now. We deliberately don't defer
+	// the remove on the failure paths above so the next run's resume
+	// path can pick up where we left off. (#127)
+	_ = os.Remove(tmp)
+
 	e.emit(Event{
 		Type: EventUploadComplete, RunID: runID, At: now,
 		Data: map[string]any{"key": key, "size": size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256},
 	})
 	return size, nil
+}
+
+// uploadHashes returns (size, md5, sha256, reused, err). When tryReuseTmp
+// reports a usable cached tmp, the returned hashes come from re-hashing
+// it locally (one disk pass) and reused=true. Otherwise the caller must
+// run copyAndHash and overwrite tmp.
+func uploadHashes(tmp string, pf PendingFile) (size int64, md5hex, sha256hex string, reused bool, err error) {
+	md5hex, sha256hex, ok, err := tryReuseTmp(tmp, pf)
+	if err != nil || !ok {
+		return 0, "", "", false, err
+	}
+	return pf.Size, md5hex, sha256hex, true, nil
 }
 
 func (e *Engine) emit(ev Event) {
@@ -940,4 +992,76 @@ func sha256File(p string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// tryReuseTmp inspects an existing tmp file and returns (md5, sha256,
+// true, nil) if it can stand in for a fresh source→tmp copy: the size
+// matches the DB row and the tmp's mtime is >= the DB-recorded source
+// mtime (so the source can't have been modified after the cached copy
+// was written). Re-hashing on reuse catches bit-rot or partial writes
+// from a previous crash. A stale or unreadable tmp is removed and
+// (false, nil) is returned so the caller falls through to a regular
+// copyAndHash. (#127)
+func tryReuseTmp(tmp string, pf PendingFile) (md5hex, sha256hex string, ok bool, err error) {
+	info, statErr := os.Stat(tmp)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return "", "", false, nil
+	}
+	if statErr != nil {
+		return "", "", false, statErr
+	}
+	if info.Size() != pf.Size {
+		_ = os.Remove(tmp)
+		return "", "", false, nil
+	}
+	if !pf.MTime.IsZero() && info.ModTime().Before(pf.MTime) {
+		_ = os.Remove(tmp)
+		return "", "", false, nil
+	}
+	f, openErr := os.Open(tmp)
+	if openErr != nil {
+		return "", "", false, openErr
+	}
+	defer f.Close()
+	hMD5 := md5.New()
+	hSHA := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(hMD5, hSHA), f); err != nil {
+		return "", "", false, err
+	}
+	return hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), true, nil
+}
+
+// sweepOrphanTmps walks tmpDir once and deletes any `ind-{N}` file
+// whose ID is not in keep. This bounds tmp's size to "files actively
+// pending" (the issue title's literal requirement); without it, every
+// failed upload would leak a file that the next runs never touch
+// because reconcile or another path already advanced its DB row past
+// pending. Best-effort: per-entry errors are logged and skipped. (#127)
+func (e *Engine) sweepOrphanTmps(ctx context.Context, runID int64, tmpDir string, keep map[int64]struct{}) {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		e.log(ctx, runID, db.LogWarn, fmt.Sprintf("orphan tmp sweep: read %s: %v", tmpDir, err))
+		return
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		const prefix = "ind-"
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		idStr := strings.TrimPrefix(name, prefix)
+		id, parseErr := strconv.ParseInt(idStr, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		if _, ok := keep[id]; ok {
+			continue
+		}
+		if rmErr := os.Remove(filepath.Join(tmpDir, name)); rmErr != nil {
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("orphan tmp sweep: remove %s: %v", name, rmErr))
+		}
+	}
 }
