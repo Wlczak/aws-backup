@@ -9,6 +9,9 @@
   let stats = $state<FileStats | null>(null);
   let logLines = $state<string[]>([]);
   let scanSeen = $state(0);
+  let scanNew = $state(0);
+  let scanChanged = $state(0);
+  let scanActive = $state(false);
   let uploads = $state({ completed: 0, failed: 0, started: 0, total: 0 });
   let triggering = $state(false);
   let err = $state('');
@@ -79,7 +82,16 @@
     es = subscribeEvents((type, data) => {
       const d = data as any;
       const payload = d?.data ?? {};
-      if (type === 'scan_complete') scanSeen = payload.seen ?? 0;
+      if (type === 'scan_progress') {
+        scanSeen = payload.seen ?? scanSeen;
+        scanNew = payload.new ?? scanNew;
+        scanChanged = payload.changed ?? scanChanged;
+        scanActive = true;
+      }
+      if (type === 'scan_complete') {
+        scanSeen = payload.seen ?? 0;
+        scanActive = false;
+      }
       if (type === 'upload_plan') uploads.total = payload.total_files ?? 0;
       if (type === 'copy_progress' && payload.key) {
         upsertItem(payload.key, {
@@ -136,6 +148,10 @@
       if (type === 'run_start') {
         itemProgress = {};
         uploads = { completed: 0, failed: 0, started: 0, total: 0 };
+        scanSeen = 0;
+        scanNew = 0;
+        scanChanged = 0;
+        scanActive = true;
         // Clear any leftover DB-sync card from the previous run so it
         // doesn't linger across a new triggerRun.
         if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
@@ -184,6 +200,7 @@
           error: payload.error ?? '',
         };
       }
+      if (type === 'run_complete') scanActive = false;
       // run_log events are replayed history; render them as readable
       // "[level] message" lines rather than raw JSON. (#130)
       const line = type === 'run_log'
@@ -213,6 +230,9 @@
       await api.triggerRun({ mode });
       uploads = { completed: 0, failed: 0, started: 0, total: 0 };
       scanSeen = 0;
+      scanNew = 0;
+      scanChanged = 0;
+      scanActive = false;
       logLines = [];
       itemProgress = {};
     } catch (e) {
@@ -643,6 +663,14 @@
 {#if status?.current || logLines.length}
   <div class="card">
     <div class="label">Live progress</div>
+    {#if scanActive}
+      <div class="scan-row">
+        <div class="bar bar-indeterminate"><div class="fill"></div></div>
+        <div class="scan-foot mono">
+          Scanning… {scanSeen.toLocaleString()} seen{#if scanNew > 0} · {scanNew.toLocaleString()} new{/if}{#if scanChanged > 0} · {scanChanged.toLocaleString()} changed{/if}
+        </div>
+      </div>
+    {/if}
     <div class="live-stats">
       <span>scanned: <strong>{scanSeen.toLocaleString()}</strong></span>
       <span>started: <strong>{uploads.started}</strong></span>
@@ -750,6 +778,17 @@
   .item-phase { font-size: 0.75rem; color: var(--muted); flex: 0 0 auto; font-style: italic; }
   .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+  .scan-row { margin-bottom: 0.5rem; }
+  .scan-foot { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+  .bar-indeterminate .fill {
+    width: 35%;
+    transition: none;
+    animation: scan-slide 1.5s linear infinite;
+  }
+  @keyframes scan-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(285%); }
+  }
   .item-foot { font-size: 0.75rem; color: var(--muted); }
   .db-sync-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.85rem; margin: 0.25rem 0; }
   .db-sync-status { color: var(--muted); }

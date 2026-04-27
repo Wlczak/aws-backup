@@ -31,7 +31,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	d := openDB(t)
 
 	// First scan: 2 new files.
-	s, err := Scan(ctx, src, d, nil, nil)
+	s, err := Scan(ctx, src, d, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	// Sleep so scanStart is strictly after the last upload's last_seen_at.
 	time.Sleep(10 * time.Millisecond)
 
-	s, err = Scan(ctx, src, d, nil, nil)
+	s, err = Scan(ctx, src, d, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +93,39 @@ func TestScanNewChangedMissing(t *testing.T) {
 	}
 }
 
+func TestScanProgressCallback(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	const n = 7
+	for i := 0; i < n; i++ {
+		writeFile(t, filepath.Join(root, "f"+string(rune('0'+i))+".txt"), "x")
+	}
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	var samples []ScanProgress
+	s, err := Scan(ctx, src, d, nil, nil, func(p ScanProgress) {
+		samples = append(samples, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Seen != n {
+		t.Fatalf("seen=%d want %d", s.Seen, n)
+	}
+	if len(samples) == 0 {
+		t.Fatal("expected at least one progress callback")
+	}
+	last := samples[len(samples)-1]
+	if last.Seen != n {
+		t.Fatalf("final progress seen=%d want %d", last.Seen, n)
+	}
+	if last.New != n {
+		t.Fatalf("final progress new=%d want %d", last.New, n)
+	}
+}
+
 func TestScanContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	root := t.TempDir()
@@ -104,7 +137,7 @@ func TestScanContextCancel(t *testing.T) {
 	d := openDB(t)
 
 	cancel() // cancel before scan runs
-	if _, err := Scan(ctx, src, d, nil, nil); err == nil {
+	if _, err := Scan(ctx, src, d, nil, nil, nil); err == nil {
 		t.Fatal("expected cancel error")
 	}
 }

@@ -200,9 +200,19 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 
 	// Phase 1: scan (skipped for upload-only runs).
 	if mode == RunModeFull || mode == RunModeScan {
-		scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths, func(msg string) {
-			e.log(ctx, runID, db.LogInfo, msg)
-		})
+		scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths,
+			func(msg string) { e.log(ctx, runID, db.LogInfo, msg) },
+			func(p source.ScanProgress) {
+				e.emit(Event{
+					Type: EventScanProgress, RunID: runID, At: e.opts.Now(),
+					Data: map[string]any{
+						"seen":    p.Seen,
+						"new":     p.New,
+						"changed": p.Changed,
+					},
+				})
+			},
+		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err

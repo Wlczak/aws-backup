@@ -21,6 +21,19 @@ type ScanStats struct {
 // Logger is a minimal sink for scan-level messages. nil is fine.
 type Logger func(msg string)
 
+// ScanProgress carries the cumulative running totals reported during the
+// walk. The fields mirror the corresponding ScanStats values at the
+// moment the latest batch was committed.
+type ScanProgress struct {
+	Seen    int64
+	New     int64
+	Changed int64
+}
+
+// ProgressFn is invoked from the flusher goroutine after each successful
+// batch upsert. nil is fine.
+type ProgressFn func(ScanProgress)
+
 const flushInterval = 3 * time.Second
 
 // Scan walks src, accumulates discovered files in RAM, and flushes them to the
@@ -30,7 +43,7 @@ const flushInterval = 3 * time.Second
 // When paths is non-empty, only files whose RelPath matches or is under one
 // of the given paths are processed (partial rescan). Missing-detection is
 // skipped for partial scans because the walker only visited a subset.
-func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger) (ScanStats, error) {
+func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger, onProgress ProgressFn) (ScanStats, error) {
 	var stats ScanStats
 	scanStart := time.Now().UTC()
 
@@ -72,6 +85,9 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger)
 			default:
 				stats.Unchanged++
 			}
+		}
+		if onProgress != nil {
+			onProgress(ScanProgress{Seen: stats.Seen, New: stats.New, Changed: stats.Changed})
 		}
 		return nil
 	}
