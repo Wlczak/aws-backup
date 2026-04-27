@@ -56,9 +56,15 @@
 
   let itemList = $derived(
     Object.values(itemProgress).sort((a, b) => {
-      // Active first, then most recent.
+      // Active before terminal.
       if (a.status === 'active' && b.status !== 'active') return -1;
       if (b.status === 'active' && a.status !== 'active') return 1;
+      // Among active items, pin uploads above copies — the upload phase
+      // is the slow, network-bound one users want to watch, and copy
+      // events fire constantly enough to otherwise bury it. (#136)
+      if (a.status === 'active' && b.status === 'active' && a.phase !== b.phase) {
+        return a.phase === 'upload' ? -1 : 1;
+      }
       return b.updatedAt - a.updatedAt;
     }),
   );

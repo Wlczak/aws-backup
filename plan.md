@@ -358,6 +358,7 @@ When fixing a GitHub issue:
 | #126 | 2613de2 | New `upload_plan` event carries `{total_files, total_groups, total_bytes}` after `listPending` + `GroupFiles`; Dashboard ProgressBar uses this as denominator instead of `uploads.started` |
 | #124 | 601cce6 | New `POST /api/runs/:id/stop` graceful-stop endpoint + `db.RunStopped` status; engine polls `Options.StopRequested` between groups/files and exits cleanly via `ErrStopRequested`; UI gains separate **Stop** + **Force cancel** buttons |
 | —    | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase; `copyAndHash` + `CreateZip` accept a wrap closure; Dashboard tracks a phase field per item and renders a "copying"/"uploading" sublabel |
+| #136 | (pending) | Dashboard `itemList` comparator pins active uploads above active copies (phase tiebreaker before `updatedAt`) so the in-flight S3 upload bar stops being buried by chatty `copy_progress` events |
 | #137 | b6fa1e3 | `source.Scan` accepts an optional `ProgressFn` invoked from the flusher goroutine after each successful batch upsert; engine emits `EventScanProgress` with `{seen, new, changed}`; Dashboard renders an indeterminate sliding bar + live counters under the existing "Live progress" card while `scanActive` |
 | #138 | d26c7fa | Pre-flight `ensureTmpSpace` guard before `copyAndHash` / `CreateZip`; per-platform `availableBytes` helper (`syscall.Statfs` on unix, `windows.GetDiskFreeSpaceEx` on windows); 64 MiB safety margin; statfs errors are non-fatal (logged + skipped) so transient stat failures don't block runs |
 
