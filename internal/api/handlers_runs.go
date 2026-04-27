@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -167,6 +168,10 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	// Clear any stale graceful-stop flag from a prior run before the
 	// engine starts polling it. (#124)
 	s.currentRunStopReq.Store(false)
+	// Same for the cancel-request flag — its only role is to tell the
+	// post-run goroutine "the run ended via /cancel, sync the DB", and
+	// it must not survive into the next run. (#128)
+	s.currentRunCancelReq.Store(false)
 
 	// Ensure currentRun is cleared if we panic before the goroutine launches.
 	// The goroutine itself is responsible for clearing it on normal completion.
@@ -188,15 +193,16 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		// the WithCancel chain doesn't leak goroutines/timers per run.
 		defer cancel()
 		runErr := eng.RunWithID(runCtx, runID)
+		// Read the stop/cancel flags BEFORE clearing currentRun so a
+		// concurrent handleTriggerRun (which clears them under runMu)
+		// can't race us to false. (#128)
+		stopReq := s.currentRunStopReq.Load()
+		cancelReq := s.currentRunCancelReq.Load()
 		s.runMu.Lock()
 		s.currentRun = 0
 		s.currentRunCancel = nil
 		s.runMu.Unlock()
-		if runErr == nil && syncDBToS3 != nil {
-			if err := syncDBToS3(context.Background()); err != nil && logger != nil {
-				logger.Warn("db sync to s3 failed", "error", err)
-			}
-		}
+		s.maybeSyncDBToS3(syncDBToS3, logger, runID, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true
 
@@ -217,8 +223,82 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no running run with that id"))
 		return
 	}
+	// Mark this as a user-initiated cancel so the post-run goroutine
+	// distinguishes it from Server.Shutdown's cancel and uploads the DB
+	// to S3 with "cancel" reason + 30 s timeout. (#128)
+	s.currentRunCancelReq.Store(true)
 	cancel()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+}
+
+// dbSyncStopTimeout bounds the post-Stop and post-completion DB upload.
+// 600 s comfortably covers a hundreds-of-MB index over modest links and
+// also caps the duration runWg can hold up Server.Shutdown.
+const dbSyncStopTimeout = 600 * time.Second
+
+// dbSyncCancelTimeout bounds the post-Cancel DB upload. Tighter than the
+// stop budget because force-cancel implies the user wants to move on
+// quickly; the partial-progress index is still worth saving but not at
+// the cost of a multi-minute hang.
+const dbSyncCancelTimeout = 30 * time.Second
+
+// maybeSyncDBToS3 picks a reason and timeout based on how the run ended,
+// then runs the sync in a context that aborts on Server.Shutdown so an
+// in-flight upload doesn't outlive app.close() tearing down DB/storage.
+// Returns immediately when the run failed or was cancelled by service
+// shutdown — those branches are explicitly out of scope for #128.
+func (s *Server) maybeSyncDBToS3(
+	sync func(ctx context.Context, runID int64, reason string) error,
+	logger *slog.Logger,
+	runID int64,
+	runErr error,
+	stopReq, cancelReq bool,
+) {
+	if sync == nil {
+		return
+	}
+
+	var (
+		reason  string
+		timeout time.Duration
+	)
+	switch {
+	case stopReq && runErr == nil:
+		reason, timeout = "stop", dbSyncStopTimeout
+	case cancelReq && errors.Is(runErr, context.Canceled):
+		reason, timeout = "cancel", dbSyncCancelTimeout
+	case !stopReq && !cancelReq && runErr == nil:
+		reason, timeout = "complete", dbSyncStopTimeout
+	default:
+		// Engine failure or service-shutdown cancel — skip per #128.
+		return
+	}
+
+	// If shutdown already started, don't initiate a new upload.
+	select {
+	case <-s.shutdownCh:
+		return
+	default:
+	}
+
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), timeout)
+	defer syncCancel()
+	// Mirror SIGINT into syncCtx so an in-flight upload aborts when the
+	// service is shutting down. shutdownCh is closed exactly once at the
+	// top of Server.Shutdown.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-s.shutdownCh:
+			syncCancel()
+		case <-done:
+		}
+	}()
+
+	if err := sync(syncCtx, runID, reason); err != nil && logger != nil {
+		logger.Warn("db sync to s3 failed", "error", err, "reason", reason)
+	}
 }
 
 // handleStopRun signals a graceful stop: the engine finishes its

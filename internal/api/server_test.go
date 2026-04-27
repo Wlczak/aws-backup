@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -386,6 +387,143 @@ func TestStopRun(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("idle status=%d want 404", resp.StatusCode)
+	}
+}
+
+// TestMaybeSyncDBToS3 covers the post-run branching that decides whether
+// to upload the index DB to S3 after a run ends, based on how the run
+// terminated. (#128)
+func TestMaybeSyncDBToS3(t *testing.T) {
+	type call struct {
+		runID  int64
+		reason string
+	}
+
+	cases := []struct {
+		name      string
+		runErr    error
+		stopReq   bool
+		cancelReq bool
+		want      *call // nil = expect no sync
+	}{
+		{name: "stop triggers sync", runErr: nil, stopReq: true, want: &call{runID: 7, reason: "stop"}},
+		{name: "cancel triggers sync", runErr: context.Canceled, cancelReq: true, want: &call{runID: 7, reason: "cancel"}},
+		{name: "completion triggers sync", runErr: nil, want: &call{runID: 7, reason: "complete"}},
+		{name: "engine failure skips sync", runErr: errors.New("boom"), want: nil},
+		{name: "shutdown-cancel skips sync", runErr: context.Canceled, cancelReq: false, want: nil},
+		{name: "stop with non-nil runErr skips", runErr: errors.New("boom"), stopReq: true, want: nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got *call
+			fake := func(ctx context.Context, runID int64, reason string) error {
+				got = &call{runID: runID, reason: reason}
+				return nil
+			}
+			s := NewServer(Deps{SyncDBToS3: fake})
+			s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 7, tc.runErr, tc.stopReq, tc.cancelReq)
+
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("want no sync, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("want sync called with %+v, got none", tc.want)
+			}
+			if *got != *tc.want {
+				t.Errorf("call=%+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaybeSyncDBToS3ShutdownAbortsInFlight covers the SIGINT-during-sync
+// case: closing shutdownCh while syncDBToS3 is running must cancel its
+// context so app.close() doesn't race a tear-down. (#128)
+func TestMaybeSyncDBToS3ShutdownAbortsInFlight(t *testing.T) {
+	syncStarted := make(chan struct{})
+	syncCtx := make(chan context.Context, 1)
+	fake := func(ctx context.Context, runID int64, reason string) error {
+		close(syncStarted)
+		syncCtx <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	s := NewServer(Deps{SyncDBToS3: fake})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, nil, true /* stopReq */, false)
+	}()
+
+	select {
+	case <-syncStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sync never started")
+	}
+	// Trigger shutdown — the sync ctx should be cancelled promptly.
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("maybeSyncDBToS3 did not return after Shutdown")
+	}
+	ctx := <-syncCtx
+	if ctx.Err() == nil {
+		t.Errorf("sync ctx not cancelled after Shutdown")
+	}
+}
+
+// TestMaybeSyncDBToS3SkipsAfterShutdown covers the case where shutdown
+// fires BEFORE the post-run goroutine reaches the sync — the upload must
+// not be initiated at all (per #128: no DB sync on service shutdown).
+func TestMaybeSyncDBToS3SkipsAfterShutdown(t *testing.T) {
+	called := false
+	fake := func(ctx context.Context, runID int64, reason string) error {
+		called = true
+		return nil
+	}
+	s := NewServer(Deps{SyncDBToS3: fake})
+	_ = s.Shutdown(context.Background())
+	s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, nil, false, false /* completion */)
+	if called {
+		t.Error("sync was called even though shutdown had already started")
+	}
+}
+
+// TestCancelRunSetsCancelReq verifies /api/runs/:id/cancel sets the flag
+// the post-run goroutine reads to distinguish user-cancel from
+// service-shutdown-cancel. (#128)
+func TestCancelRunSetsCancelReq(t *testing.T) {
+	ts, deps := newTestServer(t)
+	cancelCalled := false
+	srv := &Server{
+		deps:             deps,
+		currentRun:       42,
+		currentRunCancel: func() { cancelCalled = true },
+		shutdownCh:       make(chan struct{}),
+	}
+	ts.Config.Handler = srv.Router()
+
+	resp, err := ts.Client().Post(ts.URL+"/api/runs/42/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("status=%d want 202", resp.StatusCode)
+	}
+	if !cancelCalled {
+		t.Error("cancel func not invoked")
+	}
+	if !srv.currentRunCancelReq.Load() {
+		t.Error("currentRunCancelReq should be set after /cancel")
 	}
 }
 

@@ -193,8 +193,12 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	return os.Rename(tmp, dst)
 }
 
-// syncDBToS3 checkpoints the WAL and uploads the DB file to S3.
-func (a *appState) syncDBToS3(ctx context.Context) error {
+// syncDBToS3 checkpoints the WAL and uploads the DB file to S3, emitting
+// db_sync_* progress events through the bus so the dashboard can render
+// a progress bar (the index can grow to hundreds of MB). reason is
+// "complete" | "stop" | "cancel" depending on how the originating run
+// ended; runID is the run that triggered this sync. (#128)
+func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) error {
 	if err := a.db.Checkpoint(ctx); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
@@ -207,11 +211,59 @@ func (a *appState) syncDBToS3(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	size := fi.Size()
+
+	publish := func(ev engine.Event) {
+		if a.bus != nil {
+			a.bus.Publish(ev)
+		}
+	}
+	now := time.Now().UTC()
+	publish(engine.Event{
+		Type:  engine.EventDBSyncStart,
+		RunID: runID,
+		At:    now,
+		Data:  map[string]any{"reason": reason, "size": size},
+	})
+
+	body := engine.NewProgressReader(f, size, engine.DefaultProgressInterval, func(read, total int64) {
+		var percent float64
+		if total > 0 {
+			percent = float64(read) / float64(total) * 100
+		}
+		publish(engine.Event{
+			Type:  engine.EventDBSyncProgress,
+			RunID: runID,
+			At:    time.Now().UTC(),
+			Data: map[string]any{
+				"reason":  reason,
+				"bytes":   read,
+				"total":   total,
+				"percent": percent,
+			},
+		})
+	})
+
 	// STANDARD tier: the DB sidecar is read on every restart to seed the
 	// local index, so it must be instantly readable without a Glacier
 	// restore — same reasoning as the zip .index.txt sidecars. (#125)
-	_, err = a.store.PutStandard(ctx, dbS3Key(a.cfg.S3.KeyPrefix), f, fi.Size())
-	return err
+	_, putErr := a.store.PutStandard(ctx, dbS3Key(a.cfg.S3.KeyPrefix), body, size)
+	if putErr != nil {
+		publish(engine.Event{
+			Type:  engine.EventDBSyncFailed,
+			RunID: runID,
+			At:    time.Now().UTC(),
+			Data:  map[string]any{"reason": reason, "error": putErr.Error()},
+		})
+		return putErr
+	}
+	publish(engine.Event{
+		Type:  engine.EventDBSyncComplete,
+		RunID: runID,
+		At:    time.Now().UTC(),
+		Data:  map[string]any{"reason": reason, "size": size},
+	})
+	return nil
 }
 
 // dbS3Key returns the S3 key used to store the index database.

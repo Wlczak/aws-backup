@@ -25,6 +25,17 @@
   };
   let itemProgress = $state<Record<string, ItemProgress>>({});
 
+  type DBSync = {
+    reason: 'stop' | 'cancel' | 'complete' | string;
+    bytes: number;
+    total: number;
+    percent: number;
+    status: 'active' | 'done' | 'failed';
+    error?: string;
+  };
+  let dbSync = $state<DBSync | null>(null);
+  let dbSyncHideTimer: number | undefined;
+
   function upsertItem(key: string, patch: Partial<ItemProgress>) {
     const prev = itemProgress[key];
     itemProgress[key] = {
@@ -125,6 +136,53 @@
       if (type === 'run_start') {
         itemProgress = {};
         uploads = { completed: 0, failed: 0, started: 0, total: 0 };
+        // Clear any leftover DB-sync card from the previous run so it
+        // doesn't linger across a new triggerRun.
+        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
+        dbSync = null;
+      }
+      if (type === 'db_sync_start') {
+        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
+        dbSync = {
+          reason: payload.reason ?? 'complete',
+          bytes: 0,
+          total: payload.size ?? 0,
+          percent: 0,
+          status: 'active',
+        };
+      }
+      if (type === 'db_sync_progress' && dbSync) {
+        dbSync = {
+          ...dbSync,
+          reason: payload.reason ?? dbSync.reason,
+          bytes: payload.bytes ?? dbSync.bytes,
+          total: payload.total ?? dbSync.total,
+          percent: payload.percent ?? dbSync.percent,
+          status: 'active',
+        };
+      }
+      if (type === 'db_sync_complete') {
+        dbSync = {
+          reason: payload.reason ?? dbSync?.reason ?? 'complete',
+          bytes: payload.size ?? dbSync?.total ?? 0,
+          total: payload.size ?? dbSync?.total ?? 0,
+          percent: 100,
+          status: 'done',
+        };
+        // Auto-hide the success badge so an idle dashboard doesn't keep
+        // stale "Index DB → S3 done" state forever.
+        if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
+        dbSyncHideTimer = window.setTimeout(() => { dbSync = null; }, 8000);
+      }
+      if (type === 'db_sync_failed') {
+        dbSync = {
+          reason: payload.reason ?? dbSync?.reason ?? 'complete',
+          bytes: dbSync?.bytes ?? 0,
+          total: dbSync?.total ?? 0,
+          percent: dbSync?.percent ?? 0,
+          status: 'failed',
+          error: payload.error ?? '',
+        };
       }
       // run_log events are replayed history; render them as readable
       // "[level] message" lines rather than raw JSON. (#130)
@@ -139,7 +197,14 @@
   onDestroy(() => {
     es?.close();
     if (pollTimer) clearInterval(pollTimer);
+    if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
   });
+
+  function dbSyncLabel(reason: string): string {
+    if (reason === 'stop') return 'after stop';
+    if (reason === 'cancel') return 'after cancel';
+    return 'after run';
+  }
 
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
     triggering = true;
@@ -556,6 +621,25 @@
   </div>
 {/if}
 
+{#if dbSync}
+  <div class="card db-sync-card db-sync-{dbSync.status}">
+    <div class="label">Index DB → S3 ({dbSyncLabel(dbSync.reason)})</div>
+    <div class="db-sync-head">
+      <span class="db-sync-status">
+        {#if dbSync.status === 'active'}uploading…{:else if dbSync.status === 'done'}done{:else}failed{/if}
+      </span>
+      <span class="db-sync-pct mono">
+        {#if dbSync.status === 'failed'}—{:else}{dbSync.percent.toFixed(1)}%{/if}
+      </span>
+    </div>
+    <div class="bar"><div class="fill" style="width: {Math.min(100, dbSync.percent)}%"></div></div>
+    <div class="db-sync-foot mono">
+      {bytes(dbSync.bytes)} / {bytes(dbSync.total)}
+      {#if dbSync.error}<span class="err"> · {dbSync.error}</span>{/if}
+    </div>
+  </div>
+{/if}
+
 {#if status?.current || logLines.length}
   <div class="card">
     <div class="label">Live progress</div>
@@ -667,6 +751,12 @@
   .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
   .item-foot { font-size: 0.75rem; color: var(--muted); }
+  .db-sync-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.85rem; margin: 0.25rem 0; }
+  .db-sync-status { color: var(--muted); }
+  .db-sync-pct { color: var(--muted); }
+  .db-sync-foot { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+  .db-sync-done { opacity: 0.85; }
+  .db-sync-failed { border-color: var(--err); }
   .log {
     background: var(--bg);
     border: 1px solid var(--border);

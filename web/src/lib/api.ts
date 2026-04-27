@@ -282,6 +282,7 @@ export function subscribeEvents(
     'copy_progress',
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
     'run_start', 'run_log', 'run_complete',
+    'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   if (onStatus) {

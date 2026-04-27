@@ -29,6 +29,14 @@ const (
 	EventUploadFailed    = "upload_failed"
 	EventRunStart        = "run_start"
 	EventRunComplete     = "run_complete"
+	// DB-sync events accompany the post-run upload of the local index.db
+	// to S3 (triggered after Stop, Cancel, or normal completion). Reason
+	// in Data is "stop" | "cancel" | "complete" so the UI can label the
+	// progress panel. (#128)
+	EventDBSyncStart    = "db_sync_start"
+	EventDBSyncProgress = "db_sync_progress"
+	EventDBSyncComplete = "db_sync_complete"
+	EventDBSyncFailed   = "db_sync_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

@@ -11,6 +11,19 @@ import (
 // part-sized chunks).
 const defaultProgressInterval = 250 * time.Millisecond
 
+// DefaultProgressInterval is the public alias of defaultProgressInterval
+// for callers outside the engine package (e.g. the DB-to-S3 sync) so
+// they can match the in-engine throttling cadence without copying it.
+const DefaultProgressInterval = defaultProgressInterval
+
+// NewProgressReader wraps r in a throttled io.Reader that fires
+// onProgress at most once per interval (plus a final emit on EOF) with
+// the running byte count and total. Exposed for the DB-sync upload so
+// it can reuse the same throttling the engine uses for file uploads.
+func NewProgressReader(r io.Reader, total int64, interval time.Duration, onProgress func(read, total int64)) io.Reader {
+	return newProgressReader(r, total, interval, onProgress)
+}
+
 // progressReader wraps an io.Reader and invokes onProgress as bytes
 // flow through Read. The callback is throttled to at most one call per
 // interval, plus a final call once the underlying reader signals io.EOF

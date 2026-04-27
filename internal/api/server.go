@@ -42,9 +42,12 @@ type Deps struct {
 	// objects and compare them against the DB index.
 	Storage       storage.Storage
 	StoragePrefix string
-	// SyncDBToS3, when non-nil, is called after each successful backup run
-	// to upload the local index.db to S3 as a remote backup.
-	SyncDBToS3 func(ctx context.Context) error
+	// SyncDBToS3, when non-nil, is called after a backup run when the user
+	// either let it complete, clicked Stop, or clicked Cancel. The reason
+	// argument ("complete" | "stop" | "cancel") lets the implementation
+	// label its progress events so the dashboard can show which trigger
+	// produced the upload. (#128)
+	SyncDBToS3 func(ctx context.Context, runID int64, reason string) error
 	Logger     *slog.Logger
 }
 
@@ -62,9 +65,22 @@ type Server struct {
 	// between files / groups and exits cleanly with status="stopped"
 	// once the current upload finishes. Cleared at run start. (#124)
 	currentRunStopReq atomic.Bool
+	// currentRunCancelReq distinguishes a user-initiated /cancel from a
+	// service-shutdown cancel: handleCancelRun sets it before calling
+	// currentRunCancel, Server.Shutdown does not. The post-run goroutine
+	// reads it to decide whether to upload the DB to S3 after a cancelled
+	// run. Cleared at run start. (#128)
+	currentRunCancelReq atomic.Bool
 	// runWg tracks engine goroutines spawned by handleTriggerRun so the
 	// CLI can wait for them on shutdown before tearing down DB / storage.
 	runWg sync.WaitGroup
+	// shutdownCh is closed once at the top of Shutdown. The post-run
+	// DB-sync goroutine watches it so an in-flight DB upload aborts
+	// promptly when the service is shutting down — otherwise a 600 s
+	// timeout-bound sync would outlive Server.Shutdown's 10 s budget and
+	// race app.close() tearing down DB/storage. (#128)
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 
 	// cfgMu guards reads/writes of deps.Config (the pointee) and
 	// deps.StoragePrefix, both of which can be replaced by handlePutSettings.
@@ -120,6 +136,15 @@ func (s *Server) setStoragePrefix(p string) {
 // to finish (bounded by ctx). Call before tearing down DB / Storage so the
 // engine doesn't hit closed handles mid-write.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Close shutdownCh first so any in-flight DB-sync goroutine aborts
+	// its upload before we cancel the run ctx; otherwise the sync's
+	// 600 s timeout could outlive this call. (#128)
+	s.shutdownOnce.Do(func() {
+		if s.shutdownCh != nil {
+			close(s.shutdownCh)
+		}
+	})
+
 	s.runMu.Lock()
 	if s.currentRunCancel != nil {
 		s.currentRunCancel()
@@ -149,7 +174,7 @@ func NewServer(d Deps) *Server {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	return &Server{deps: d}
+	return &Server{deps: d, shutdownCh: make(chan struct{})}
 }
 
 // Router builds the chi router with all /api/* routes mounted.
