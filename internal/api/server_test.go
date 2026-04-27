@@ -401,17 +401,21 @@ func TestMaybeSyncDBToS3(t *testing.T) {
 
 	cases := []struct {
 		name      string
+		mode      engine.RunMode
 		runErr    error
 		stopReq   bool
 		cancelReq bool
 		want      *call // nil = expect no sync
 	}{
-		{name: "stop triggers sync", runErr: nil, stopReq: true, want: &call{runID: 7, reason: "stop"}},
-		{name: "cancel triggers sync", runErr: context.Canceled, cancelReq: true, want: &call{runID: 7, reason: "cancel"}},
-		{name: "completion triggers sync", runErr: nil, want: &call{runID: 7, reason: "complete"}},
-		{name: "engine failure skips sync", runErr: errors.New("boom"), want: nil},
-		{name: "shutdown-cancel skips sync", runErr: context.Canceled, cancelReq: false, want: nil},
-		{name: "stop with non-nil runErr skips", runErr: errors.New("boom"), stopReq: true, want: nil},
+		{name: "stop triggers sync", mode: engine.RunModeFull, runErr: nil, stopReq: true, want: &call{runID: 7, reason: "stop"}},
+		{name: "cancel triggers sync", mode: engine.RunModeFull, runErr: context.Canceled, cancelReq: true, want: &call{runID: 7, reason: "cancel"}},
+		{name: "completion triggers sync", mode: engine.RunModeFull, runErr: nil, want: &call{runID: 7, reason: "complete"}},
+		{name: "upload-mode completion triggers sync", mode: engine.RunModeUpload, runErr: nil, want: &call{runID: 7, reason: "complete"}},
+		{name: "scan-mode completion skips sync", mode: engine.RunModeScan, runErr: nil, want: nil},
+		{name: "scan-mode stop skips sync", mode: engine.RunModeScan, runErr: nil, stopReq: true, want: nil},
+		{name: "engine failure skips sync", mode: engine.RunModeFull, runErr: errors.New("boom"), want: nil},
+		{name: "shutdown-cancel skips sync", mode: engine.RunModeFull, runErr: context.Canceled, cancelReq: false, want: nil},
+		{name: "stop with non-nil runErr skips", mode: engine.RunModeFull, runErr: errors.New("boom"), stopReq: true, want: nil},
 	}
 
 	for _, tc := range cases {
@@ -422,7 +426,7 @@ func TestMaybeSyncDBToS3(t *testing.T) {
 				return nil
 			}
 			s := NewServer(Deps{SyncDBToS3: fake})
-			s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 7, tc.runErr, tc.stopReq, tc.cancelReq)
+			s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 7, tc.mode, tc.runErr, tc.stopReq, tc.cancelReq)
 
 			if tc.want == nil {
 				if got != nil {
@@ -457,7 +461,7 @@ func TestMaybeSyncDBToS3ShutdownAbortsInFlight(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, nil, true /* stopReq */, false)
+		s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, engine.RunModeFull, nil, true /* stopReq */, false)
 	}()
 
 	select {
@@ -491,7 +495,7 @@ func TestMaybeSyncDBToS3SkipsAfterShutdown(t *testing.T) {
 	}
 	s := NewServer(Deps{SyncDBToS3: fake})
 	_ = s.Shutdown(context.Background())
-	s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, nil, false, false /* completion */)
+	s.maybeSyncDBToS3(s.deps.SyncDBToS3, s.deps.Logger, 1, engine.RunModeFull, nil, false, false /* completion */)
 	if called {
 		t.Error("sync was called even though shutdown had already started")
 	}

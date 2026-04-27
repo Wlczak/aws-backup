@@ -202,7 +202,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		s.currentRun = 0
 		s.currentRunCancel = nil
 		s.runMu.Unlock()
-		s.maybeSyncDBToS3(syncDBToS3, logger, runID, runErr, stopReq, cancelReq)
+		s.maybeSyncDBToS3(syncDBToS3, logger, runID, mode, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true
 
@@ -246,15 +246,22 @@ const dbSyncCancelTimeout = 30 * time.Second
 // then runs the sync in a context that aborts on Server.Shutdown so an
 // in-flight upload doesn't outlive app.close() tearing down DB/storage.
 // Returns immediately when the run failed or was cancelled by service
-// shutdown — those branches are explicitly out of scope for #128.
+// shutdown — those branches are explicitly out of scope for #128. Also
+// skips scan-only runs: the scan phase doesn't change S3, so re-uploading
+// the index would just churn versions on a versioned bucket without the
+// reconcile data the sidecar exists to provide.
 func (s *Server) maybeSyncDBToS3(
 	sync func(ctx context.Context, runID int64, reason string) error,
 	logger *slog.Logger,
 	runID int64,
+	mode engine.RunMode,
 	runErr error,
 	stopReq, cancelReq bool,
 ) {
 	if sync == nil {
+		return
+	}
+	if mode == engine.RunModeScan {
 		return
 	}
 
