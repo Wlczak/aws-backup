@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -75,6 +76,15 @@ type Options struct {
 	// start). Distinct from context cancellation, which kills mid-stream.
 	// (#124)
 	StopRequested func() bool
+	// CopyThreads is the number of concurrent staging workers
+	// (source → tmp). 0 or 1 = sequential.
+	CopyThreads int
+	// UploadThreads is the number of concurrent S3 upload workers.
+	// 0 or 1 = sequential.
+	UploadThreads int
+	// PipelineQueue bounds how many staged groups wait between the copy
+	// and upload stages. 0 = auto (max(UploadThreads, 1)).
+	PipelineQueue int
 }
 
 // ErrStopRequested is returned by upload helpers when StopRequested
@@ -109,6 +119,19 @@ func New(opts Options) *Engine {
 	}
 	if opts.ZipMaxBytes <= 0 {
 		opts.ZipMaxBytes = 2 << 30 // 2 GiB per zip
+	}
+	if opts.CopyThreads <= 0 {
+		opts.CopyThreads = 1
+	}
+	if opts.UploadThreads <= 0 {
+		opts.UploadThreads = 1
+	}
+	if opts.PipelineQueue <= 0 {
+		q := opts.UploadThreads
+		if q < 1 {
+			q = 1
+		}
+		opts.PipelineQueue = q
 	}
 	return &Engine{opts: opts}
 }
@@ -336,62 +359,242 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		seedDirMaxN(rel)
 	}
 
+	return e.runPipeline(ctx, runID, groups, dirMaxN)
+}
+
+// runPipeline drives the upload phase with a copy-worker pool feeding a
+// bounded queue into an upload-worker pool. At CopyThreads=1 /
+// UploadThreads=1 this is equivalent to the old sequential loop.
+//
+// Pipeline topology:
+//
+//	groups → workCh → [copy workers] → stagedCh → [upload workers] → resultCh
+//
+// The orchestrator feeds workCh, collects from resultCh, re-feeds collision
+// retries, and signals stop/cancel to both worker pools via ctx.
+func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, dirMaxN map[string]int) (string, error) {
+	if len(groups) == 0 {
+		return db.RunCompleted, nil
+	}
+
+	ct := e.opts.CopyThreads
+	ut := e.opts.UploadThreads
+	pq := e.opts.PipelineQueue
+
+	var dirMu sync.Mutex
+
+	// workItem wraps a Group with retry metadata.
+	type workItem struct {
+		group    Group
+		attempts int // how many upload attempts have been made for this group
+	}
+
+	// uploadResult is what upload workers report back to the orchestrator.
+	type uploadResult struct {
+		files int64
+		bytes int64
+		err   error
+		// retryGroup is non-nil when the upload worker wants the orchestrator
+		// to re-queue this group for a fresh copy+upload attempt.
+		retryGroup *workItem
+	}
+
+	// workCh pre-seeded with all groups; orchestrator re-feeds retries.
+	// Retries fit because each retry is enqueued only after the previous
+	// attempt's result was consumed, freeing capacity.
+	workCh   := make(chan workItem, len(groups))
+	stagedCh := make(chan stagedItem, pq)
+	// resultCh must hold results from all copy + upload workers in the
+	// worst case (all fail simultaneously) to prevent goroutine leaks.
+	resultCh := make(chan uploadResult, ct+ut)
+
+	// inflight counts groups anywhere in the pipeline (dequeued from workCh
+	// but result not yet received by the orchestrator).
+	var inflight int64
+
+	// seed workCh
+	for _, g := range groups {
+		workCh <- workItem{group: g}
+		inflight++
+	}
+
+	// stopSending is closed by the orchestrator to signal copy workers to
+	// skip further staging (they still report a result per item so inflight
+	// reaches 0 and workCh gets closed cleanly).
+	stopSending := make(chan struct{})
+	stopOnce := sync.Once{}
+	haltSubmission := func() { stopOnce.Do(func() { close(stopSending) }) }
+
+	// --- copy workers ---
+	var copyWg sync.WaitGroup
+	copyWg.Add(ct)
+	for i := 0; i < ct; i++ {
+		go func() {
+			defer copyWg.Done()
+			for item := range workCh {
+				// Fast-path: if stopping or ctx cancelled, skip staging.
+				select {
+				case <-stopSending:
+					resultCh <- uploadResult{err: ErrStopRequested}
+					continue
+				case <-ctx.Done():
+					resultCh <- uploadResult{err: ctx.Err()}
+					continue
+				default:
+				}
+
+				staged, err := e.stageGroup(ctx, runID, item.group, dirMaxN, &dirMu)
+				if err != nil {
+					resultCh <- uploadResult{err: err}
+					continue
+				}
+				staged.attempts = item.attempts
+				// Push to upload queue, respecting stop/cancel so we
+				// don't block forever with a staged tmp file on disk.
+				select {
+				case stagedCh <- staged:
+				case <-stopSending:
+					os.Remove(staged.zipTmpPath)
+					for _, ind := range staged.individuals {
+						os.Remove(ind.tmpPath)
+					}
+					resultCh <- uploadResult{err: ErrStopRequested}
+				case <-ctx.Done():
+					os.Remove(staged.zipTmpPath)
+					for _, ind := range staged.individuals {
+						os.Remove(ind.tmpPath)
+					}
+					resultCh <- uploadResult{err: ctx.Err()}
+				}
+			}
+		}()
+	}
+
+	// Close stagedCh once all copy workers exit.
+	go func() {
+		copyWg.Wait()
+		close(stagedCh)
+	}()
+
+	// --- upload workers ---
+	var uploadWg sync.WaitGroup
+	uploadWg.Add(ut)
+	for i := 0; i < ut; i++ {
+		go func() {
+			defer uploadWg.Done()
+			for item := range stagedCh {
+				if err := ctx.Err(); err != nil {
+					// Clean up tmp and report.
+					os.Remove(item.zipTmpPath)
+					for _, ind := range item.individuals {
+						os.Remove(ind.tmpPath)
+					}
+					resultCh <- uploadResult{err: err}
+					continue
+				}
+				files, bytes, err := e.uploadStaged(ctx, runID, item)
+				if errors.Is(err, storage.ErrAlreadyExists) && item.attempts < 4 {
+					// Key collision — re-queue for a fresh copy with the next slot.
+					resultCh <- uploadResult{retryGroup: &workItem{group: item.group, attempts: item.attempts + 1}}
+					continue
+				}
+				resultCh <- uploadResult{files: files, bytes: bytes, err: err}
+			}
+		}()
+	}
+
+	// Close resultCh once all upload workers exit.
+	go func() {
+		uploadWg.Wait()
+		close(resultCh)
+	}()
+
+	// --- orchestrator ---
 	var (
 		uploaded, bytesUploaded int64
 		groupErrCount           int
+		terminal                = db.RunCompleted
+		terminalErr             error
+		stopping                bool
 	)
-	for _, g := range groups {
-		if err := ctx.Err(); err != nil {
-			return db.RunCancelled, err
-		}
-		if e.opts.StopRequested != nil && e.opts.StopRequested() {
-			e.log(ctx, runID, db.LogInfo, "stop requested — finishing run after current group")
-			return db.RunStopped, nil
-		}
-		var up, bytes int64
-		if g.Zip {
-			dir := commonDirPath(g.Files)
-			// On ErrAlreadyExists from S3 (IfNoneMatch=* tripped), bump
-			// the counter and retry once with a fresh slot. Cap the
-			// retry budget so a perpetually-occupied dir doesn't loop.
-			// (#116)
-			for attempt := 0; attempt < 5; attempt++ {
-				dirMaxN[dir]++
-				up, bytes, err = e.processZipGroup(ctx, runID, g, dirMaxN[dir])
-				if !errors.Is(err, storage.ErrAlreadyExists) {
-					break
-				}
-				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("zip key collision at slot %d for dir %q, advancing", dirMaxN[dir], dir))
+
+	for res := range resultCh {
+		// Handle retry request from upload worker (zip key collision).
+		if res.retryGroup != nil {
+			rg := res.retryGroup
+			dir := commonDirPath(rg.group.Files)
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("zip key collision for dir %q, re-queuing (attempt %d)", dir, rg.attempts+1))
+			if !stopping {
+				inflight++ // re-counts the group
+				workCh <- *rg
+			} else {
+				// Can't re-queue during stop; count as error.
+				groupErrCount++
 			}
-		} else {
-			up, bytes, err = e.processIndividualGroup(ctx, runID, g)
+			// This result consumed one inflight slot; the re-queued item adds another.
+			inflight--
+			if inflight == 0 {
+				// All groups done (edge case: only retried groups, all declined).
+				haltSubmission()
+				close(workCh)
+			}
+			continue
 		}
-		uploaded += up
-		bytesUploaded += bytes
+
+		uploaded += res.files
+		bytesUploaded += res.bytes
 		if uerr := e.opts.DB.UpdateUploadStats(ctx, runID, uploaded, bytesUploaded); uerr != nil {
 			slog.Warn("update run stats failed", "err", uerr, "run_id", runID)
 		}
-		if err != nil {
-			if errors.Is(err, ErrStopRequested) {
-				e.log(ctx, runID, db.LogInfo, "stop requested — exiting after in-flight uploads")
-				return db.RunStopped, nil
+
+		if res.err != nil {
+			if errors.Is(res.err, ErrStopRequested) {
+				if terminal == db.RunCompleted {
+					terminal = db.RunStopped
+					terminalErr = nil
+				}
+			} else if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
+				terminal = db.RunCancelled
+				terminalErr = res.err
+			} else {
+				groupErrCount++
+				e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", res.err))
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return db.RunCancelled, err
+		}
+
+		inflight--
+		if inflight == 0 {
+			// All originally-submitted groups (plus any retries) have finished.
+			haltSubmission()
+			close(workCh)
+		}
+
+		// Poll stop/cancel between results.
+		if !stopping {
+			if terminal == db.RunCancelled || terminal == db.RunStopped {
+				stopping = true
+				haltSubmission()
+			} else if e.opts.StopRequested != nil && e.opts.StopRequested() {
+				stopping = true
+				terminal = db.RunStopped
+				haltSubmission()
+				e.log(ctx, runID, db.LogInfo, "stop requested — draining in-flight uploads")
+			} else if err := ctx.Err(); err != nil {
+				stopping = true
+				terminal = db.RunCancelled
+				terminalErr = err
+				haltSubmission()
 			}
-			// One failed group should not abort the rest of the run; the
-			// affected files stay pending/failed in the DB and will be
-			// retried next run. Surface true infrastructure failure only
-			// when every group fails.
-			groupErrCount++
-			e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", err))
 		}
 	}
 
-	if groupErrCount > 0 && groupErrCount == len(groups) {
+	if terminal == db.RunCompleted && groupErrCount > 0 && groupErrCount == len(groups) {
 		return db.RunFailed, fmt.Errorf("all %d groups failed", groupErrCount)
 	}
-	return db.RunCompleted, nil
+	if terminal == db.RunStopped {
+		e.log(ctx, runID, db.LogInfo, "stop requested — exiting after in-flight uploads")
+	}
+	return terminal, terminalErr
 }
 
 // reconcileFromS3 reads every zip index sidecar in S3 and, for each one
@@ -498,145 +701,111 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 	return out, nil
 }
 
-func (e *Engine) processZipGroup(ctx context.Context, runID int64, g Group, zipN int) (int64, int64, error) {
-	// zipRel mirrors the source directory hierarchy under the key prefix —
-	// stored as `files.zip_name` so joinKey(prefix, zip_name) still resolves
-	// the full S3 key for sync/restore lookups. The temp file stays flat
-	// (basename only) so we don't have to mkdir nested temp subtrees.
+// stagedItem is a group that has finished its source→tmp copy phase and is
+// queued for S3 upload.
+type stagedItem struct {
+	group   Group
+	isZip   bool
+	attempts int // for retry budget tracking
+
+	// Zip fields.
+	zipTmpPath string
+	zipKey     string
+	indexKey   string
+	zipRel     string
+	zipSize    int64
+	zipMD5hex  string
+	zipSHA256  string
+	zipEntries []string
+
+	// Individual-file fields.
+	individuals []stagedIndividual
+}
+
+type stagedIndividual struct {
+	pf        PendingFile
+	tmpPath   string
+	key       string
+	size      int64
+	md5hex    string
+	sha256hex string
+}
+
+// claimZipSlot atomically advances and returns the next counter for dir.
+func claimZipSlot(dir string, dirMaxN map[string]int, mu *sync.Mutex) int {
+	mu.Lock()
+	defer mu.Unlock()
+	dirMaxN[dir]++
+	return dirMaxN[dir]
+}
+
+// stageGroup copies a group's source files to tmp, returning a stagedItem
+// ready for upload. For zip groups, CreateZip is called. For individual
+// groups, each file is copyAndHash'd into its own tmp file.
+func (e *Engine) stageGroup(ctx context.Context, runID int64, g Group, dirMaxN map[string]int, mu *sync.Mutex) (stagedItem, error) {
+	if g.Zip {
+		dir := commonDirPath(g.Files)
+		zipN := claimZipSlot(dir, dirMaxN, mu)
+		return e.stageZipGroup(ctx, runID, g, zipN)
+	}
+	return e.stageIndividualGroup(ctx, runID, g)
+}
+
+// stageZipGroup copies source files into a single zip in tmp.
+func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN int) (stagedItem, error) {
 	zipRel := ZipRelPath(g.Files, zipN)
 	zipBase := path.Base(zipRel)
 	zipPath := filepath.Join(e.opts.TmpDir, zipBase)
-	defer os.Remove(zipPath)
 
 	key := path.Join(e.opts.KeyPrefix, zipRel)
 	indexKey := key + ZipIndexSuffix
 
-	// Sum source bytes up front so copy_progress events can render a
-	// real percent. The resulting tmp zip is typically smaller than
-	// this total due to compression, but for *copy* progress we report
-	// against what's being read off the source. (#127)
 	var groupTotalBytes int64
 	for _, f := range g.Files {
 		groupTotalBytes += f.Size
 	}
 
 	if err := ensureTmpSpace(e.opts.TmpDir, groupTotalBytes); err != nil {
-		return 0, 0, fmt.Errorf("zip group %s: %w", zipRel, err)
+		return stagedItem{}, fmt.Errorf("zip group %s: %w", zipRel, err)
 	}
 
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipRel))
 	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath, e.copyWrapZip(runID, key, groupTotalBytes))
 	if err != nil {
-		return 0, 0, fmt.Errorf("create zip %s: %w", zipRel, err)
+		os.Remove(zipPath)
+		return stagedItem{}, fmt.Errorf("create zip %s: %w", zipRel, err)
 	}
-	e.emitCopyProgress(runID, key, groupTotalBytes, groupTotalBytes) // belt-and-braces final 100%
+	e.emitCopyProgress(runID, key, groupTotalBytes, groupTotalBytes)
 
 	md5hex, err := md5File(zipPath)
 	if err != nil {
-		return 0, 0, err
+		os.Remove(zipPath)
+		return stagedItem{}, err
 	}
 	zipSHA256, err := sha256File(zipPath)
 	if err != nil {
-		return 0, 0, err
+		os.Remove(zipPath)
+		return stagedItem{}, err
 	}
 
-	e.emit(Event{
-		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
-		Data: map[string]any{"key": key, "size": size, "files": len(g.Files)},
-	})
-
-	// Upload the STANDARD-tier index sidecar BEFORE the zip itself so a
-	// crash between the two uploads can be recovered: the next run's
-	// reconcileFromS3 reads the sidecar to mark files uploaded. Doing it
-	// in the reverse order (the previous behaviour) could leave an
-	// orphaned DEEP_ARCHIVE zip with no DB linkage and no recovery path,
-	// causing the next run to re-zip the same files under a new key.
-	indexUploaded := false
-	if e.opts.EnableZipIndex {
-		indexBody := strings.Join(entries, "\n") + "\n"
-		indexSum := sha256.Sum256([]byte(indexBody))
-		indexSHA256 := hex.EncodeToString(indexSum[:])
-		if e.skipIfMatches(ctx, indexKey, indexSHA256) {
-			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip index %s: SHA256 matches existing object", indexKey))
-			indexUploaded = true
-		} else {
-			if _, err := e.opts.Storage.PutStandard(ctx, indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
-				e.emit(Event{
-					Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
-					Data: map[string]any{"key": indexKey, "error": err.Error()},
-				})
-				return 0, 0, fmt.Errorf("upload zip index %s: %w", indexKey, err)
-			}
-			indexUploaded = true
-			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", indexKey, len(entries)))
-		}
-	}
-
-	now := e.opts.Now()
-	ids := make([]int64, 0, len(g.Files))
-	for _, f := range g.Files {
-		ids = append(ids, f.ID)
-	}
-
-	// Dedup: if S3 already holds the zip with the same SHA256, skip the
-	// PutIfAbsent entirely — saves a redundant version on a versioned
-	// bucket. A *different* SHA256 at this key still falls through to
-	// PutIfAbsent, which returns ErrAlreadyExists so the caller advances
-	// to the next counter slot exactly as before. (#133, #116)
-	if e.skipIfMatches(ctx, key, zipSHA256) {
-		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip upload %s: SHA256 matches existing object", key))
-		if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, zipRel, md5hex, key, now); err != nil {
-			return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipRel, err)
-		}
-		e.emit(Event{
-			Type: EventUploadComplete, RunID: runID, At: now,
-			Data: map[string]any{"key": key, "size": size, "checksum_sha256": zipSHA256, "files": len(g.Files), "skipped": true},
-		})
-		return int64(len(g.Files)), size, nil
-	}
-
-	f, err := os.Open(zipPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	// PutIfAbsent so a retry under the same key can't silently overwrite
-	// a prior DEEP_ARCHIVE object whose content may differ. The caller
-	// catches ErrAlreadyExists and advances to the next counter slot.
-	// (#116)
-	res, err := e.opts.Storage.PutIfAbsent(ctx, key, e.progressBody(runID, key, f, size), size)
-	f.Close()
-	if err != nil {
-		e.emit(Event{
-			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
-			Data: map[string]any{"key": key, "error": err.Error()},
-		})
-		// Best-effort: remove the orphaned sidecar so a half-uploaded group
-		// doesn't leave a dangling .index.txt pointing at a missing zip.
-		if indexUploaded {
-			if delErr := e.opts.Storage.Delete(ctx, indexKey); delErr != nil {
-				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("cleanup orphan index %s: %v", indexKey, delErr))
-			}
-		}
-		return 0, 0, fmt.Errorf("upload %s: %w", key, err)
-	}
-
-	// Single transactional write so a partial failure can't leave files
-	// stuck in the intermediate 'zipped' state with no md5/s3_key.
-	if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, zipRel, md5hex, key, now); err != nil {
-		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", zipRel, err)
-	}
-
-	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded %s (%d bytes, etag=%s)", key, size, res.ETag))
-	e.emit(Event{
-		Type: EventUploadComplete, RunID: runID, At: now,
-		Data: map[string]any{"key": key, "size": size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256, "files": len(g.Files)},
-	})
-
-	return int64(len(g.Files)), size, nil
+	return stagedItem{
+		group:      g,
+		isZip:      true,
+		zipTmpPath: zipPath,
+		zipKey:     key,
+		indexKey:   indexKey,
+		zipRel:     zipRel,
+		zipSize:    size,
+		zipMD5hex:  md5hex,
+		zipSHA256:  zipSHA256,
+		zipEntries: entries,
+	}, nil
 }
 
-func (e *Engine) processIndividualGroup(ctx context.Context, runID int64, g Group) (int64, int64, error) {
-	var uploaded, bytes int64
+// stageIndividualGroup copyAndHash's each file to a tmp path. Files that
+// fail to copy are marked failed in the DB and omitted from the staged item.
+func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group) (stagedItem, error) {
+	item := stagedItem{group: g, isZip: false}
 	for i := 0; i < len(g.Files); i += e.opts.ChunkSize {
 		j := i + e.opts.ChunkSize
 		if j > len(g.Files) {
@@ -644,95 +813,203 @@ func (e *Engine) processIndividualGroup(ctx context.Context, runID int64, g Grou
 		}
 		for _, pf := range g.Files[i:j] {
 			if err := ctx.Err(); err != nil {
-				return uploaded, bytes, err
+				return stagedItem{}, err
 			}
 			if e.opts.StopRequested != nil && e.opts.StopRequested() {
-				return uploaded, bytes, ErrStopRequested
+				return stagedItem{}, ErrStopRequested
 			}
-			n, err := e.uploadIndividual(ctx, runID, pf)
+			key := path.Join(e.opts.KeyPrefix, pf.RelPath)
+			tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d-%d", runID, pf.ID))
+			size, md5hex, sha256hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
 			if err != nil {
-				// Cancellation aborts the whole run; otherwise the row
-				// is already marked failed by uploadIndividual — log
-				// and keep going so one bad file doesn't stop the rest.
+				os.Remove(tmp)
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return uploaded, bytes, err
+					return stagedItem{}, err
 				}
-				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after upload error: %v", pf.RelPath, err))
+				if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
+					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("mark failed %s: %v (copy error: %v)", pf.RelPath, mErr, err))
+				} else {
+					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after copy error: %v", pf.RelPath, err))
+				}
 				continue
 			}
-			uploaded++
-			bytes += n
+			e.emitCopyProgress(runID, key, size, size)
+			item.individuals = append(item.individuals, stagedIndividual{
+				pf:        pf,
+				tmpPath:   tmp,
+				key:       key,
+				size:      size,
+				md5hex:    md5hex,
+				sha256hex: sha256hex,
+			})
 		}
 	}
-	return uploaded, bytes, nil
+	return item, nil
 }
 
-func (e *Engine) uploadIndividual(ctx context.Context, runID int64, pf PendingFile) (int64, error) {
-	tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d-%d", runID, pf.ID))
-	defer os.Remove(tmp)
-
-	key := path.Join(e.opts.KeyPrefix, pf.RelPath)
-
-	if err := ensureTmpSpace(e.opts.TmpDir, pf.Size); err != nil {
-		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
+// uploadStaged uploads a stagedItem to S3 and commits results to the DB.
+func (e *Engine) uploadStaged(ctx context.Context, runID int64, item stagedItem) (int64, int64, error) {
+	if item.isZip {
+		return e.uploadStagedZip(ctx, runID, item)
 	}
+	return e.uploadStagedIndividuals(ctx, runID, item)
+}
 
-	// Copy source -> tmp so we can compute MD5 and then upload from a file.
-	// Wrap the source reader so bytes flowing through emit copy_progress
-	// events; key matches the upload phase so the UI keeps one entry per
-	// item with a phase field.
-	size, md5hex, sha256hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
-	if err != nil {
-		return 0, fmt.Errorf("copy %s: %w", pf.RelPath, err)
-	}
-	e.emitCopyProgress(runID, key, size, size) // belt-and-braces final 100% sample
-
-	// Dedup: if S3 already holds an object at this key whose SHA256
-	// matches the local content, skip the upload to avoid creating a
-	// redundant new version on a versioned bucket. (#133)
-	if e.skipIfMatches(ctx, key, sha256hex) {
-		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip upload %s: SHA256 matches existing object", key))
-		now := e.opts.Now()
-		e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
-		e.emit(Event{
-			Type: EventUploadComplete, RunID: runID, At: now,
-			Data: map[string]any{"key": key, "size": size, "checksum_sha256": sha256hex, "skipped": true},
-		})
-		return size, nil
-	}
+// uploadStagedZip uploads the staged zip and index sidecar to S3, then
+// marks all zip members as uploaded in the DB.
+func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedItem) (int64, int64, error) {
+	defer os.Remove(item.zipTmpPath)
 
 	e.emit(Event{
 		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
-		Data: map[string]any{"key": key, "size": size},
+		Data: map[string]any{"key": item.zipKey, "size": item.zipSize, "files": len(item.group.Files)},
 	})
 
-	f, err := os.Open(tmp)
-	if err != nil {
-		return 0, err
+	// Upload the STANDARD-tier index sidecar BEFORE the zip so a crash
+	// between the two uploads is recoverable: reconcileFromS3 reads the
+	// sidecar to mark files uploaded on the next run. (#121)
+	indexUploaded := false
+	if e.opts.EnableZipIndex {
+		indexBody := strings.Join(item.zipEntries, "\n") + "\n"
+		indexSum := sha256.Sum256([]byte(indexBody))
+		indexSHA256 := hex.EncodeToString(indexSum[:])
+		if e.skipIfMatches(ctx, item.indexKey, indexSHA256) {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip index %s: SHA256 matches existing object", item.indexKey))
+			indexUploaded = true
+		} else {
+			if _, err := e.opts.Storage.PutStandard(ctx, item.indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
+				e.emit(Event{
+					Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
+					Data: map[string]any{"key": item.indexKey, "error": err.Error()},
+				})
+				return 0, 0, fmt.Errorf("upload zip index %s: %w", item.indexKey, err)
+			}
+			indexUploaded = true
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", item.indexKey, len(item.zipEntries)))
+		}
 	}
-	res, err := e.opts.Storage.Put(ctx, key, e.progressBody(runID, key, f, size), size)
+
+	now := e.opts.Now()
+	ids := make([]int64, 0, len(item.group.Files))
+	for _, f := range item.group.Files {
+		ids = append(ids, f.ID)
+	}
+
+	// Dedup: skip PutIfAbsent when S3 already holds the identical zip. (#133)
+	if e.skipIfMatches(ctx, item.zipKey, item.zipSHA256) {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip upload %s: SHA256 matches existing object", item.zipKey))
+		if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, item.zipRel, item.zipMD5hex, item.zipKey, now); err != nil {
+			return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", item.zipRel, err)
+		}
+		e.emit(Event{
+			Type: EventUploadComplete, RunID: runID, At: now,
+			Data: map[string]any{"key": item.zipKey, "size": item.zipSize, "checksum_sha256": item.zipSHA256, "files": len(item.group.Files), "skipped": true},
+		})
+		return int64(len(item.group.Files)), item.zipSize, nil
+	}
+
+	f, err := os.Open(item.zipTmpPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	res, err := e.opts.Storage.PutIfAbsent(ctx, item.zipKey, e.progressBody(runID, item.zipKey, f, item.zipSize), item.zipSize)
 	f.Close()
 	if err != nil {
 		e.emit(Event{
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
-			Data: map[string]any{"key": key, "error": err.Error()},
+			Data: map[string]any{"key": item.zipKey, "error": err.Error()},
 		})
-		if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
-			return 0, fmt.Errorf("upload %s: %w (and mark failed: %v)", key, err, mErr)
+		if indexUploaded {
+			if delErr := e.opts.Storage.Delete(ctx, item.indexKey); delErr != nil {
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("cleanup orphan index %s: %v", item.indexKey, delErr))
+			}
 		}
-		return 0, fmt.Errorf("upload %s: %w", key, err)
+		return 0, 0, fmt.Errorf("upload %s: %w", item.zipKey, err)
 	}
 
-	now := e.opts.Now()
-	// Buffered: the flusher goroutine (or writeBuffer.close on run end)
-	// commits this in a batch alongside the other individual uploads.
-	e.buf.markUploaded(ctx, pf.ID, md5hex, key, now)
+	if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, item.zipRel, item.zipMD5hex, item.zipKey, now); err != nil {
+		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", item.zipRel, err)
+	}
 
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded %s (%d bytes, etag=%s)", item.zipKey, item.zipSize, res.ETag))
 	e.emit(Event{
 		Type: EventUploadComplete, RunID: runID, At: now,
-		Data: map[string]any{"key": key, "size": size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256},
+		Data: map[string]any{"key": item.zipKey, "size": item.zipSize, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256, "files": len(item.group.Files)},
 	})
-	return size, nil
+	return int64(len(item.group.Files)), item.zipSize, nil
+}
+
+// uploadStagedIndividuals uploads each pre-staged individual file to S3.
+func (e *Engine) uploadStagedIndividuals(ctx context.Context, runID int64, item stagedItem) (int64, int64, error) {
+	var uploaded, bytes int64
+	for _, ind := range item.individuals {
+		if err := ctx.Err(); err != nil {
+			os.Remove(ind.tmpPath)
+			return uploaded, bytes, err
+		}
+		if e.opts.StopRequested != nil && e.opts.StopRequested() {
+			os.Remove(ind.tmpPath)
+			return uploaded, bytes, ErrStopRequested
+		}
+		n, err := e.uploadOneIndividual(ctx, runID, ind)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return uploaded, bytes, err
+			}
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after upload error: %v", ind.pf.RelPath, err))
+			continue
+		}
+		uploaded++
+		bytes += n
+	}
+	return uploaded, bytes, nil
+}
+
+// uploadOneIndividual streams one pre-staged tmp file to S3.
+func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stagedIndividual) (int64, error) {
+	defer os.Remove(ind.tmpPath)
+
+	now := e.opts.Now()
+
+	// Dedup: skip upload when S3 already holds the identical object. (#133)
+	if e.skipIfMatches(ctx, ind.key, ind.sha256hex) {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip upload %s: SHA256 matches existing object", ind.key))
+		e.buf.markUploaded(ctx, ind.pf.ID, ind.md5hex, ind.key, now)
+		e.emit(Event{
+			Type: EventUploadComplete, RunID: runID, At: now,
+			Data: map[string]any{"key": ind.key, "size": ind.size, "checksum_sha256": ind.sha256hex, "skipped": true},
+		})
+		return ind.size, nil
+	}
+
+	e.emit(Event{
+		Type: EventUploadStart, RunID: runID, At: e.opts.Now(),
+		Data: map[string]any{"key": ind.key, "size": ind.size},
+	})
+
+	f, err := os.Open(ind.tmpPath)
+	if err != nil {
+		return 0, err
+	}
+	res, err := e.opts.Storage.Put(ctx, ind.key, e.progressBody(runID, ind.key, f, ind.size), ind.size)
+	f.Close()
+	if err != nil {
+		e.emit(Event{
+			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{"key": ind.key, "error": err.Error()},
+		})
+		if mErr := e.opts.DB.MarkFailed(ctx, ind.pf.ID); mErr != nil {
+			return 0, fmt.Errorf("upload %s: %w (and mark failed: %v)", ind.key, err, mErr)
+		}
+		return 0, fmt.Errorf("upload %s: %w", ind.key, err)
+	}
+
+	e.buf.markUploaded(ctx, ind.pf.ID, ind.md5hex, ind.key, now)
+	e.emit(Event{
+		Type: EventUploadComplete, RunID: runID, At: now,
+		Data: map[string]any{"key": ind.key, "size": ind.size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256},
+	})
+	return ind.size, nil
 }
 
 func (e *Engine) emit(ev Event) {

@@ -307,6 +307,9 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		ZipMaxBytes:    a.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: a.cfg.Backup.EnableZipIndex,
 		RetryFailed:    a.cfg.Backup.RetryFailed,
+		CopyThreads:    a.cfg.Backup.CopyThreads,
+		UploadThreads:  a.cfg.Backup.UploadThreads,
+		PipelineQueue:  a.cfg.Backup.PipelineQueue,
 		Mode:           mode,
 		ScanPaths:      scanPaths,
 		Emit:           a.bus.Publish,
@@ -440,6 +443,9 @@ func runBackup(cfgPath string) {
 		ZipMaxBytes:    app.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: app.cfg.Backup.EnableZipIndex,
 		RetryFailed:    app.cfg.Backup.RetryFailed,
+		CopyThreads:    app.cfg.Backup.CopyThreads,
+		UploadThreads:  app.cfg.Backup.UploadThreads,
+		PipelineQueue:  app.cfg.Backup.PipelineQueue,
 		Emit: func(ev engine.Event) {
 			fmt.Printf("[event] %s %+v\n", ev.Type, ev.Data)
 		},
