@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MemStorage is an in-process Storage implementation backed by a map.
@@ -24,6 +25,7 @@ type memObject struct {
 	etag           string
 	storageClass   string
 	checksumSHA256 string
+	lastModified   time.Time
 }
 
 // NewMemStorage returns an empty in-memory storage.
@@ -65,7 +67,7 @@ func (m *MemStorage) put(key string, body io.Reader, class string) (PutResult, e
 	sumHex := hex.EncodeToString(sum[:])
 
 	m.mu.Lock()
-	m.objects[key] = memObject{data: buf, etag: sumHex[:32], storageClass: class, checksumSHA256: sumHex}
+	m.objects[key] = memObject{data: buf, etag: sumHex[:32], storageClass: class, checksumSHA256: sumHex, lastModified: time.Now().UTC()}
 	m.mu.Unlock()
 
 	return PutResult{
@@ -88,7 +90,7 @@ func (m *MemStorage) Head(_ context.Context, key string) (HeadResult, error) {
 	if class == "" {
 		class = "DEEP_ARCHIVE"
 	}
-	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: class, ChecksumSHA256: o.checksumSHA256}, nil
+	return HeadResult{Key: key, Size: int64(len(o.data)), ETag: o.etag, StorageClass: class, ChecksumSHA256: o.checksumSHA256, LastModified: o.lastModified}, nil
 }
 
 // List returns keys matching prefix, sorted, satisfying the Storage interface.

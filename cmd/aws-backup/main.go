@@ -128,14 +128,13 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}
 
 	dbPath := filepath.Join(dir, "index.db")
-	// If the DB doesn't exist locally, try to pull it from S3 so a fresh
-	// install on a new machine picks up the existing index.
-	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
-		if dlErr := downloadDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath); dlErr != nil {
-			// Best-effort: if S3 doesn't have it yet, start with a fresh DB.
-			_ = os.Remove(dbPath)
-		}
-	}
+	// Pull the index from S3 when either (a) the local copy is missing
+	// (fresh install / new machine), or (b) the S3 copy is newer than
+	// what's on disk — typical when another machine ran a backup more
+	// recently. Done BEFORE db.Open so SQLite never has the file swapped
+	// out under it. Best-effort: any failure keeps whatever local state
+	// exists. (#143)
+	_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
 
 	d, err := db.Open(ctx, dbPath)
 	if err != nil {
@@ -159,6 +158,42 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 		bus:     events.NewBus(128),
 		dbPath:  dbPath,
 	}, nil
+}
+
+// refreshDBFromS3 ensures the local index.db at dst is at least as fresh
+// as the copy in S3. If the local file is missing it's downloaded; if S3
+// reports a newer LastModified (by more than mtimeSkew, to absorb clock
+// drift between the writer and S3) the local file is replaced. Returns
+// nil when no action was needed, or when the action succeeded. (#143)
+func refreshDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
+	const mtimeSkew = time.Second
+	key := dbS3Key(prefix)
+	localStat, localErr := os.Stat(dst)
+	localMissing := errors.Is(localErr, os.ErrNotExist)
+	if localErr != nil && !localMissing {
+		return localErr
+	}
+
+	head, headErr := store.Head(ctx, key)
+	if headErr != nil {
+		// No remote copy yet (fresh deployment) — nothing to refresh.
+		if errors.Is(headErr, storage.ErrNotFound) {
+			return nil
+		}
+		// Network / permissions issue: keep local untouched.
+		return headErr
+	}
+	if !localMissing {
+		// LastModified may be unset (some S3-compatible backends omit it);
+		// in that case there's nothing to compare so we leave local alone.
+		if head.LastModified.IsZero() {
+			return nil
+		}
+		if !head.LastModified.After(localStat.ModTime().Add(mtimeSkew)) {
+			return nil
+		}
+	}
+	return downloadDBFromS3(ctx, store, prefix, dst)
 }
 
 // downloadDBFromS3 downloads the index.db object from S3 and writes it to dst
