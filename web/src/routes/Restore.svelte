@@ -17,6 +17,7 @@
   let info = $state('');
   let loading = $state(false);
   let confirmTrigger = $state(false);
+  let syncing = $state(false);
 
   onMount(() => {
     const pre = selectionPaths();
@@ -53,6 +54,23 @@
     }
   }
 
+  async function doSyncStatus() {
+    syncing = true;
+    err = '';
+    info = '';
+    try {
+      const r = await api.restoreSyncStatus();
+      info =
+        r.processed === 0
+          ? 'No new restore events on the queue.'
+          : `Synced ${r.processed} restore event(s).`;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      syncing = false;
+    }
+  }
+
   async function doTrigger() {
     const p = paths();
     if (!targetDir.trim()) {
@@ -81,6 +99,20 @@
 </script>
 
 <h1>Restore from Glacier Deep Archive</h1>
+
+<div class="card">
+  <div class="label">Restore status</div>
+  <p class="muted">
+    Drains the SQS queue of pending S3 Glacier restore events and applies them to
+    the local index. The background poller already does this on its own cadence —
+    use this button to force an immediate sync after a Glacier restore lands.
+  </p>
+  <div class="actions">
+    <button onclick={doSyncStatus} disabled={syncing} type="button">
+      {syncing ? 'Syncing…' : 'Sync restore status'}
+    </button>
+  </div>
+</div>
 
 <div class="card">
   <div class="label">Paths (one per line)</div>

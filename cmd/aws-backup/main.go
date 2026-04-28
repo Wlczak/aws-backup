@@ -97,6 +97,11 @@ type appState struct {
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
+	// sqsConsumer holds the long-running S3 Glacier restore-event
+	// consumer when sqs.queue_url is configured. Stored so the API's
+	// "Sync restore status" button can call DrainAll alongside the
+	// background poll. nil when SQS is disabled.
+	sqsConsumer *restore.Consumer
 }
 
 // loadAppState loads config + storage, refreshes the local index.db from
@@ -320,6 +325,16 @@ func (a *appState) liveStorage() storage.Storage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.store
+}
+
+// syncRestoreStatus returns the closure used as api.Deps.SyncRestoreStatus.
+// nil when no SQS consumer is configured so the handler returns 503 and the
+// UI surfaces "no queue configured".
+func (a *appState) syncRestoreStatus() func(ctx context.Context) (int, error) {
+	if a.sqsConsumer == nil {
+		return nil
+	}
+	return a.sqsConsumer.DrainAll
 }
 
 // syncDBToS3 checkpoints the WAL and uploads the DB file to S3, emitting
@@ -593,15 +608,28 @@ func runServe(cfgPath string) {
 	app.logger = logger
 	defer app.close()
 
+	// Build the SQS restore-event consumer (if configured) before NewServer
+	// so the "Sync restore status" button can call DrainAll. Best-effort:
+	// failure to construct logs a warning and the rest of the server runs.
+	if app.cfg.SQS.QueueURL != "" {
+		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
+		if err != nil {
+			logger.Warn("sqs restore consumer disabled", "err", err)
+		} else if consumer != nil {
+			app.sqsConsumer = consumer
+		}
+	}
+
 	srv := api.NewServer(api.Deps{
-		DB:            app.db,
-		Bus:           app.bus,
-		Config:        &app.cfg,
-		ConfigPath:    app.cfgPath,
-		BuildEngine:   app.buildEngine,
-		Storage:       app.liveStorage,
-		StoragePrefix: app.cfg.S3.KeyPrefix,
-		SyncDBToS3:    app.syncDBToS3,
+		DB:                app.db,
+		Bus:               app.bus,
+		Config:            &app.cfg,
+		ConfigPath:        app.cfgPath,
+		BuildEngine:       app.buildEngine,
+		Storage:           app.liveStorage,
+		StoragePrefix:     app.cfg.S3.KeyPrefix,
+		SyncDBToS3:        app.syncDBToS3,
+		SyncRestoreStatus: app.syncRestoreStatus(),
 		ApplySettings: func(prev, next config.Config) error {
 			return app.applySettings(context.Background(), prev, next)
 		},
@@ -634,16 +662,12 @@ func runServe(cfgPath string) {
 	app.mu.Unlock()
 	sched.Start()
 
-	// Spawn the SQS restore-event consumer if a queue URL is configured.
-	// The consumer is best-effort: failure to start logs a warning but
-	// doesn't prevent the HTTP server / scheduler from running.
-	if app.cfg.SQS.QueueURL != "" {
-		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
-		if err != nil {
-			logger.Warn("sqs restore consumer disabled", "err", err)
-		} else if consumer != nil {
-			go func() { _ = consumer.Run(ctx) }()
-		}
+	// Drive the SQS consumer's background long-poll loop now that the API
+	// server is wired up; the consumer itself was constructed earlier so
+	// the "Sync restore status" button can drain on demand alongside this
+	// loop.
+	if app.sqsConsumer != nil {
+		go func() { _ = app.sqsConsumer.Run(ctx) }()
 	}
 
 	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)
