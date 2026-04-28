@@ -209,7 +209,10 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	defer body.Close()
 
 	tmp := dst + ".part"
-	f, err := os.Create(tmp)
+	// 0o600 mirrors the perms applied when the DB is freshly created
+	// locally (#55): the index records every backed-up path and must
+	// not be world-readable. (#66)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
