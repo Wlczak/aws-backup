@@ -274,6 +274,21 @@
         <input type="number" min="0" bind:value={cfg.backup.zip_max_bytes} />
       </label>
     </div>
+    <div class="row-2">
+      <label>
+        <span>Copy threads (source → tmp parallelism)</span>
+        <input type="number" min="1" max="64" bind:value={cfg.backup.copy_threads} />
+      </label>
+      <label>
+        <span>Upload threads (tmp → S3 parallelism)</span>
+        <input type="number" min="1" max="64" bind:value={cfg.backup.upload_threads} />
+      </label>
+    </div>
+    <label>
+      <span>Pipeline queue depth (staged groups awaiting upload, 0 = auto)</span>
+      <input type="number" min="0" bind:value={cfg.backup.pipeline_queue} />
+    </label>
+    <p class="muted">Peak tmp disk usage scales with <code>pipeline_queue + upload_threads</code>.</p>
     <label class="checkbox">
       <input type="checkbox" bind:checked={cfg.backup.enable_zip_index} />
       <span>Upload <code>.index.txt</code> sidecar next to each zip (STANDARD tier; lets you list zip contents without a Glacier restore)</span>

@@ -263,6 +263,9 @@ func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 	if out.ContentLength != nil {
 		r.Size = *out.ContentLength
 	}
+	if out.LastModified != nil {
+		r.LastModified = *out.LastModified
+	}
 	if out.ChecksumSHA256 != nil {
 		if hx, err := base64ToHex(*out.ChecksumSHA256); err == nil {
 			r.ChecksumSHA256 = hx

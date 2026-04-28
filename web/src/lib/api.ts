@@ -117,6 +117,9 @@ export interface BackupConfig {
   zip_max_bytes: number;
   enable_zip_index: boolean;
   retry_failed: boolean;
+  copy_threads: number;
+  upload_threads: number;
+  pipeline_queue: number;
 }
 export interface ServerConfig { host: string; port: number }
 export interface Config {

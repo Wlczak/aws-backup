@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 // ErrNotFound is returned by Head / GetRestoreStatus when a key is absent.
@@ -34,6 +35,7 @@ type HeadResult struct {
 	ETag           string
 	StorageClass   string
 	ChecksumSHA256 string // hex-encoded; empty if backend didn't echo it
+	LastModified   time.Time
 }
 
 // Storage is the subset of S3-like operations aws-backup needs.

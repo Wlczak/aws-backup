@@ -21,6 +21,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
+	"github.com/Wlczak/aws-backup/internal/restore"
 	"github.com/Wlczak/aws-backup/internal/scheduler"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
@@ -127,14 +128,13 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}
 
 	dbPath := filepath.Join(dir, "index.db")
-	// If the DB doesn't exist locally, try to pull it from S3 so a fresh
-	// install on a new machine picks up the existing index.
-	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
-		if dlErr := downloadDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath); dlErr != nil {
-			// Best-effort: if S3 doesn't have it yet, start with a fresh DB.
-			_ = os.Remove(dbPath)
-		}
-	}
+	// Pull the index from S3 when either (a) the local copy is missing
+	// (fresh install / new machine), or (b) the S3 copy is newer than
+	// what's on disk — typical when another machine ran a backup more
+	// recently. Done BEFORE db.Open so SQLite never has the file swapped
+	// out under it. Best-effort: any failure keeps whatever local state
+	// exists. (#143)
+	_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
 
 	d, err := db.Open(ctx, dbPath)
 	if err != nil {
@@ -160,6 +160,42 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}, nil
 }
 
+// refreshDBFromS3 ensures the local index.db at dst is at least as fresh
+// as the copy in S3. If the local file is missing it's downloaded; if S3
+// reports a newer LastModified (by more than mtimeSkew, to absorb clock
+// drift between the writer and S3) the local file is replaced. Returns
+// nil when no action was needed, or when the action succeeded. (#143)
+func refreshDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
+	const mtimeSkew = time.Second
+	key := dbS3Key(prefix)
+	localStat, localErr := os.Stat(dst)
+	localMissing := errors.Is(localErr, os.ErrNotExist)
+	if localErr != nil && !localMissing {
+		return localErr
+	}
+
+	head, headErr := store.Head(ctx, key)
+	if headErr != nil {
+		// No remote copy yet (fresh deployment) — nothing to refresh.
+		if errors.Is(headErr, storage.ErrNotFound) {
+			return nil
+		}
+		// Network / permissions issue: keep local untouched.
+		return headErr
+	}
+	if !localMissing {
+		// LastModified may be unset (some S3-compatible backends omit it);
+		// in that case there's nothing to compare so we leave local alone.
+		if head.LastModified.IsZero() {
+			return nil
+		}
+		if !head.LastModified.After(localStat.ModTime().Add(mtimeSkew)) {
+			return nil
+		}
+	}
+	return downloadDBFromS3(ctx, store, prefix, dst)
+}
+
 // downloadDBFromS3 downloads the index.db object from S3 and writes it to dst
 // atomically: bytes go to dst+".part", are fsynced, then renamed into place.
 // A partial file (process kill mid-stream) is therefore never visible at dst,
@@ -173,7 +209,10 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	defer body.Close()
 
 	tmp := dst + ".part"
-	f, err := os.Create(tmp)
+	// 0o600 mirrors the perms applied when the DB is freshly created
+	// locally (#55): the index records every backed-up path and must
+	// not be world-readable. (#66)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -307,6 +346,9 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		ZipMaxBytes:    a.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: a.cfg.Backup.EnableZipIndex,
 		RetryFailed:    a.cfg.Backup.RetryFailed,
+		CopyThreads:    a.cfg.Backup.CopyThreads,
+		UploadThreads:  a.cfg.Backup.UploadThreads,
+		PipelineQueue:  a.cfg.Backup.PipelineQueue,
 		Mode:           mode,
 		ScanPaths:      scanPaths,
 		Emit:           a.bus.Publish,
@@ -440,6 +482,9 @@ func runBackup(cfgPath string) {
 		ZipMaxBytes:    app.cfg.Backup.ZipMaxBytes,
 		EnableZipIndex: app.cfg.Backup.EnableZipIndex,
 		RetryFailed:    app.cfg.Backup.RetryFailed,
+		CopyThreads:    app.cfg.Backup.CopyThreads,
+		UploadThreads:  app.cfg.Backup.UploadThreads,
+		PipelineQueue:  app.cfg.Backup.PipelineQueue,
 		Emit: func(ev engine.Event) {
 			fmt.Printf("[event] %s %+v\n", ev.Type, ev.Data)
 		},
@@ -505,6 +550,18 @@ func runServe(cfgPath string) {
 	app.sched = sched
 	app.mu.Unlock()
 	sched.Start()
+
+	// Spawn the SQS restore-event consumer if a queue URL is configured.
+	// The consumer is best-effort: failure to start logs a warning but
+	// doesn't prevent the HTTP server / scheduler from running.
+	if app.cfg.SQS.QueueURL != "" {
+		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
+		if err != nil {
+			logger.Warn("sqs restore consumer disabled", "err", err)
+		} else if consumer != nil {
+			go func() { _ = consumer.Run(ctx) }()
+		}
+	}
 
 	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)
 	httpSrv := &http.Server{

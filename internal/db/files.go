@@ -24,18 +24,27 @@ const (
 	StatusMissing  = "missing"
 )
 
+// Restore lifecycle states tracked separately from Status. Empty string =
+// no known restore activity for the row.
+const (
+	RestoreStatusInProgress = "in_progress"
+	RestoreStatusRestored   = "restored"
+)
+
 // File is the GORM model for the `files` table.
 type File struct {
-	ID         int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	Path       string    `gorm:"column:path;uniqueIndex;not null"`
-	Size       int64     `gorm:"column:size;not null"`
-	MTime      time.Time `gorm:"column:mtime;not null"`
-	MD5        string    `gorm:"column:md5"`
-	Status     string    `gorm:"column:status;not null;default:'pending';index"`
-	ZipName    string    `gorm:"column:zip_name;index"`
-	S3Key      string    `gorm:"column:s3_key"`
-	UploadedAt time.Time `gorm:"column:uploaded_at"`
-	LastSeenAt time.Time `gorm:"column:last_seen_at;not null;index"`
+	ID               int64      `gorm:"column:id;primaryKey;autoIncrement"`
+	Path             string     `gorm:"column:path;uniqueIndex;not null"`
+	Size             int64      `gorm:"column:size;not null"`
+	MTime            time.Time  `gorm:"column:mtime;not null"`
+	MD5              string     `gorm:"column:md5"`
+	Status           string     `gorm:"column:status;not null;default:'pending';index"`
+	ZipName          string     `gorm:"column:zip_name;index"`
+	S3Key            string     `gorm:"column:s3_key"`
+	UploadedAt       time.Time  `gorm:"column:uploaded_at"`
+	LastSeenAt       time.Time  `gorm:"column:last_seen_at;not null;index"`
+	RestoreStatus    string     `gorm:"column:restore_status;index"`
+	RestoreExpiresAt *time.Time `gorm:"column:restore_expires_at"`
 }
 
 // UpsertResult captures what changed during UpsertFile.
@@ -534,6 +543,35 @@ func (db *DB) MarkPendingByZipNames(ctx context.Context, zipNames []string) (int
 // MarkPendingByS3Keys resets individually-uploaded files whose s3_key is in the list.
 func (db *DB) MarkPendingByS3Keys(ctx context.Context, keys []string) (int64, error) {
 	return markPendingByColumn(ctx, db.g, "s3_key", keys)
+}
+
+// MarkRestoreInProgress flips every row whose s3_key matches to
+// restore_status='in_progress'. Rows already marked 'restored' are left
+// alone so an out-of-order Post-after-Completed delivery does not regress
+// the lifecycle. Returns rows affected.
+func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, error) {
+	if s3Key == "" {
+		return 0, nil
+	}
+	result := db.g.WithContext(ctx).Model(&File{}).
+		Where("s3_key = ? AND restore_status != ?", s3Key, RestoreStatusRestored).
+		Update("restore_status", RestoreStatusInProgress)
+	return result.RowsAffected, result.Error
+}
+
+// MarkRestored flips every row whose s3_key matches to
+// restore_status='restored' and records the temporary copy's expiry time.
+func (db *DB) MarkRestored(ctx context.Context, s3Key string, expiresAt time.Time) (int64, error) {
+	if s3Key == "" {
+		return 0, nil
+	}
+	result := db.g.WithContext(ctx).Model(&File{}).
+		Where("s3_key = ?", s3Key).
+		Updates(map[string]any{
+			"restore_status":      RestoreStatusRestored,
+			"restore_expires_at":  expiresAt,
+		})
+	return result.RowsAffected, result.Error
 }
 
 // markPendingByColumn is the shared implementation for the three MarkPendingBy* functions.

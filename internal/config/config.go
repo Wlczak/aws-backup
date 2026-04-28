@@ -29,8 +29,19 @@ const (
 type Config struct {
 	Source SourceConfig `json:"source"`
 	S3     S3Config     `json:"s3"`
+	SQS    SQSConfig    `json:"sqs"`
 	Backup BackupConfig `json:"backup"`
 	Server ServerConfig `json:"server"`
+}
+
+// SQSConfig configures the restore-event consumer. Empty QueueURL
+// disables polling entirely. Credentials are reused from S3Config.
+type SQSConfig struct {
+	QueueURL          string `json:"queue_url"`
+	Region            string `json:"region"`
+	WaitTimeSeconds   int    `json:"wait_time_seconds"`
+	VisibilityTimeout int    `json:"visibility_timeout"`
+	MaxMessages       int    `json:"max_messages"`
 }
 
 type SourceConfig struct {
@@ -88,6 +99,15 @@ type BackupConfig struct {
 	// 'failed' alongside 'pending' on each run. Manual retry via the API
 	// works regardless of this flag.
 	RetryFailed bool `json:"retry_failed"`
+	// CopyThreads is the number of concurrent staging workers
+	// (source → tmp, i.e. CreateZip / copyAndHash). 0 or 1 = sequential.
+	CopyThreads int `json:"copy_threads"`
+	// UploadThreads is the number of concurrent S3 upload workers
+	// consuming staged tmp files. 0 or 1 = sequential.
+	UploadThreads int `json:"upload_threads"`
+	// PipelineQueue caps how many staged groups may sit in tmp waiting
+	// for upload, bounding peak tmp disk usage. 0 = auto (max(upload_threads, 1)).
+	PipelineQueue int `json:"pipeline_queue"`
 }
 
 type ServerConfig struct {
@@ -126,6 +146,9 @@ func Default() Config {
 			ZipMaxBytes:    0, // engine default (2 GiB)
 			EnableZipIndex: true,
 			RetryFailed:    true,
+			CopyThreads:    1,
+			UploadThreads:  1,
+			PipelineQueue:  0, // auto
 		},
 		Server: ServerConfig{
 			Host: "127.0.0.1",
@@ -156,11 +179,19 @@ func applyBackfills(data []byte, cfg *Config) {
 	var probe struct {
 		Backup struct {
 			EnableZipIndex *bool `json:"enable_zip_index"`
+			CopyThreads    *int  `json:"copy_threads"`
+			UploadThreads  *int  `json:"upload_threads"`
 		} `json:"backup"`
 	}
 	_ = json.Unmarshal(data, &probe)
 	if probe.Backup.EnableZipIndex == nil {
 		cfg.Backup.EnableZipIndex = true
+	}
+	if probe.Backup.CopyThreads == nil {
+		cfg.Backup.CopyThreads = 1
+	}
+	if probe.Backup.UploadThreads == nil {
+		cfg.Backup.UploadThreads = 1
 	}
 }
 
@@ -265,6 +296,21 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if c.SQS.QueueURL != "" {
+		if c.SQS.Region == "" && c.S3.Region == "" {
+			errs = append(errs, errors.New("sqs.region is required when sqs.queue_url is set (or set s3.region as a fallback)"))
+		}
+		if c.SQS.WaitTimeSeconds < 0 || c.SQS.WaitTimeSeconds > 20 {
+			errs = append(errs, fmt.Errorf("sqs.wait_time_seconds must be in [0,20] (got %d)", c.SQS.WaitTimeSeconds))
+		}
+		if c.SQS.MaxMessages < 0 || c.SQS.MaxMessages > 10 {
+			errs = append(errs, fmt.Errorf("sqs.max_messages must be in [1,10] (got %d)", c.SQS.MaxMessages))
+		}
+		if c.SQS.VisibilityTimeout < 0 {
+			errs = append(errs, fmt.Errorf("sqs.visibility_timeout must be >= 0 (got %d)", c.SQS.VisibilityTimeout))
+		}
+	}
+
 	if c.Backup.ChunkSize <= 0 {
 		errs = append(errs, fmt.Errorf("backup.chunk_size must be > 0 (got %d)", c.Backup.ChunkSize))
 	}
@@ -276,6 +322,19 @@ func (c Config) Validate() error {
 	}
 	if c.Backup.ZipMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf("backup.zip_max_bytes must be >= 0 (got %d)", c.Backup.ZipMaxBytes))
+	}
+	if c.Backup.CopyThreads < 0 {
+		errs = append(errs, fmt.Errorf("backup.copy_threads must be >= 0 (got %d)", c.Backup.CopyThreads))
+	} else if c.Backup.CopyThreads > 64 {
+		errs = append(errs, fmt.Errorf("backup.copy_threads must be <= 64 (got %d)", c.Backup.CopyThreads))
+	}
+	if c.Backup.UploadThreads < 0 {
+		errs = append(errs, fmt.Errorf("backup.upload_threads must be >= 0 (got %d)", c.Backup.UploadThreads))
+	} else if c.Backup.UploadThreads > 64 {
+		errs = append(errs, fmt.Errorf("backup.upload_threads must be <= 64 (got %d)", c.Backup.UploadThreads))
+	}
+	if c.Backup.PipelineQueue < 0 {
+		errs = append(errs, fmt.Errorf("backup.pipeline_queue must be >= 0 (got %d)", c.Backup.PipelineQueue))
 	}
 	if c.Backup.TmpDir == "" {
 		errs = append(errs, errors.New("backup.tmp_dir is required"))
