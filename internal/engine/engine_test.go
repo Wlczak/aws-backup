@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,15 +249,17 @@ func TestEngineGracefulStop(t *testing.T) {
 		writeFile(t, root, dir+"/file.txt", "data-"+dir)
 	}
 
-	var stop bool
-	eng.opts.StopRequested = func() bool { return stop }
+	// atomic: StopRequested polls from the copy-worker goroutine while
+	// Emit fires from the upload-worker goroutine in the new pipeline.
+	var stop atomic.Bool
+	eng.opts.StopRequested = stop.Load
 	// Flip after the first upload completes so we know mid-run stop works
 	// (rather than refusing to start anything).
 	origEmit := eng.opts.Emit
 	eng.opts.Emit = func(ev Event) {
 		origEmit(ev)
 		if ev.Type == EventUploadComplete {
-			stop = true
+			stop.Store(true)
 		}
 	}
 
