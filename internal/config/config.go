@@ -29,8 +29,19 @@ const (
 type Config struct {
 	Source SourceConfig `json:"source"`
 	S3     S3Config     `json:"s3"`
+	SQS    SQSConfig    `json:"sqs"`
 	Backup BackupConfig `json:"backup"`
 	Server ServerConfig `json:"server"`
+}
+
+// SQSConfig configures the restore-event consumer. Empty QueueURL
+// disables polling entirely. Credentials are reused from S3Config.
+type SQSConfig struct {
+	QueueURL          string `json:"queue_url"`
+	Region            string `json:"region"`
+	WaitTimeSeconds   int    `json:"wait_time_seconds"`
+	VisibilityTimeout int    `json:"visibility_timeout"`
+	MaxMessages       int    `json:"max_messages"`
 }
 
 type SourceConfig struct {
@@ -282,6 +293,21 @@ func (c Config) Validate() error {
 				"s3.storage_class %q requires AWS S3 (leave s3.endpoint empty); S3-compatible endpoints typically only support STANDARD",
 				c.S3.StorageClass,
 			))
+		}
+	}
+
+	if c.SQS.QueueURL != "" {
+		if c.SQS.Region == "" && c.S3.Region == "" {
+			errs = append(errs, errors.New("sqs.region is required when sqs.queue_url is set (or set s3.region as a fallback)"))
+		}
+		if c.SQS.WaitTimeSeconds < 0 || c.SQS.WaitTimeSeconds > 20 {
+			errs = append(errs, fmt.Errorf("sqs.wait_time_seconds must be in [0,20] (got %d)", c.SQS.WaitTimeSeconds))
+		}
+		if c.SQS.MaxMessages < 0 || c.SQS.MaxMessages > 10 {
+			errs = append(errs, fmt.Errorf("sqs.max_messages must be in [1,10] (got %d)", c.SQS.MaxMessages))
+		}
+		if c.SQS.VisibilityTimeout < 0 {
+			errs = append(errs, fmt.Errorf("sqs.visibility_timeout must be >= 0 (got %d)", c.SQS.VisibilityTimeout))
 		}
 	}
 

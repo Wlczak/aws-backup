@@ -21,6 +21,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
+	"github.com/Wlczak/aws-backup/internal/restore"
 	"github.com/Wlczak/aws-backup/internal/scheduler"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
@@ -511,6 +512,18 @@ func runServe(cfgPath string) {
 	app.sched = sched
 	app.mu.Unlock()
 	sched.Start()
+
+	// Spawn the SQS restore-event consumer if a queue URL is configured.
+	// The consumer is best-effort: failure to start logs a warning but
+	// doesn't prevent the HTTP server / scheduler from running.
+	if app.cfg.SQS.QueueURL != "" {
+		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
+		if err != nil {
+			logger.Warn("sqs restore consumer disabled", "err", err)
+		} else if consumer != nil {
+			go func() { _ = consumer.Run(ctx) }()
+		}
+	}
 
 	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)
 	httpSrv := &http.Server{
