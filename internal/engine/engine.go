@@ -1123,7 +1123,7 @@ func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {
 // (#133) wrap, if non-nil, wraps the source reader before bytes flow
 // into the writer — the engine uses this to inject a progressReader
 // that emits live copy_progress events for slow / large source reads.
-func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap func(io.Reader) io.Reader) (int64, string, string, error) {
+func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap func(io.Reader) io.Reader) (n int64, md5hex, sha256hex string, retErr error) {
 	rc, err := src.Open(ctx, rel)
 	if err != nil {
 		return 0, "", "", err
@@ -1134,7 +1134,15 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap f
 	if err != nil {
 		return 0, "", "", err
 	}
-	defer out.Close()
+	// Capture Close errors: on filesystems that defer disk-write reporting
+	// (NFS, some SMB mounts, ENOSPC after delayed allocation), write errors
+	// only surface on Close. A silent close lets corrupt tmp files through
+	// to the upload path. (#145)
+	defer func() {
+		if cerr := out.Close(); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 
 	var reader io.Reader = rc
 	if wrap != nil {
@@ -1143,7 +1151,7 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap f
 
 	hMD5 := md5.New()
 	hSHA := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, hMD5, hSHA), reader)
+	n, err = io.Copy(io.MultiWriter(out, hMD5, hSHA), reader)
 	if err != nil {
 		return n, "", "", err
 	}
