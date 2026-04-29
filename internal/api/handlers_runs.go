@@ -236,12 +236,6 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 // also caps the duration runWg can hold up Server.Shutdown.
 const dbSyncStopTimeout = 600 * time.Second
 
-// dbSyncCancelTimeout bounds the post-Cancel DB upload. Tighter than the
-// stop budget because force-cancel implies the user wants to move on
-// quickly; the partial-progress index is still worth saving but not at
-// the cost of a multi-minute hang.
-const dbSyncCancelTimeout = 30 * time.Second
-
 // maybeSyncDBToS3 picks a reason and timeout based on how the run ended,
 // then runs the sync in a context that aborts on Server.Shutdown so an
 // in-flight upload doesn't outlive app.close() tearing down DB/storage.
@@ -272,12 +266,12 @@ func (s *Server) maybeSyncDBToS3(
 	switch {
 	case stopReq && runErr == nil:
 		reason, timeout = "stop", dbSyncStopTimeout
-	case cancelReq && errors.Is(runErr, context.Canceled):
-		reason, timeout = "cancel", dbSyncCancelTimeout
 	case !stopReq && !cancelReq && runErr == nil:
 		reason, timeout = "complete", dbSyncStopTimeout
 	default:
-		// Engine failure or service-shutdown cancel — skip per #128.
+		// Force-cancel, engine failure, or service-shutdown cancel — skip.
+		// Force-cancel discards in-flight work, so the partial DB state
+		// would just churn the versioned index without value.
 		return
 	}
 
