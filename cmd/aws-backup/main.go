@@ -97,9 +97,20 @@ type appState struct {
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
+	// sqsConsumer holds the long-running S3 Glacier restore-event
+	// consumer when sqs.queue_url is configured. Stored so the API's
+	// "Sync restore status" button can call DrainAll alongside the
+	// background poll. nil when SQS is disabled.
+	sqsConsumer *restore.Consumer
 }
 
-func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
+// loadAppState loads config + storage, refreshes the local index.db from
+// S3 if needed, and opens the SQLite DB and source. When withBootUI is
+// true and a download is needed, a transient HTTP page is served on the
+// configured server address showing progress with a Cancel button; the
+// transient server is shut down before this returns so the real API can
+// rebind the port. (#143)
+func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appState, error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", cfgPath, err)
@@ -133,8 +144,15 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	// what's on disk — typical when another machine ran a backup more
 	// recently. Done BEFORE db.Open so SQLite never has the file swapped
 	// out under it. Best-effort: any failure keeps whatever local state
-	// exists. (#143)
-	_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
+	// exists. With the boot UI a transient HTTP page is served on the
+	// configured server address while the download runs, with a Cancel
+	// button that lets the user proceed with whatever local state they
+	// have. (#143)
+	if withBootUI {
+		_ = bootRefreshDBFromS3(ctx, cfg.Server, store, cfg.S3.KeyPrefix, dbPath)
+	} else {
+		_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
+	}
 
 	d, err := db.Open(ctx, dbPath)
 	if err != nil {
@@ -160,53 +178,83 @@ func loadAppState(ctx context.Context, cfgPath string) (*appState, error) {
 	}, nil
 }
 
+// dbRefreshNeeded reports whether the local index.db at dst is stale
+// enough to warrant a fresh download from S3, and returns the remote
+// size when so. ok=false with err=nil means "no action needed" (local
+// is up-to-date, or S3 has no copy yet).
+func dbRefreshNeeded(ctx context.Context, store storage.Storage, prefix, dst string) (ok bool, size int64, err error) {
+	const mtimeSkew = time.Second
+	key := dbS3Key(prefix)
+	localStat, localErr := os.Stat(dst)
+	localMissing := errors.Is(localErr, os.ErrNotExist)
+	if localErr != nil && !localMissing {
+		return false, 0, localErr
+	}
+	head, headErr := store.Head(ctx, key)
+	if headErr != nil {
+		// No remote copy yet (fresh deployment) — nothing to refresh.
+		if errors.Is(headErr, storage.ErrNotFound) {
+			return false, 0, nil
+		}
+		// Network / permissions issue: keep local untouched.
+		return false, 0, headErr
+	}
+	if !localMissing {
+		// LastModified may be unset (some S3-compatible backends omit it);
+		// in that case there's nothing to compare so we leave local alone.
+		if head.LastModified.IsZero() {
+			return false, 0, nil
+		}
+		if !head.LastModified.After(localStat.ModTime().Add(mtimeSkew)) {
+			return false, 0, nil
+		}
+	}
+	return true, head.Size, nil
+}
+
 // refreshDBFromS3 ensures the local index.db at dst is at least as fresh
 // as the copy in S3. If the local file is missing it's downloaded; if S3
 // reports a newer LastModified (by more than mtimeSkew, to absorb clock
 // drift between the writer and S3) the local file is replaced. Returns
 // nil when no action was needed, or when the action succeeded. (#143)
 func refreshDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
-	const mtimeSkew = time.Second
-	key := dbS3Key(prefix)
-	localStat, localErr := os.Stat(dst)
-	localMissing := errors.Is(localErr, os.ErrNotExist)
-	if localErr != nil && !localMissing {
-		return localErr
+	need, size, err := dbRefreshNeeded(ctx, store, prefix, dst)
+	if err != nil || !need {
+		return err
 	}
-
-	head, headErr := store.Head(ctx, key)
-	if headErr != nil {
-		// No remote copy yet (fresh deployment) — nothing to refresh.
-		if errors.Is(headErr, storage.ErrNotFound) {
-			return nil
-		}
-		// Network / permissions issue: keep local untouched.
-		return headErr
-	}
-	if !localMissing {
-		// LastModified may be unset (some S3-compatible backends omit it);
-		// in that case there's nothing to compare so we leave local alone.
-		if head.LastModified.IsZero() {
-			return nil
-		}
-		if !head.LastModified.After(localStat.ModTime().Add(mtimeSkew)) {
-			return nil
-		}
-	}
-	return downloadDBFromS3(ctx, store, prefix, dst)
+	return downloadDBFromS3(ctx, store, prefix, dst, size, nil)
 }
 
 // downloadDBFromS3 downloads the index.db object from S3 and writes it to dst
 // atomically: bytes go to dst+".part", are fsynced, then renamed into place.
 // A partial file (process kill mid-stream) is therefore never visible at dst,
 // so the next startup won't open a truncated SQLite file as the live index.
-func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string) error {
+//
+// onProgress, if non-nil, is called with the running byte total at most
+// once per ~250ms (and once on the final EOF read). size is the expected
+// total — pass 0 if unknown.
+func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst string, size int64, onProgress func(read, total int64)) error {
 	key := dbS3Key(prefix)
 	body, err := store.Get(ctx, key)
 	if err != nil {
 		return err
 	}
 	defer body.Close()
+
+	var reader io.Reader = body
+	if onProgress != nil {
+		reader = &dlProgressReader{
+			r:           body,
+			total:       size,
+			minInterval: 250 * time.Millisecond,
+			onProgress:  onProgress,
+		}
+	}
+	// ctxReader so the boot UI's Cancel button (which cancels ctx) actually
+	// stops the read loop mid-stream instead of letting io.Copy run to
+	// completion. The S3 SDK's reader observes ctx itself; this wrap covers
+	// in-process / fake backends that don't.
+	reader = &ctxReader{r: reader, ctx: ctx}
 
 	tmp := dst + ".part"
 	// 0o600 mirrors the perms applied when the DB is freshly created
@@ -216,7 +264,7 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, body); err != nil {
+	if _, err := io.Copy(f, reader); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -233,6 +281,43 @@ func downloadDBFromS3(ctx context.Context, store storage.Storage, prefix, dst st
 	return os.Rename(tmp, dst)
 }
 
+// ctxReader returns ctx.Err() from Read once the context is cancelled, so
+// io.Copy unwinds promptly when the boot UI's Cancel button fires.
+type ctxReader struct {
+	r   io.Reader
+	ctx context.Context
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// dlProgressReader wraps an io.Reader, calling onProgress at most once per
+// minInterval with the running byte total, plus once on the final read.
+type dlProgressReader struct {
+	r           io.Reader
+	total       int64
+	read        int64
+	minInterval time.Duration
+	lastEmit    time.Time
+	onProgress  func(read, total int64)
+}
+
+func (p *dlProgressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.read += int64(n)
+	now := time.Now()
+	final := errors.Is(err, io.EOF)
+	if p.onProgress != nil && (final || p.lastEmit.IsZero() || now.Sub(p.lastEmit) >= p.minInterval) {
+		p.lastEmit = now
+		p.onProgress(p.read, p.total)
+	}
+	return n, err
+}
+
 // liveStorage returns the currently-active storage handle. The API
 // server calls this on every request so a settings hot-swap (PUT
 // /api/settings) is observed without a service restart. (#131)
@@ -240,6 +325,16 @@ func (a *appState) liveStorage() storage.Storage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.store
+}
+
+// syncRestoreStatus returns the closure used as api.Deps.SyncRestoreStatus.
+// nil when no SQS consumer is configured so the handler returns 503 and the
+// UI surfaces "no queue configured".
+func (a *appState) syncRestoreStatus() func(ctx context.Context) (int, error) {
+	if a.sqsConsumer == nil {
+		return nil
+	}
+	return a.sqsConsumer.DrainAll
 }
 
 // syncDBToS3 checkpoints the WAL and uploads the DB file to S3, emitting
@@ -464,7 +559,7 @@ func (a *appState) close() {
 
 func runBackup(cfgPath string) {
 	ctx := context.Background()
-	app, err := loadAppState(ctx, cfgPath)
+	app, err := loadAppState(ctx, cfgPath, false)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -502,23 +597,39 @@ func runServe(cfgPath string) {
 	defer stop()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Set as default so the boot-UI download progress logs use the same
+	// handler as the rest of the server.
+	slog.SetDefault(logger)
 
-	app, err := loadAppState(ctx, cfgPath)
+	app, err := loadAppState(ctx, cfgPath, true)
 	if err != nil {
 		fatalf("%v", err)
 	}
 	app.logger = logger
 	defer app.close()
 
+	// Build the SQS restore-event consumer (if configured) before NewServer
+	// so the "Sync restore status" button can call DrainAll. Best-effort:
+	// failure to construct logs a warning and the rest of the server runs.
+	if app.cfg.SQS.QueueURL != "" {
+		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
+		if err != nil {
+			logger.Warn("sqs restore consumer disabled", "err", err)
+		} else if consumer != nil {
+			app.sqsConsumer = consumer
+		}
+	}
+
 	srv := api.NewServer(api.Deps{
-		DB:            app.db,
-		Bus:           app.bus,
-		Config:        &app.cfg,
-		ConfigPath:    app.cfgPath,
-		BuildEngine:   app.buildEngine,
-		Storage:       app.liveStorage,
-		StoragePrefix: app.cfg.S3.KeyPrefix,
-		SyncDBToS3:    app.syncDBToS3,
+		DB:                app.db,
+		Bus:               app.bus,
+		Config:            &app.cfg,
+		ConfigPath:        app.cfgPath,
+		BuildEngine:       app.buildEngine,
+		Storage:           app.liveStorage,
+		StoragePrefix:     app.cfg.S3.KeyPrefix,
+		SyncDBToS3:        app.syncDBToS3,
+		SyncRestoreStatus: app.syncRestoreStatus(),
 		ApplySettings: func(prev, next config.Config) error {
 			return app.applySettings(context.Background(), prev, next)
 		},
@@ -551,16 +662,12 @@ func runServe(cfgPath string) {
 	app.mu.Unlock()
 	sched.Start()
 
-	// Spawn the SQS restore-event consumer if a queue URL is configured.
-	// The consumer is best-effort: failure to start logs a warning but
-	// doesn't prevent the HTTP server / scheduler from running.
-	if app.cfg.SQS.QueueURL != "" {
-		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
-		if err != nil {
-			logger.Warn("sqs restore consumer disabled", "err", err)
-		} else if consumer != nil {
-			go func() { _ = consumer.Run(ctx) }()
-		}
+	// Drive the SQS consumer's background long-poll loop now that the API
+	// server is wired up; the consumer itself was constructed earlier so
+	// the "Sync restore status" button can drain on demand alongside this
+	// loop.
+	if app.sqsConsumer != nil {
+		go func() { _ = app.sqsConsumer.Run(ctx) }()
 	}
 
 	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)

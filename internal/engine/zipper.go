@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/source"
 )
@@ -24,6 +25,11 @@ type PendingFile struct {
 	ID      int64
 	RelPath string // source-relative path, forward slashes
 	Size    int64
+	// MTime is the source file's mtime as recorded by the most recent
+	// scan. Used by uploadIndividual's resume path to decide whether a
+	// cached tmp file is still fresh: if tmp.ModTime() < MTime, the
+	// source has changed since the cached copy was written. (#127)
+	MTime time.Time
 }
 
 // Group is the output of GroupFiles — a set of files sharing a top-level
