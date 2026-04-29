@@ -104,6 +104,41 @@ func New(ctx context.Context, cfg config.SQSConfig, s3cfg config.S3Config, db Fi
 	}, nil
 }
 
+// DrainAll short-polls the queue repeatedly until an empty receive comes
+// back, applying every message through the same handleMessage path the
+// background loop uses. Returns the count of messages processed. Safe to
+// call concurrently with Run — the SQS visibility timeout keeps a message
+// from being seen by both at once. Used by the "Sync restore status"
+// button so users don't have to wait out the long-poll cycle after a
+// Glacier restore lands.
+func (c *Consumer) DrainAll(ctx context.Context) (int, error) {
+	total := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(c.queueURL),
+			MaxNumberOfMessages: c.maxMsgs,
+			WaitTimeSeconds:     0, // short-poll: return immediately
+			VisibilityTimeout:   c.visSec,
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return total, err
+			}
+			return total, fmt.Errorf("sqs receive: %w", err)
+		}
+		if len(out.Messages) == 0 {
+			return total, nil
+		}
+		for _, msg := range out.Messages {
+			c.handleMessage(ctx, msg)
+		}
+		total += len(out.Messages)
+	}
+}
+
 // Run polls the queue until ctx is cancelled. Always returns nil on
 // clean shutdown (context cancelled); transport errors are logged and
 // retried.

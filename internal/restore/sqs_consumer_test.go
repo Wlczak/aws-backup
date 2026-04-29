@@ -216,3 +216,88 @@ func TestHandleMessage_GarbageNotDeleted(t *testing.T) {
 		t.Error("no DB writes expected for garbage body")
 	}
 }
+
+// scriptedSQS replays a queued sequence of ReceiveMessage results so
+// DrainAll's "drain until empty" loop can be observed end to end.
+type scriptedSQS struct {
+	pages   [][]sqstypes.Message
+	calls   int
+	deleted []string
+}
+
+func (s *scriptedSQS) ReceiveMessage(_ context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	if s.calls >= len(s.pages) {
+		s.calls++
+		return &sqs.ReceiveMessageOutput{}, nil
+	}
+	out := &sqs.ReceiveMessageOutput{Messages: s.pages[s.calls]}
+	s.calls++
+	return out, nil
+}
+func (s *scriptedSQS) DeleteMessage(_ context.Context, in *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+	if in.ReceiptHandle != nil {
+		s.deleted = append(s.deleted, *in.ReceiptHandle)
+	}
+	return &sqs.DeleteMessageOutput{}, nil
+}
+
+func TestDrainAll_ProcessesAllPagesUntilEmpty(t *testing.T) {
+	upd := &fakeUpdater{rows: 1}
+	sq := &scriptedSQS{
+		pages: [][]sqstypes.Message{
+			{
+				{Body: aws.String(samplePostBody), ReceiptHandle: aws.String("rh-a")},
+				{Body: aws.String(sampleCompletedBody), ReceiptHandle: aws.String("rh-b")},
+			},
+			{
+				{Body: aws.String(sampleCompletedBody), ReceiptHandle: aws.String("rh-c")},
+			},
+			// implicit empty page closes the loop
+		},
+	}
+	c := &Consumer{
+		client:   sq,
+		queueURL: "https://example/q",
+		db:       upd,
+		logger:   slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+	}
+
+	n, err := c.DrainAll(context.Background())
+	if err != nil {
+		t.Fatalf("DrainAll: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("processed=%d want 3", n)
+	}
+	if len(upd.inProgress) != 1 || len(upd.restored) != 2 {
+		t.Errorf("got inProgress=%d restored=%d, want 1/2", len(upd.inProgress), len(upd.restored))
+	}
+	if len(sq.deleted) != 3 {
+		t.Errorf("deleted=%d want 3", len(sq.deleted))
+	}
+	// Three calls: two non-empty pages + one empty page that exits the loop.
+	if sq.calls != 3 {
+		t.Errorf("ReceiveMessage calls=%d want 3", sq.calls)
+	}
+}
+
+func TestDrainAll_StopsOnContextCancel(t *testing.T) {
+	upd := &fakeUpdater{rows: 1}
+	sq := &scriptedSQS{
+		pages: [][]sqstypes.Message{
+			{{Body: aws.String(samplePostBody), ReceiptHandle: aws.String("rh-1")}},
+		},
+	}
+	c := &Consumer{
+		client:   sq,
+		queueURL: "https://example/q",
+		db:       upd,
+		logger:   slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.DrainAll(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err=%v want context.Canceled", err)
+	}
+}

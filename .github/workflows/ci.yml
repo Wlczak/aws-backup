@@ -70,11 +70,17 @@ jobs:
           ./aws-backup -config /tmp/smoke.json config init
           jq '.source.localdir.root = "/tmp"' /tmp/smoke.json > /tmp/smoke2.json && mv /tmp/smoke2.json /tmp/smoke.json
           ./aws-backup -config /tmp/smoke.json serve &
-          for i in $(seq 1 15); do sleep 1
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ 2>/dev/null)
+          # 127.0.0.1 not localhost: dual-stack runners may resolve localhost
+          # to ::1 and the server only binds 127.0.0.1.
+          # `|| true` so transient connect failures during warmup don't trip
+          # `set -e` via the assignment's exit status.
+          STATUS=000
+          for i in $(seq 1 30); do
+            sleep 1
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/ 2>/dev/null || true)
             [ "$STATUS" = "200" ] && break
           done
-          BODY=$(curl -s http://localhost:8080/)
+          BODY=$(curl -s http://127.0.0.1:8080/ || true)
           kill %1 2>/dev/null || true
           [ "$STATUS" = "200" ] || { echo "Got HTTP $STATUS, want 200"; exit 1; }
           echo "$BODY" | grep -q "<html" || { echo "Response body missing <html"; exit 1; }

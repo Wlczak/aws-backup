@@ -51,7 +51,12 @@ type Deps struct {
 	// label its progress events so the dashboard can show which trigger
 	// produced the upload. (#128)
 	SyncDBToS3 func(ctx context.Context, runID int64, reason string) error
-	Logger     *slog.Logger
+	// SyncRestoreStatus, when non-nil, drains the configured SQS queue of
+	// pending S3 Glacier restore events and applies them to the DB.
+	// Returns the number of messages processed. nil means "SQS not
+	// configured" — the handler returns 503 so the UI can surface that.
+	SyncRestoreStatus func(ctx context.Context) (int, error)
+	Logger            *slog.Logger
 }
 
 // Server exposes the Router for tests and for the CLI to Serve() from.
@@ -223,6 +228,7 @@ func (s *Server) Router() http.Handler {
 
 		r.Post("/restore/estimate", s.handleRestoreEstimate)
 		r.Post("/restore/trigger", s.handleRestoreTrigger)
+		r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
 
 		r.Post("/sync", s.handleSync)
 		r.Post("/sync/full", s.handleSyncFull)

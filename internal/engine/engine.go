@@ -13,8 +13,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -341,6 +343,17 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
 		return classify("mkdir tmp", err)
 	}
+
+	// Sweep tmp dir of orphan ind-N files whose IDs aren't pending any
+	// more (e.g. the row got marked uploaded by reconcileFromS3 between
+	// runs, or the file was removed from the source). Without this
+	// sweep, every "leave-tmp-on-failure" path could leak indefinitely
+	// across many runs. Cheap: one ReadDir + a few unlinks. (#127)
+	keepIDs := make(map[int64]struct{}, len(pending))
+	for _, pf := range pending {
+		keepIDs[pf.ID] = struct{}{}
+	}
+	e.sweepOrphanTmps(ctx, runID, e.opts.TmpDir, keepIDs)
 
 	// Seed per-directory zip counters so new zips continue the sequence
 	// (_2, _3, …) instead of restarting at _1 and silently overwriting the
@@ -715,7 +728,7 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 	}
 	out := make([]PendingFile, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size})
+		out = append(out, PendingFile{ID: r.ID, RelPath: r.Path, Size: r.Size, MTime: r.MTime})
 	}
 	return out, nil
 }
@@ -823,6 +836,11 @@ func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN i
 
 // stageIndividualGroup copyAndHash's each file to a tmp path. Files that
 // fail to copy are marked failed in the DB and omitted from the staged item.
+//
+// Tmp files use the stable name `ind-{fileID}` (no runID prefix) so a tmp
+// left behind by a previous run's failed upload can be reused: tryReuseTmp
+// checks size + mtime against the DB row and re-hashes locally. The engine
+// refuses concurrent runs, so two runs never share a tmp. (#127)
 func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group) (stagedItem, error) {
 	item := stagedItem{group: g, isZip: false}
 	for i := 0; i < len(g.Files); i += e.opts.ChunkSize {
@@ -838,21 +856,38 @@ func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group)
 				return stagedItem{}, ErrStopRequested
 			}
 			key := path.Join(e.opts.KeyPrefix, pf.RelPath)
-			tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d-%d", runID, pf.ID))
-			size, md5hex, sha256hex, err := copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+			tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d", pf.ID))
+
+			// Resume path: a usable cached tmp from a prior run's failed
+			// upload skips the source read entirely. tryReuseTmp removes
+			// stale / mismatched tmp itself so the fallback copy starts
+			// clean.
+			size, md5hex, sha256hex, reused, err := uploadHashes(tmp, pf)
 			if err != nil {
-				os.Remove(tmp)
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return stagedItem{}, err
-				}
-				if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
-					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("mark failed %s: %v (copy error: %v)", pf.RelPath, mErr, err))
-				} else {
-					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after copy error: %v", pf.RelPath, err))
-				}
-				continue
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("inspect cached tmp %s: %v — falling back to copy", tmp, err))
 			}
-			e.emitCopyProgress(runID, key, size, size)
+			if reused {
+				e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reusing cached tmp %s for %s", tmp, pf.RelPath))
+				// No copy_progress emit on reuse — there was no source read.
+			} else {
+				size, md5hex, sha256hex, err = copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+				if err != nil {
+					// Partial copy is unusable for next run's resume; remove
+					// now so we don't poison a future tryReuseTmp with a
+					// wrong-sized tmp.
+					_ = os.Remove(tmp)
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return stagedItem{}, err
+					}
+					if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
+						e.log(ctx, runID, db.LogWarn, fmt.Sprintf("mark failed %s: %v (copy error: %v)", pf.RelPath, mErr, err))
+					} else {
+						e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after copy error: %v", pf.RelPath, err))
+					}
+					continue
+				}
+				e.emitCopyProgress(runID, key, size, size)
+			}
 			item.individuals = append(item.individuals, stagedIndividual{
 				pf:        pf,
 				tmpPath:   tmp,
@@ -931,9 +966,18 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 	if err != nil {
 		return 0, 0, err
 	}
-	res, err := e.opts.Storage.PutIfAbsent(ctx, item.zipKey, e.progressBody(runID, item.zipKey, f, item.zipSize), item.zipSize)
+	// PutIfAbsent so a retry under the same key can't silently overwrite a
+	// prior DEEP_ARCHIVE object whose content may differ; the caller catches
+	// ErrAlreadyExists and advances the counter slot. uploadProgressCtx wraps
+	// the SDK's HTTP transport for byte-accurate progress including multipart
+	// part bodies. (#116)
+	res, err := e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, item.zipKey, item.zipSize), item.zipKey, f, item.zipSize)
 	f.Close()
 	if err != nil {
+		// Leave tmp in place — next run can reuse it instead of re-reading
+		// the source. A genuinely-broken tmp gets cleaned up on the next
+		// run's tryReuseTmp size/mtime check or by sweepOrphanTmps if the
+		// row leaves the pending list. (#127)
 		e.emit(Event{
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{"key": item.zipKey, "error": err.Error()},
@@ -959,15 +1003,16 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 }
 
 // uploadStagedIndividuals uploads each pre-staged individual file to S3.
+// On cancel / stop / per-file failure, staged tmps are deliberately left in
+// place so the next run's stageIndividualGroup can reuse them via
+// tryReuseTmp; sweepOrphanTmps keeps the dir bounded across runs. (#127)
 func (e *Engine) uploadStagedIndividuals(ctx context.Context, runID int64, item stagedItem) (int64, int64, error) {
 	var uploaded, bytes int64
 	for _, ind := range item.individuals {
 		if err := ctx.Err(); err != nil {
-			os.Remove(ind.tmpPath)
 			return uploaded, bytes, err
 		}
 		if e.opts.StopRequested != nil && e.opts.StopRequested() {
-			os.Remove(ind.tmpPath)
 			return uploaded, bytes, ErrStopRequested
 		}
 		n, err := e.uploadOneIndividual(ctx, runID, ind)
@@ -984,15 +1029,17 @@ func (e *Engine) uploadStagedIndividuals(ctx context.Context, runID int64, item 
 	return uploaded, bytes, nil
 }
 
-// uploadOneIndividual streams one pre-staged tmp file to S3.
+// uploadOneIndividual streams one pre-staged tmp file to S3. Tmp is removed
+// only on success or dedup-skip; on upload failure the tmp is preserved so
+// the next run can reuse it via tryReuseTmp instead of re-reading the
+// source. (#127)
 func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stagedIndividual) (int64, error) {
-	defer os.Remove(ind.tmpPath)
-
 	now := e.opts.Now()
 
 	// Dedup: skip upload when S3 already holds the identical object. (#133)
 	if e.skipIfMatches(ctx, ind.key, ind.sha256hex) {
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip upload %s: SHA256 matches existing object", ind.key))
+		_ = os.Remove(ind.tmpPath) // content is in S3 — don't leak
 		e.buf.markUploaded(ctx, ind.pf.ID, ind.md5hex, ind.key, now)
 		e.emit(Event{
 			Type: EventUploadComplete, RunID: runID, At: now,
@@ -1010,9 +1057,11 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 	if err != nil {
 		return 0, err
 	}
-	res, err := e.opts.Storage.Put(ctx, ind.key, e.progressBody(runID, ind.key, f, ind.size), ind.size)
+	res, err := e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, ind.key, ind.size), ind.key, f, ind.size)
 	f.Close()
 	if err != nil {
+		// Leave tmp in place — next run's stageIndividualGroup picks it up
+		// via tryReuseTmp instead of re-reading the source. (#127)
 		e.emit(Event{
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{"key": ind.key, "error": err.Error()},
@@ -1023,12 +1072,27 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 		return 0, fmt.Errorf("upload %s: %w", ind.key, err)
 	}
 
+	// Successful upload — free tmp now. We deliberately don't defer this
+	// at function entry so the failure path above can keep tmp for resume.
+	_ = os.Remove(ind.tmpPath)
 	e.buf.markUploaded(ctx, ind.pf.ID, ind.md5hex, ind.key, now)
 	e.emit(Event{
 		Type: EventUploadComplete, RunID: runID, At: now,
 		Data: map[string]any{"key": ind.key, "size": ind.size, "etag": res.ETag, "checksum_sha256": res.ChecksumSHA256},
 	})
 	return ind.size, nil
+}
+
+// uploadHashes returns (size, md5, sha256, reused, err). When tryReuseTmp
+// reports a usable cached tmp, the returned hashes come from re-hashing
+// it locally (one disk pass) and reused=true. Otherwise the caller must
+// run copyAndHash and overwrite tmp.
+func uploadHashes(tmp string, pf PendingFile) (size int64, md5hex, sha256hex string, reused bool, err error) {
+	md5hex, sha256hex, ok, err := tryReuseTmp(tmp, pf)
+	if err != nil || !ok {
+		return 0, "", "", false, err
+	}
+	return pf.Size, md5hex, sha256hex, true, nil
 }
 
 func (e *Engine) emit(ev Event) {
@@ -1101,29 +1165,51 @@ func (e *Engine) copyWrapZip(runID int64, key string, total int64) func(io.Reade
 	}
 }
 
-// progressBody wraps body so each Read advances a throttled
-// EventUploadProgress event for key. The wrapper deliberately exposes
-// only io.Reader (not Seeker / ReaderAt) so the AWS SDK reads bytes
-// serially through Read and we observe every chunk; concurrent
-// multipart uploads then run from the SDK's internal part buffers.
-func (e *Engine) progressBody(runID int64, key string, body io.Reader, size int64) io.Reader {
-	return newProgressReader(body, size, defaultProgressInterval, func(read, total int64) {
-		var pct float64
-		if total > 0 {
-			pct = float64(read) / float64(total) * 100
-			if pct > 100 {
-				pct = 100
-			}
+// emitUploadProgress publishes an EventUploadProgress sample for key.
+// Mirrors emitCopyProgress so consumers see a consistent payload shape.
+func (e *Engine) emitUploadProgress(runID int64, key string, read, total int64) {
+	var pct float64
+	if total > 0 {
+		pct = float64(read) / float64(total) * 100
+		if pct > 100 {
+			pct = 100
 		}
-		e.emit(Event{
-			Type: EventUploadProgress, RunID: runID, At: e.opts.Now(),
-			Data: map[string]any{
-				"key":            key,
-				"bytes_uploaded": read,
-				"size":           total,
-				"percent":        pct,
-			},
-		})
+	}
+	e.emit(Event{
+		Type: EventUploadProgress, RunID: runID, At: e.opts.Now(),
+		Data: map[string]any{
+			"key":            key,
+			"bytes_uploaded": read,
+			"size":           total,
+			"percent":        pct,
+		},
+	})
+}
+
+// uploadProgressCtx returns a context that, when passed to Storage.Put*,
+// produces upload_progress events at HTTP-frame granularity. The S3
+// client's transport (installed by NewS3Storage) wraps each request body
+// in a counting reader keyed off the context callback. Multipart parts
+// run concurrently, so we use atomic counters; emits are CAS-throttled
+// to one per defaultProgressInterval to avoid flooding the bus.
+func (e *Engine) uploadProgressCtx(ctx context.Context, runID int64, key string, size int64) context.Context {
+	if e.opts.Emit == nil {
+		return ctx
+	}
+	var sent atomic.Int64
+	var lastEmitNs atomic.Int64
+	return storage.WithUploadProgress(ctx, func(n int64) {
+		total := sent.Add(n)
+		nowNs := e.opts.Now().UnixNano()
+		isFinal := size > 0 && total >= size
+		last := lastEmitNs.Load()
+		if !isFinal && last != 0 && nowNs-last < int64(defaultProgressInterval) {
+			return
+		}
+		if !lastEmitNs.CompareAndSwap(last, nowNs) {
+			return
+		}
+		e.emitUploadProgress(runID, key, total, size)
 	})
 }
 
@@ -1221,4 +1307,76 @@ func sha256File(p string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// tryReuseTmp inspects an existing tmp file and returns (md5, sha256,
+// true, nil) if it can stand in for a fresh source→tmp copy: the size
+// matches the DB row and the tmp's mtime is >= the DB-recorded source
+// mtime (so the source can't have been modified after the cached copy
+// was written). Re-hashing on reuse catches bit-rot or partial writes
+// from a previous crash. A stale or unreadable tmp is removed and
+// (false, nil) is returned so the caller falls through to a regular
+// copyAndHash. (#127)
+func tryReuseTmp(tmp string, pf PendingFile) (md5hex, sha256hex string, ok bool, err error) {
+	info, statErr := os.Stat(tmp)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return "", "", false, nil
+	}
+	if statErr != nil {
+		return "", "", false, statErr
+	}
+	if info.Size() != pf.Size {
+		_ = os.Remove(tmp)
+		return "", "", false, nil
+	}
+	if !pf.MTime.IsZero() && info.ModTime().Before(pf.MTime) {
+		_ = os.Remove(tmp)
+		return "", "", false, nil
+	}
+	f, openErr := os.Open(tmp)
+	if openErr != nil {
+		return "", "", false, openErr
+	}
+	defer f.Close()
+	hMD5 := md5.New()
+	hSHA := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(hMD5, hSHA), f); err != nil {
+		return "", "", false, err
+	}
+	return hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), true, nil
+}
+
+// sweepOrphanTmps walks tmpDir once and deletes any `ind-{N}` file
+// whose ID is not in keep. This bounds tmp's size to "files actively
+// pending" (the issue title's literal requirement); without it, every
+// failed upload would leak a file that the next runs never touch
+// because reconcile or another path already advanced its DB row past
+// pending. Best-effort: per-entry errors are logged and skipped. (#127)
+func (e *Engine) sweepOrphanTmps(ctx context.Context, runID int64, tmpDir string, keep map[int64]struct{}) {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		e.log(ctx, runID, db.LogWarn, fmt.Sprintf("orphan tmp sweep: read %s: %v", tmpDir, err))
+		return
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		const prefix = "ind-"
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		idStr := strings.TrimPrefix(name, prefix)
+		id, parseErr := strconv.ParseInt(idStr, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		if _, ok := keep[id]; ok {
+			continue
+		}
+		if rmErr := os.Remove(filepath.Join(tmpDir, name)); rmErr != nil {
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("orphan tmp sweep: remove %s: %v", name, rmErr))
+		}
+	}
 }

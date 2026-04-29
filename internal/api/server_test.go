@@ -788,3 +788,65 @@ func TestRestoreTriggerWithoutStorage(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestRestoreSyncStatus_NotConfigured(t *testing.T) {
+	// newTestServer doesn't wire Deps.SyncRestoreStatus, so the handler
+	// should respond 503 with a friendly message that the UI can render.
+	ts, _ := newTestServer(t)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/sync-status", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status=%d want 503", resp.StatusCode)
+	}
+}
+
+func TestRestoreSyncStatus_OK(t *testing.T) {
+	ts, deps := newTestServer(t)
+	calls := 0
+	deps.SyncRestoreStatus = func(_ context.Context) (int, error) {
+		calls++
+		return 7, nil
+	}
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/sync-status", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var got struct{ Processed int }
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Processed != 7 {
+		t.Errorf("processed=%d want 7", got.Processed)
+	}
+	if calls != 1 {
+		t.Errorf("calls=%d want 1", calls)
+	}
+}
+
+func TestRestoreSyncStatus_DrainError(t *testing.T) {
+	ts, deps := newTestServer(t)
+	deps.SyncRestoreStatus = func(_ context.Context) (int, error) {
+		return 0, errors.New("boom")
+	}
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/sync-status", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status=%d want 500", resp.StatusCode)
+	}
+}

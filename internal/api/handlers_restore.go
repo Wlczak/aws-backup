@@ -211,3 +211,21 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
 }
+
+// handleRestoreSyncStatus drains the configured SQS queue of pending S3
+// Glacier restore events and applies them to the DB. Returns the number
+// of messages processed. 503 when SQS isn't configured so the UI can
+// surface that as a friendly "no queue configured" message.
+func (s *Server) handleRestoreSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if s.deps.SyncRestoreStatus == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			fmt.Errorf("SQS restore consumer is not configured (set sqs.queue_url in config)"))
+		return
+	}
+	processed, err := s.deps.SyncRestoreStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("sync restore status: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"processed": processed})
+}

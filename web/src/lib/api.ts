@@ -259,6 +259,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths, target_dir: targetDir }),
     }),
+  restoreSyncStatus: () =>
+    request<{ processed: number }>('/api/restore/sync-status', {
+      method: 'POST',
+    }),
 };
 
 // subscribeEvents opens a live EventSource against /api/events. Returns
