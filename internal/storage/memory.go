@@ -47,15 +47,37 @@ func (m *MemStorage) PutStandard(ctx context.Context, key string, body io.Reader
 // PutIfAbsent fails with ErrAlreadyExists when key is already populated;
 // otherwise behaves like Put. Mirrors S3's IfNoneMatch="*" precondition
 // for tests that exercise the engine's collision-detection path. (#116)
-func (m *MemStorage) PutIfAbsent(ctx context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+//
+// Read the body before locking so the lock window stays short, then
+// hold the mutex across both the existence check and the insert so two
+// concurrent callers cannot both observe "absent" and both succeed —
+// real S3 IfNoneMatch is atomic; the fake must be too. (#150)
+func (m *MemStorage) PutIfAbsent(_ context.Context, key string, body io.Reader, _ int64) (PutResult, error) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return PutResult{}, err
+	}
+	sum := sha256.Sum256(buf)
+	sumHex := hex.EncodeToString(sum[:])
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, exists := m.objects[key]; exists {
-		m.mu.Unlock()
-		_, _ = io.Copy(io.Discard, body)
 		return PutResult{}, ErrAlreadyExists
 	}
-	m.mu.Unlock()
-	return m.put(ctx, key, body, "DEEP_ARCHIVE")
+	m.objects[key] = memObject{
+		data:           buf,
+		etag:           sumHex[:32],
+		storageClass:   "DEEP_ARCHIVE",
+		checksumSHA256: sumHex,
+		lastModified:   time.Now().UTC(),
+	}
+	return PutResult{
+		Key:            key,
+		ETag:           fmt.Sprintf("%q", sumHex[:32]),
+		ChecksumSHA256: sumHex,
+		Size:           int64(len(buf)),
+	}, nil
 }
 
 func (m *MemStorage) put(ctx context.Context, key string, body io.Reader, class string) (PutResult, error) {
