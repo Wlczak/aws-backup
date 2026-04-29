@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +58,7 @@ func NewSMB(cfg SMBConfig) (*SMB, error) {
 		cfg.DialTimeout = 10 * time.Second
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	conn, err := net.DialTimeout("tcp", addr, cfg.DialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("smb dial %s: %w", addr, err)
