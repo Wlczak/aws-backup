@@ -265,7 +265,7 @@ func (s *SMB) reconnectLocked(ctx context.Context) error {
 		s.conn = nil
 	}
 
-	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	addr := net.JoinHostPort(s.cfg.Host, strconv.Itoa(s.cfg.Port))
 	dialer := &net.Dialer{Timeout: s.cfg.DialTimeout}
 	newConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {

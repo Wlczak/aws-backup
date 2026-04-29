@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,6 +224,42 @@ func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	if deps.Config.S3.Bucket != origBucket {
 		t.Errorf("live config changed despite apply failure: got %q", deps.Config.S3.Bucket)
 	}
+}
+
+// TestSettingsConfigSharedMutex verifies that the optional Deps.ConfigMu
+// is honoured by both snapshotConfig and updateConfig — when set, both
+// operations should serialise on the supplied mutex so cmd-side and
+// api-side writers can't race on the shared *config.Config struct
+// (#153). Hammered concurrently with -race.
+func TestSettingsConfigSharedMutex(t *testing.T) {
+	cfg := config.Default()
+	cfg.Source.LocalDir.Root = t.TempDir()
+	var mu sync.RWMutex
+	srv := &Server{deps: Deps{
+		Config:   &cfg,
+		ConfigMu: &mu,
+	}}
+	if got := srv.cfgMutex(); got != &mu {
+		t.Fatalf("cfgMutex did not return shared mutex")
+	}
+	const N = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < N; i++ {
+			c := config.Default()
+			c.S3.Bucket = "b" + strconv.Itoa(i)
+			srv.updateConfig(c)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < N; i++ {
+			_, _ = srv.snapshotConfig()
+		}
+	}()
+	wg.Wait()
 }
 
 func TestSettingsPutInvalidRejected(t *testing.T) {
