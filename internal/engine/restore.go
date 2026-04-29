@@ -31,6 +31,10 @@ type RestoreOptions struct {
 	// "photos" selects every file under "photos/". "/" or "" selects
 	// everything. Unknown paths come back in RestoreStats.Skipped.
 	Paths []string
+	// TmpDir is where downloaded zip archives are staged before extraction.
+	// Empty falls back to os.TempDir(); set this to the configured backup
+	// TmpDir so multi-GB restores don't exhaust a small /tmp tmpfs. (#74)
+	TmpDir string
 }
 
 // RestoreStats summarizes the outcome of RestoreToDir. Errors are
@@ -85,6 +89,9 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 
 	const pageSize = 1000
 	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
 		rows, _, err := opts.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
 		if err != nil {
 			return stats, fmt.Errorf("list files: %w", err)
@@ -185,7 +192,7 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File) (written, bytes int64, errs []string) {
 	key := pathutil.JoinKey(opts.KeyPrefix, zipName)
 
-	tmp, err := os.CreateTemp("", "aws-backup-restore-*.zip")
+	tmp, err := os.CreateTemp(opts.TmpDir, "aws-backup-restore-*.zip")
 	if err != nil {
 		errs = append(errs, zipName+": create temp: "+err.Error())
 		return

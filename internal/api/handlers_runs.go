@@ -51,6 +51,9 @@ func toSummary(r db.Run) runSummary {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	page := intParam(r, "page", 1)
 	limit := intParam(r, "limit", 20)
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
 	runs, total, err := s.deps.DB.ListRuns(r.Context(), page, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -385,6 +388,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// maxPageLimit caps the per-request `limit` query parameter so a caller
+// can't force the DB to materialize and the encoder to serialize huge
+// result sets via `?limit=2147483647`. (#65)
+const maxPageLimit = 1000
 
 func intParam(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)

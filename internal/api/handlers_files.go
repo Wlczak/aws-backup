@@ -38,6 +38,9 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	all := q.Get("all") == "true" || q.Get("all") == "1"
 	page := intParam(r, "page", 1)
 	limit := intParam(r, "limit", 50)
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
 	files, total, err := s.deps.DB.ListFiles(r.Context(), db.FilesFilter{
 		Status: q.Get("status"),
 		Search: q.Get("search"),
