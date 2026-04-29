@@ -189,12 +189,17 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var tmpDir string
+	if cfg, ok := s.snapshotConfig(); ok {
+		tmpDir = cfg.Backup.TmpDir
+	}
 	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
 		DB:        s.deps.DB,
 		Storage:   st,
 		KeyPrefix: s.storagePrefix(),
 		TargetDir: req.TargetDir,
 		Paths:     req.Paths,
+		TmpDir:    tmpDir,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

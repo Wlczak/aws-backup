@@ -13,14 +13,16 @@ all: build
 build: web build-go
 
 # Go-only build; assumes web/dist is already populated.
+# -trimpath strips absolute developer paths from panics and DWARF metadata
+# and makes builds reproducible across machines. (#80)
 build-go:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
 
 build-linux: web
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 $(CMD)
+	GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 $(CMD)
 
 build-windows: web
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-windows-amd64.exe $(CMD)
+	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY)-windows-amd64.exe $(CMD)
 
 # Build the SPA into web/dist/.
 web: web/dist/index.html
