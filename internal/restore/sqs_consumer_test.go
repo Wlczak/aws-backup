@@ -25,7 +25,7 @@ const sampleCompletedBody = `{
 const sampleDirectS3Body = `{"Records":[{"eventName":"ObjectRestore:Post","s3":{"object":{"key":"k1"}}}]}`
 
 func TestParseSNSEnvelope_Post(t *testing.T) {
-	recs, err := parseSNSEnvelope(samplePostBody)
+	recs, _, err := parseSNSEnvelope(samplePostBody)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestParseSNSEnvelope_Post(t *testing.T) {
 }
 
 func TestParseSNSEnvelope_Completed(t *testing.T) {
-	recs, err := parseSNSEnvelope(sampleCompletedBody)
+	recs, _, err := parseSNSEnvelope(sampleCompletedBody)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestParseSNSEnvelope_Completed(t *testing.T) {
 }
 
 func TestParseSNSEnvelope_DirectS3(t *testing.T) {
-	recs, err := parseSNSEnvelope(sampleDirectS3Body)
+	recs, _, err := parseSNSEnvelope(sampleDirectS3Body)
 	if err != nil {
 		t.Fatalf("parse direct: %v", err)
 	}
@@ -71,13 +71,13 @@ func TestParseSNSEnvelope_DirectS3(t *testing.T) {
 }
 
 func TestParseSNSEnvelope_Empty(t *testing.T) {
-	if _, err := parseSNSEnvelope(""); err == nil {
+	if _, _, err := parseSNSEnvelope(""); err == nil {
 		t.Fatal("expected error on empty body")
 	}
 }
 
 func TestParseSNSEnvelope_Garbage(t *testing.T) {
-	if _, err := parseSNSEnvelope("not json"); err == nil {
+	if _, _, err := parseSNSEnvelope("not json"); err == nil {
 		t.Fatal("expected error on garbage body")
 	}
 }
@@ -181,6 +181,23 @@ func TestHandleMessage_DBErrorKeepsMessage(t *testing.T) {
 	})
 	if len(sq.deleted) != 0 {
 		t.Errorf("must not delete on DB error: %v", sq.deleted)
+	}
+}
+
+func TestHandleMessage_SubscriptionConfirmationDeleted(t *testing.T) {
+	upd := &fakeUpdater{}
+	sq := &fakeSQS{}
+	c := newTestConsumer(upd, sq)
+	body := `{"Type":"SubscriptionConfirmation","Message":"You have chosen to subscribe..."}`
+	c.handleMessage(context.Background(), sqstypes.Message{
+		Body:          aws.String(body),
+		ReceiptHandle: aws.String("rh-sub"),
+	})
+	if len(sq.deleted) != 1 || sq.deleted[0] != "rh-sub" {
+		t.Errorf("control message should be deleted to stop redelivery: %v", sq.deleted)
+	}
+	if len(upd.inProgress) != 0 || len(upd.restored) != 0 {
+		t.Error("no DB writes expected for control message")
 	}
 }
 

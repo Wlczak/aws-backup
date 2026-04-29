@@ -143,12 +143,19 @@ func (c *Consumer) handleMessage(ctx context.Context, msg sqstypes.Message) {
 	if msg.Body != nil {
 		body = *msg.Body
 	}
-	records, err := parseSNSEnvelope(body)
+	records, skip, err := parseSNSEnvelope(body)
 	if err != nil {
 		c.logger.Warn("sqs message parse failed", "err", err)
 		// Malformed messages will keep redelivering; rely on the queue's
 		// redrive policy / DLQ to drain them. Don't delete blindly.
 		return
+	}
+	// SNS control envelopes (SubscriptionConfirmation,
+	// UnsubscribeConfirmation) carry no S3 records but must still be
+	// deleted, otherwise they redeliver every visibility-timeout interval
+	// and accumulate forever. (#146)
+	if skip {
+		c.logger.Info("sqs control message acknowledged")
 	}
 	allOK := true
 	for _, rec := range records {
@@ -209,26 +216,35 @@ type restoreRecord struct {
 }
 
 // parseSNSEnvelope unwraps the SNS notification, decodes the inner S3
-// event, and returns one restoreRecord per Records[] entry.
-func parseSNSEnvelope(body string) ([]restoreRecord, error) {
+// event, and returns one restoreRecord per Records[] entry. The skip
+// return is true when the envelope is a benign SNS control message
+// (SubscriptionConfirmation / UnsubscribeConfirmation) — the caller
+// should delete it from the queue without applying any records. (#146)
+func parseSNSEnvelope(body string) (records []restoreRecord, skip bool, err error) {
 	if body == "" {
-		return nil, errors.New("empty body")
+		return nil, false, errors.New("empty body")
 	}
 	var env struct {
 		Type    string `json:"Type"`
 		Message string `json:"Message"`
 	}
 	if err := json.Unmarshal([]byte(body), &env); err != nil {
-		return nil, fmt.Errorf("sns envelope: %w", err)
+		return nil, false, fmt.Errorf("sns envelope: %w", err)
 	}
-	// SNS messages always have Type="Notification". If the field is
-	// missing, assume the queue is wired directly to S3 (no SNS hop)
+	switch env.Type {
+	case "SubscriptionConfirmation", "UnsubscribeConfirmation":
+		// Control messages: drop them silently so they don't redeliver.
+		return nil, true, nil
+	}
+	// SNS Notification messages have Type="Notification". If the field
+	// is missing, assume the queue is wired directly to S3 (no SNS hop)
 	// and treat the whole body as the S3 event payload.
 	inner := env.Message
 	if env.Type == "" {
 		inner = body
 	}
-	return parseS3EventPayload(inner)
+	recs, err := parseS3EventPayload(inner)
+	return recs, false, err
 }
 
 func parseS3EventPayload(payload string) ([]restoreRecord, error) {
