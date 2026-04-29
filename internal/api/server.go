@@ -45,6 +45,14 @@ type Deps struct {
 	// after the user changed config. (#131)
 	Storage       func() storage.Storage
 	StoragePrefix string
+	// ConfigMu, when non-nil, is the RWMutex used for snapshotConfig and
+	// updateConfig instead of the server's internal cfgMu. The CLI sets
+	// this to its appState mutex so config reads/writes from cmd-side
+	// goroutines (applySettings, buildEngine, syncDBToS3) and api-side
+	// handlers serialise on a single mutex — without it, both sides
+	// mutate the same config.Config struct under different mutexes,
+	// which is a textbook race. (#153)
+	ConfigMu *sync.RWMutex
 	// SyncDBToS3, when non-nil, is called after a backup run when the user
 	// either let it complete, clicked Stop, or clicked Cancel. The reason
 	// argument ("complete" | "stop" | "cancel") lets the implementation
@@ -102,12 +110,25 @@ type Server struct {
 	statsExpiry time.Time
 }
 
+// cfgMutex returns the RWMutex used to serialise config reads/writes.
+// Prefers Deps.ConfigMu (shared with the CLI's appState) when set so
+// cmd-side and api-side mutations agree on the same lock; otherwise
+// falls back to the server-private cfgMu, which keeps standalone tests
+// working without forcing them to wire up a shared mutex. (#153)
+func (s *Server) cfgMutex() *sync.RWMutex {
+	if s.deps.ConfigMu != nil {
+		return s.deps.ConfigMu
+	}
+	return &s.cfgMu
+}
+
 // snapshotConfig returns a copy of the live config, plus a "loaded" flag.
 // Callers should never share the returned value across the lock; mutate-
 // then-write paths must use updateConfig.
 func (s *Server) snapshotConfig() (config.Config, bool) {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
+	mu := s.cfgMutex()
+	mu.RLock()
+	defer mu.RUnlock()
 	if s.deps.Config == nil {
 		return config.Config{}, false
 	}
@@ -116,8 +137,9 @@ func (s *Server) snapshotConfig() (config.Config, bool) {
 
 // storagePrefix returns the live S3 key prefix.
 func (s *Server) storagePrefix() string {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
+	mu := s.cfgMutex()
+	mu.RLock()
+	defer mu.RUnlock()
 	return s.deps.StoragePrefix
 }
 
@@ -135,8 +157,9 @@ func (s *Server) storage() storage.Storage {
 // updateConfig atomically replaces both deps.Config (pointee) and
 // deps.StoragePrefix so concurrent readers always see a consistent pair.
 func (s *Server) updateConfig(c config.Config) {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
+	mu := s.cfgMutex()
+	mu.Lock()
+	defer mu.Unlock()
 	if s.deps.Config != nil {
 		*s.deps.Config = c
 	}
@@ -146,8 +169,9 @@ func (s *Server) updateConfig(c config.Config) {
 // setStoragePrefix is the rollback-only path for handlePutSettings; updateConfig
 // covers the success path.
 func (s *Server) setStoragePrefix(p string) {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
+	mu := s.cfgMutex()
+	mu.Lock()
+	defer mu.Unlock()
 	s.deps.StoragePrefix = p
 }
 
