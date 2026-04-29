@@ -241,9 +241,20 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err
 			}
+			// SQLite returns "interrupted (9)" when GORM passes a
+			// cancelled ctx to an in-flight statement; that error
+			// doesn't unwrap to context.Canceled, so a user cancel
+			// would be misclassified as RunFailed without this check.
+			// (#155)
+			if cerr := ctx.Err(); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, fmt.Errorf("scan: %w", err)
 		}
 		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, 0, 0); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, err
 		}
 		e.emit(Event{
@@ -271,6 +282,14 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	classify := func(stage string, err error) (string, error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return db.RunCancelled, err
+		}
+		// SQLite returns "interrupted (9)" when GORM passes a
+		// cancelled ctx to an in-flight statement; that error
+		// doesn't unwrap to context.Canceled, so a user cancel
+		// would be misclassified as RunFailed without this check.
+		// (#155)
+		if cerr := ctx.Err(); cerr != nil {
+			return db.RunCancelled, cerr
 		}
 		return db.RunFailed, fmt.Errorf("%s: %w", stage, err)
 	}
