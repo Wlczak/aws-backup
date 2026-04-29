@@ -449,7 +449,7 @@ func TestMaybeSyncDBToS3(t *testing.T) {
 		want      *call // nil = expect no sync
 	}{
 		{name: "stop triggers sync", mode: engine.RunModeFull, runErr: nil, stopReq: true, want: &call{runID: 7, reason: "stop"}},
-		{name: "cancel triggers sync", mode: engine.RunModeFull, runErr: context.Canceled, cancelReq: true, want: &call{runID: 7, reason: "cancel"}},
+		{name: "force-cancel skips sync", mode: engine.RunModeFull, runErr: context.Canceled, cancelReq: true, want: nil},
 		{name: "completion triggers sync", mode: engine.RunModeFull, runErr: nil, want: &call{runID: 7, reason: "complete"}},
 		{name: "upload-mode completion triggers sync", mode: engine.RunModeUpload, runErr: nil, want: &call{runID: 7, reason: "complete"}},
 		{name: "scan-mode completion skips sync", mode: engine.RunModeScan, runErr: nil, want: nil},
