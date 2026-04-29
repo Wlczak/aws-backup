@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -84,7 +86,12 @@ func main() {
 // src, store, and sched are guarded by mu because /api/settings can
 // hot-swap them while a run is in flight.
 type appState struct {
-	mu      sync.Mutex
+	// mu is an RWMutex (not Mutex) so the API server can share it via
+	// Deps.ConfigMu — that way cmd-side cfg writes (applySettings) and
+	// api-side cfg writes (Server.updateConfig) serialise on a single
+	// lock instead of racing across two. RWMutex.Lock semantics are
+	// identical to Mutex.Lock for the existing call sites. (#153)
+	mu      sync.RWMutex
 	cfg     config.Config
 	cfgPath string
 	db      *db.DB
@@ -628,6 +635,7 @@ func runServe(cfgPath string) {
 		BuildEngine:       app.buildEngine,
 		Storage:           app.liveStorage,
 		StoragePrefix:     app.cfg.S3.KeyPrefix,
+		ConfigMu:          &app.mu,
 		SyncDBToS3:        app.syncDBToS3,
 		SyncRestoreStatus: app.syncRestoreStatus(),
 		ApplySettings: func(prev, next config.Config) error {
@@ -670,7 +678,7 @@ func runServe(cfgPath string) {
 		go func() { _ = app.sqsConsumer.Run(ctx) }()
 	}
 
-	addr := fmt.Sprintf("%s:%d", app.cfg.Server.Host, app.cfg.Server.Port)
+	addr := net.JoinHostPort(app.cfg.Server.Host, strconv.Itoa(app.cfg.Server.Port))
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Router(),
