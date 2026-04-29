@@ -170,7 +170,10 @@ func TestSettingsPutInvokesApplySettings(t *testing.T) {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := ts.Client().Do(req)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("PUT /api/settings: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		d, _ := io.ReadAll(resp.Body)
