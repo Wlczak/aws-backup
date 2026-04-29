@@ -122,9 +122,17 @@ export interface BackupConfig {
   pipeline_queue: number;
 }
 export interface ServerConfig { host: string; port: number }
+export interface SQSConfig {
+  queue_url: string;
+  region: string;
+  wait_time_seconds: number;
+  visibility_timeout: number;
+  max_messages: number;
+}
 export interface Config {
   source: SourceConfig;
   s3: S3Config;
+  sqs: SQSConfig;
   backup: BackupConfig;
   server: ServerConfig;
 }
