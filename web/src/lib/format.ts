@@ -36,13 +36,40 @@ export function statusBadge(status: string): 'ok' | 'warn' | 'err' | 'running' {
   switch (status) {
     case 'completed':
     case 'uploaded':
+    case 'restored':
       return 'ok';
     case 'failed':
     case 'missing':
       return 'err';
     case 'running':
+    case 'in_progress':
       return 'running';
     default:
       return 'warn';
   }
+}
+
+// restoreLabel maps the raw db enum to a human-readable badge label.
+export function restoreLabel(s?: string): string {
+  switch (s) {
+    case 'in_progress': return 'restoring';
+    case 'restored': return 'restored';
+    default: return '';
+  }
+}
+
+// expiresIn renders a Glacier restored-copy expiry as "in 3d", "in 4h",
+// or "expired" once it slips into the past.
+export function expiresIn(iso?: string): string {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const diff = t - Date.now();
+  if (diff <= 0) return 'expired';
+  const min = Math.round(diff / 60000);
+  if (min < 60) return `in ${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `in ${hr}h`;
+  const day = Math.round(hr / 24);
+  return `in ${day}d`;
 }

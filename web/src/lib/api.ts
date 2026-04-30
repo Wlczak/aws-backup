@@ -3,6 +3,7 @@
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
+export type RestoreStatus = '' | 'in_progress' | 'restored';
 
 export interface Run {
   id: number;
@@ -33,6 +34,8 @@ export interface FileRow {
   s3_key?: string;
   uploaded_at?: string;
   last_seen_at: string;
+  restore_status?: RestoreStatus;
+  restore_expires_at?: string;
 }
 
 export interface FilesPage {
@@ -56,6 +59,8 @@ export interface RunDetail {
 
 export interface FileStats {
   by_status: Record<string, number>;
+  by_restore_status: Record<string, number>;
+  restore_soonest_expires_at?: string;
   total_count: number;
   total_size: number;
 }

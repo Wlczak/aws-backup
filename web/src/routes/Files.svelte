@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type FilesPage, type FileRow } from '../lib/api';
-  import { bytes, formatDate } from '../lib/format';
+  import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import { selection, toggle, clear, ids, paths } from '../lib/selection';
   import { go } from '../lib/router';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -316,6 +316,7 @@
           <th>Size</th>
           <th>Modified</th>
           <th>Status</th>
+          <th>Restore</th>
           <th>Zip</th>
           <th>Uploaded</th>
           <th class="actions-col"></th>
@@ -337,6 +338,14 @@
               <td class="mono" onclick={() => (detail = f)}>{bytes(f.size)}</td>
               <td onclick={() => (detail = f)}>{formatDate(f.mtime)}</td>
               <td onclick={() => (detail = f)}><StatusBadge status={f.status} /></td>
+              <td onclick={() => (detail = f)}>
+                {#if f.restore_status}
+                  <StatusBadge status={restoreLabel(f.restore_status)} />
+                  {#if f.restore_status === 'restored' && f.restore_expires_at}
+                    <span class="muted small">· expires {expiresIn(f.restore_expires_at)}</span>
+                  {/if}
+                {/if}
+              </td>
               <td class="mono muted" onclick={() => (detail = f)}>{f.zip_name ?? ''}</td>
               <td onclick={() => (detail = f)}>{f.uploaded_at ? formatDate(f.uploaded_at) : '—'}</td>
               <td class="actions-col">
@@ -348,7 +357,7 @@
             </tr>
           {/each}
           {#if data.files.length === 0}
-            <tr><td colspan="8" class="muted" style="text-align: center; padding: 1.5rem">No files match</td></tr>
+            <tr><td colspan="9" class="muted" style="text-align: center; padding: 1.5rem">No files match</td></tr>
           {/if}
         {/if}
       </tbody>
@@ -373,6 +382,17 @@
     {#if detail.s3_key}<div class="row"><span class="label">S3 key</span><span class="mono">{detail.s3_key}</span></div>{/if}
     {#if detail.zip_name}<div class="row"><span class="label">Zip</span><span class="mono">{detail.zip_name}</span></div>{/if}
     {#if detail.uploaded_at}<div class="row"><span class="label">Uploaded at</span><span>{formatDate(detail.uploaded_at)}</span></div>{/if}
+    {#if detail.restore_status}
+      <div class="row">
+        <span class="label">Restore</span>
+        <span>
+          <StatusBadge status={restoreLabel(detail.restore_status)} />
+          {#if detail.restore_status === 'restored' && detail.restore_expires_at}
+            <span class="muted">expires {formatDate(detail.restore_expires_at)} ({expiresIn(detail.restore_expires_at)})</span>
+          {/if}
+        </span>
+      </div>
+    {/if}
     <button onclick={() => (detail = null)} type="button" style="margin-top: 0.5rem">Close</button>
   </div>
 {/if}
@@ -423,4 +443,5 @@
   }
   .viewswitch button + button { border-left: 1px solid var(--border); }
   .empty { padding: 1.5rem; text-align: center; }
+  .small { font-size: 0.78rem; margin-left: 0.3rem; }
 </style>

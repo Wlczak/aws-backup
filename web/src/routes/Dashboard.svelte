@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { api, subscribeEvents, type Status, type FileStats } from '../lib/api';
-  import { bytes, formatDate, relativeTime } from '../lib/format';
+  import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import StatusBadge from '../components/StatusBadge.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
 
@@ -298,6 +298,25 @@
     zip_indexes_consumed: number;
   } | null>(null);
 
+  let syncingRestore = $state(false);
+  let restoreSyncInfo = $state('');
+  async function syncRestore() {
+    syncingRestore = true;
+    restoreSyncInfo = '';
+    err = '';
+    try {
+      const r = await api.restoreSyncStatus();
+      restoreSyncInfo = r.processed === 0
+        ? 'No new restore events.'
+        : `Processed ${r.processed} restore event(s).`;
+      await refresh();
+    } catch (e) {
+      err = String(e);
+    } finally {
+      syncingRestore = false;
+    }
+  }
+
   let purging = $state(false);
   async function purgeMissing() {
     purging = true;
@@ -526,6 +545,38 @@
         Full sync
       </button>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Glacier restores</div>
+    {#if stats}
+      {@const inProg = stats.by_restore_status?.['in_progress'] ?? 0}
+      {@const restored = stats.by_restore_status?.['restored'] ?? 0}
+      {#if inProg === 0 && restored === 0}
+        <div class="big muted">None</div>
+        <div class="muted small">No files have a Glacier restore in flight.</div>
+      {:else}
+        <div class="big">{(inProg + restored).toLocaleString()} file(s)</div>
+        <div class="pills">
+          {#if inProg > 0}<span class="pill"><StatusBadge status="in_progress" /> {inProg.toLocaleString()}</span>{/if}
+          {#if restored > 0}<span class="pill"><StatusBadge status="restored" /> {restored.toLocaleString()}</span>{/if}
+        </div>
+        {#if stats.restore_soonest_expires_at}
+          <div class="muted small" style="margin-top: 0.4rem"
+               title={stats.restore_soonest_expires_at}>
+            soonest expires {expiresIn(stats.restore_soonest_expires_at)}
+            ({formatDate(stats.restore_soonest_expires_at)})
+          </div>
+        {/if}
+      {/if}
+      {#if restoreSyncInfo}<div class="sync-info" style="margin-top: 0.5rem">{restoreSyncInfo}</div>{/if}
+      <div class="run-actions">
+        <button onclick={syncRestore} type="button" disabled={syncingRestore}
+                title="Drain SQS now instead of waiting on the background poll">
+          {syncingRestore ? 'Syncing…' : 'Sync restore status'}
+        </button>
+      </div>
+    {/if}
   </div>
 </div>
 

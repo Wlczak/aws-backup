@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -339,14 +340,16 @@ func (db *DB) ListFiles(ctx context.Context, f FilesFilter) ([]File, int64, erro
 
 // FileStats is the aggregate view for the dashboard.
 type FileStats struct {
-	ByStatus   map[string]int64
-	TotalSize  int64
-	TotalCount int64
+	ByStatus          map[string]int64
+	ByRestoreStatus   map[string]int64
+	RestoreSoonestExp *time.Time
+	TotalSize         int64
+	TotalCount        int64
 }
 
 // Stats returns per-status counts plus total size/count across the index.
 func (db *DB) Stats(ctx context.Context) (FileStats, error) {
-	s := FileStats{ByStatus: map[string]int64{}}
+	s := FileStats{ByStatus: map[string]int64{}, ByRestoreStatus: map[string]int64{}}
 
 	var rows []struct {
 		Status string
@@ -361,6 +364,35 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	for _, r := range rows {
 		s.ByStatus[r.Status] = r.Count
 		s.TotalCount += r.Count
+	}
+
+	var rrows []struct {
+		RestoreStatus string
+		Count         int64
+	}
+	if err := db.g.WithContext(ctx).Model(&File{}).
+		Select("restore_status, COUNT(*) as count").
+		Where("restore_status != ''").
+		Group("restore_status").
+		Scan(&rrows).Error; err != nil {
+		return s, err
+	}
+	for _, r := range rrows {
+		s.ByRestoreStatus[r.RestoreStatus] = r.Count
+	}
+
+	// Soonest expiry across rows that are still in the restored window —
+	// surfaces "your restored copies expire on …" on the dashboard.
+	var soonest sql.NullTime
+	if err := db.g.WithContext(ctx).Model(&File{}).
+		Select("MIN(restore_expires_at)").
+		Where("restore_status = ? AND restore_expires_at IS NOT NULL AND restore_expires_at > ?", RestoreStatusRestored, time.Now()).
+		Scan(&soonest).Error; err != nil {
+		return s, err
+	}
+	if soonest.Valid {
+		t := soonest.Time
+		s.RestoreSoonestExp = &t
 	}
 
 	if err := db.g.WithContext(ctx).Model(&File{}).
@@ -568,8 +600,8 @@ func (db *DB) MarkRestored(ctx context.Context, s3Key string, expiresAt time.Tim
 	result := db.g.WithContext(ctx).Model(&File{}).
 		Where("s3_key = ?", s3Key).
 		Updates(map[string]any{
-			"restore_status":      RestoreStatusRestored,
-			"restore_expires_at":  expiresAt,
+			"restore_status":     RestoreStatusRestored,
+			"restore_expires_at": expiresAt,
 		})
 	return result.RowsAffected, result.Error
 }
@@ -608,4 +640,3 @@ func markPendingByColumn(ctx context.Context, g *gorm.DB, column string, values 
 	})
 	return total, err
 }
-

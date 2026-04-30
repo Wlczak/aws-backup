@@ -21,16 +21,18 @@ type filesListResponse struct {
 }
 
 type fileEntry struct {
-	ID         int64     `json:"id"`
-	Path       string    `json:"path"`
-	Size       int64     `json:"size"`
-	MTime      time.Time `json:"mtime"`
-	MD5        string    `json:"md5,omitempty"`
-	Status     string    `json:"status"`
-	ZipName    string    `json:"zip_name,omitempty"`
-	S3Key      string    `json:"s3_key,omitempty"`
-	UploadedAt time.Time `json:"uploaded_at,omitempty"`
-	LastSeenAt time.Time `json:"last_seen_at"`
+	ID               int64      `json:"id"`
+	Path             string     `json:"path"`
+	Size             int64      `json:"size"`
+	MTime            time.Time  `json:"mtime"`
+	MD5              string     `json:"md5,omitempty"`
+	Status           string     `json:"status"`
+	ZipName          string     `json:"zip_name,omitempty"`
+	S3Key            string     `json:"s3_key,omitempty"`
+	UploadedAt       time.Time  `json:"uploaded_at,omitempty"`
+	LastSeenAt       time.Time  `json:"last_seen_at"`
+	RestoreStatus    string     `json:"restore_status,omitempty"`
+	RestoreExpiresAt *time.Time `json:"restore_expires_at,omitempty"`
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +60,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
 			Status: f.Status, ZipName: f.ZipName, S3Key: f.S3Key,
 			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
+			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
 		})
 	}
 	if all {
@@ -74,9 +77,11 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 type fileStatsResponse struct {
-	ByStatus   map[string]int64 `json:"by_status"`
-	TotalCount int64            `json:"total_count"`
-	TotalSize  int64            `json:"total_size"`
+	ByStatus            map[string]int64 `json:"by_status"`
+	ByRestoreStatus     map[string]int64 `json:"by_restore_status"`
+	RestoreSoonestExpAt *time.Time       `json:"restore_soonest_expires_at,omitempty"`
+	TotalCount          int64            `json:"total_count"`
+	TotalSize           int64            `json:"total_size"`
 }
 
 func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +91,11 @@ func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fileStatsResponse{
-		ByStatus: st.ByStatus, TotalCount: st.TotalCount, TotalSize: st.TotalSize,
+		ByStatus:            st.ByStatus,
+		ByRestoreStatus:     st.ByRestoreStatus,
+		RestoreSoonestExpAt: st.RestoreSoonestExp,
+		TotalCount:          st.TotalCount,
+		TotalSize:           st.TotalSize,
 	})
 }
 

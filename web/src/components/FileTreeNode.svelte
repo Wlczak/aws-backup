@@ -2,7 +2,7 @@
   import type { TreeNode } from '../lib/tree';
   import { collectFiles } from '../lib/tree';
   import type { FileRow } from '../lib/api';
-  import { bytes, formatDate } from '../lib/format';
+  import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import StatusBadge from './StatusBadge.svelte';
   import Self from './FileTreeNode.svelte';
 
@@ -104,6 +104,12 @@
     <span class="meta mono muted">{bytes(f.size)}</span>
     <span class="meta muted">{formatDate(f.mtime)}</span>
     <StatusBadge status={f.status} />
+    {#if f.restore_status}
+      <StatusBadge status={restoreLabel(f.restore_status)} />
+      {#if f.restore_status === 'restored' && f.restore_expires_at}
+        <span class="meta muted small" title={f.restore_expires_at}>{expiresIn(f.restore_expires_at)}</span>
+      {/if}
+    {/if}
     <span class="actions">
       {#if f.status === 'failed' || f.status === 'missing'}
         <button
@@ -167,4 +173,5 @@
   .row-action { padding: 0.15rem 0.4rem; font-size: 0.85rem; line-height: 1; }
   .row-action.danger { border-color: var(--err); color: var(--err); }
   .row-action.danger:hover:not(:disabled) { background: rgba(239, 80, 80, 0.1); }
+  .small { font-size: 0.7rem; }
 </style>
