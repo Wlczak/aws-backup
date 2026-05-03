@@ -21,7 +21,7 @@
     <nav>
       {#each tabs as t}
         <button
-          class:active={$route === t.id}
+          class:active={$route === t.id || $route.startsWith(t.id + '/')}
           on:click={() => go(t.id)}
           type="button"
         >{t.label}</button>
@@ -33,7 +33,7 @@
     {#if $route === 'dashboard'}<Dashboard />
     {:else if $route === 'files' || $route === 'index'}<Files />
     {:else if $route === 'logs'}<Logs />
-    {:else if $route === 'settings'}<Settings />
+    {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />
     {:else}<p class="muted">Unknown route: {$route}</p>
     {/if}
