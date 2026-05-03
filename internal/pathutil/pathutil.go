@@ -1,3 +1,7 @@
+// Package pathutil holds canonical path helpers shared by the engine,
+// API, and storage layer. Centralised so that prefix matching, S3 list
+// prefix normalisation, and key joining behave identically everywhere
+// — historically this was duplicated across packages and drifted (#44).
 package pathutil
 
 import "strings"

@@ -1,0 +1,70 @@
+# HTTP API + SSE
+
+Routes mounted in `internal/api/server.go`. JSON over HTTP; the SPA at `/` is served from the same port.
+
+## Endpoints
+
+```text
+# Run lifecycle
+GET    /api/status                    current + last run, stop_requested flag
+GET    /api/runs                      paginated list
+GET    /api/runs/{id}                 detail + logs
+POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}
+POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
+POST   /api/runs/{id}/stop            graceful stop between files (#124)
+POST   /api/runs/{id}/continue        clear pending stop request
+
+# File index
+GET    /api/files                     ?status=&search=&page=&limit=&all=
+GET    /api/files/stats               counts by status + restore_status, total size (2s cache)
+POST   /api/files/{id}/retry          mark single file pending
+POST   /api/files/retry               batch: ids[], or all_failed:true, or paths[]
+DELETE /api/files/{id}                delete row (S3 untouched)
+DELETE /api/files                     batch delete by ids[]
+
+# Settings
+GET    /api/settings                  redacted config + pending_apply flag
+PUT    /api/settings                  validate + apply (or queue if a run is in flight)
+
+# Connectivity tests
+GET    /api/smb/test                  dial source per current config
+GET    /api/s3/test                   HeadBucket round-trip
+
+# Restore (Glacier)
+POST   /api/restore/estimate          {paths: []} → cost + wait estimate
+POST   /api/restore/trigger           {paths: []} → initiate S3 batch restore
+POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
+
+# Sync / reconcile
+POST   /api/sync                      existence check; resets DB rows whose S3 keys are missing
+POST   /api/sync/full                 content-level diff via .zip.index.txt sidecars
+POST   /api/sync/delete-cloud-paths   {paths: []} → delete corresponding S3 objects/zips
+
+# Live + SPA
+GET    /api/events                    SSE stream
+GET    /*                             embedded Svelte SPA (hash router fallback to index.html)
+```
+
+`PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
+
+## SSE Event Catalogue
+
+Defined in `internal/engine/events.go`; subscribers attach via `internal/events/bus.go`; HTTP bridge in `internal/api/sse.go`.
+
+| Type | Payload (Data fields) |
+| --- | --- |
+| `run_start` | files_scanned, files_uploaded, bytes_uploaded |
+| `run_log` | level, message — replayed as a burst on SSE reconnect (#130) |
+| `run_complete` | status, files_scanned, files_uploaded, bytes_uploaded, error_message |
+| `scan_progress` | seen, new, changed (#137) |
+| `scan_complete` | seen, new, changed, unchanged, missing |
+| `upload_plan` | total_files, total_groups, total_bytes (#126) |
+| `copy_progress` | file_id, name, bytes_copied, size, percent |
+| `upload_start` | group_id |
+| `upload_progress` | key, bytes_uploaded, size, percent (#123) |
+| `upload_complete` | key, bytes |
+| `upload_failed` | error |
+| `db_sync_start` | reason: complete \| stop \| cancel (#128) |
+| `db_sync_progress` | bytes_synced, total_bytes |
+| `db_sync_complete` | — |
+| `db_sync_failed` | error |
