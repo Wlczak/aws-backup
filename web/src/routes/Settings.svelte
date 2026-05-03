@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type Config } from '../lib/api';
+  import { toast } from '../lib/toast';
   import { route, go } from '../lib/router';
   import SourceSettings from './settings/SourceSettings.svelte';
   import StorageSettings from './settings/StorageSettings.svelte';
@@ -9,8 +10,6 @@
   import ServerSettings from './settings/ServerSettings.svelte';
 
   let cfg = $state<Config | null>(null);
-  let err = $state('');
-  let msg = $state('');
   let saving = $state(false);
   let scheduleHuman = $state('');
 
@@ -37,24 +36,20 @@
     try {
       cfg = (await api.settings()) as Config;
       scheduleHuman = humanize(cfg.backup.schedule);
-      err = '';
-      msg = '';
     } catch (e) {
-      err = String(e);
+      toast.error(`Failed to load settings: ${e}`);
     }
   }
 
   async function save() {
     if (!cfg) return;
     saving = true;
-    err = '';
-    msg = '';
     try {
       cfg = (await api.updateSettings(cfg)) as Config;
       scheduleHuman = humanize(cfg.backup.schedule);
-      msg = 'Saved.';
+      toast.success('Settings saved');
     } catch (e) {
-      err = String(e);
+      toast.error(`Failed to save settings: ${e}`);
     } finally {
       saving = false;
     }
@@ -90,9 +85,6 @@
   {/each}
 </nav>
 
-{#if err}<div class="card err">{err}</div>{/if}
-{#if msg}<div class="card ok">{msg}</div>{/if}
-
 {#if cfg}
   {#if active === 'source'}
     <SourceSettings bind:cfg />
@@ -116,8 +108,6 @@
 
 <style>
   :global(.card h2) { font-size: 1rem; margin: 0 0 0.75rem; }
-  .err { color: var(--err); border-color: var(--err); }
-  .ok { color: var(--ok); border-color: var(--ok); }
   .subnav {
     display: flex;
     gap: 0.25rem;
