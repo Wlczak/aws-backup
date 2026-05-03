@@ -196,18 +196,6 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
 }
 
-// handlePurgeMissingFiles deletes every DB row with status='missing'.
-// These are files that were removed from the local source and have no
-// remaining presence in S3 to restore from.
-func (s *Server) handlePurgeMissingFiles(w http.ResponseWriter, r *http.Request) {
-	n, err := s.deps.DB.PurgeMissingFiles(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
-}
-
 // handleDeleteFiles is the bulk variant. Body: {ids: []}.
 func (s *Server) handleDeleteFiles(w http.ResponseWriter, r *http.Request) {
 	var req idsRequest

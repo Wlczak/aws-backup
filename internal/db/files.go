@@ -435,12 +435,6 @@ func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) 
 	return total, err
 }
 
-// PurgeMissingFiles deletes every row whose status is 'missing'.
-func (db *DB) PurgeMissingFiles(ctx context.Context) (int64, error) {
-	result := db.g.WithContext(ctx).Where("status = ?", StatusMissing).Delete(&File{})
-	return result.RowsAffected, result.Error
-}
-
 // MarkAllFailedPending is the bulk 'retry everything that failed' path.
 func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 	result := db.g.WithContext(ctx).Model(&File{}).Where("status = ?", StatusFailed).Updates(map[string]any{
