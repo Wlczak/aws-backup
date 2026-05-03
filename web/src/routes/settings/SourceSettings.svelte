@@ -1,15 +1,18 @@
 <script lang="ts">
-  import { api, type Config, type TestResult } from '../../lib/api';
+  import { api, type Config } from '../../lib/api';
+  import { toast } from '../../lib/toast';
 
   type Props = { cfg: Config };
   let { cfg = $bindable() }: Props = $props();
 
-  let sourceTest = $state<TestResult | null>(null);
-
   async function testSource() {
-    sourceTest = null;
-    try { sourceTest = await api.testSource(); }
-    catch (e) { sourceTest = { ok: false, message: String(e) }; }
+    try {
+      const r = await api.testSource();
+      if (r.ok) toast.success(r.message ?? 'Source OK');
+      else toast.error(r.message ?? 'Source test failed');
+    } catch (e) {
+      toast.error(`Source test failed: ${e}`);
+    }
   }
 </script>
 
@@ -67,9 +70,5 @@
 
   <div class="row">
     <button onclick={testSource} type="button">Test source</button>
-    {#if sourceTest}
-      <span class="badge {sourceTest.ok ? 'ok' : 'err'}">{sourceTest.ok ? 'ok' : 'fail'}</span>
-      <span class="muted">{sourceTest.message ?? ''}</span>
-    {/if}
   </div>
 </div>

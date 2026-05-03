@@ -5,6 +5,7 @@
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
+  import Toaster from './components/Toaster.svelte';
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -39,6 +40,8 @@
     {/if}
   </main>
 </div>
+
+<Toaster />
 
 <style>
   .shell {
