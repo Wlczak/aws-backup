@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type Config } from '../lib/api';
+  import { toast } from '../lib/toast';
   import { route, go } from '../lib/router';
   import SourceSettings from './settings/SourceSettings.svelte';
   import StorageSettings from './settings/StorageSettings.svelte';
@@ -9,10 +10,9 @@
   import ServerSettings from './settings/ServerSettings.svelte';
 
   let cfg = $state<Config | null>(null);
-  let err = $state('');
-  let msg = $state('');
   let saving = $state(false);
   let scheduleHuman = $state('');
+  let pendingApply = $state(false);
 
   const sections = [
     { id: 'source',  label: 'Source'   },
@@ -35,26 +35,30 @@
 
   async function load() {
     try {
-      cfg = (await api.settings()) as Config;
+      const resp = await api.settings();
+      const { pending_apply, ...rest } = resp;
+      cfg = rest as Config;
+      pendingApply = pending_apply;
       scheduleHuman = humanize(cfg.backup.schedule);
-      err = '';
-      msg = '';
     } catch (e) {
-      err = String(e);
+      toast.error(`Failed to load settings: ${e}`);
     }
   }
 
   async function save() {
     if (!cfg) return;
     saving = true;
-    err = '';
-    msg = '';
     try {
-      cfg = (await api.updateSettings(cfg)) as Config;
+      const resp = await api.updateSettings(cfg);
+      const { pending_apply, ...rest } = resp;
+      cfg = rest as Config;
+      pendingApply = pending_apply;
       scheduleHuman = humanize(cfg.backup.schedule);
-      msg = 'Saved.';
+      toast.success(pending_apply
+        ? 'Saved — will apply when the current backup finishes'
+        : 'Settings saved');
     } catch (e) {
-      err = String(e);
+      toast.error(`Failed to save settings: ${e}`);
     } finally {
       saving = false;
     }
@@ -90,8 +94,11 @@
   {/each}
 </nav>
 
-{#if err}<div class="card err">{err}</div>{/if}
-{#if msg}<div class="card ok">{msg}</div>{/if}
+{#if pendingApply}
+  <div class="banner">
+    Settings saved — will apply when the current backup finishes.
+  </div>
+{/if}
 
 {#if cfg}
   {#if active === 'source'}
@@ -116,8 +123,6 @@
 
 <style>
   :global(.card h2) { font-size: 1rem; margin: 0 0 0.75rem; }
-  .err { color: var(--err); border-color: var(--err); }
-  .ok { color: var(--ok); border-color: var(--ok); }
   .subnav {
     display: flex;
     gap: 0.25rem;
@@ -140,6 +145,15 @@
     color: var(--text);
   }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  .banner {
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid #d29922;
+    border-radius: 4px;
+    background: rgba(210, 153, 34, 0.08);
+    font-size: 0.9rem;
+  }
   :global(.card .row) { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem; flex-wrap: wrap; }
   :global(.card .row-2) {
     display: grid;

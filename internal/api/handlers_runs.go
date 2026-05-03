@@ -204,7 +204,14 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		s.runMu.Lock()
 		s.currentRun = 0
 		s.currentRunCancel = nil
+		// Drain any settings the operator queued mid-run. Apply them
+		// outside the lock so the swap's I/O (closing old source/storage,
+		// dialling new ones) doesn't hold runMu against a concurrent
+		// /api/runs trigger or /api/settings PUT.
+		pending := s.pendingConfig
+		s.pendingConfig = nil
 		s.runMu.Unlock()
+		s.applyPendingSettings(pending, logger)
 		s.maybeSyncDBToS3(syncDBToS3, logger, runID, mode, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true

@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { api, type Config, type TestResult } from '../../lib/api';
+  import { api, type Config } from '../../lib/api';
+  import { toast } from '../../lib/toast';
 
   type Props = { cfg: Config };
   let { cfg = $bindable() }: Props = $props();
-
-  let storageTest = $state<TestResult | null>(null);
 
   // Multipart threshold UI state — the wire format is bytes, but the
   // user picks a value + unit so they don't have to compute "16 MiB =
@@ -50,9 +49,13 @@
   });
 
   async function testStorage() {
-    storageTest = null;
-    try { storageTest = await api.testStorage(); }
-    catch (e) { storageTest = { ok: false, message: String(e) }; }
+    try {
+      const r = await api.testStorage();
+      if (r.ok) toast.success(r.message ?? 'Storage OK');
+      else toast.error(r.message ?? 'Storage test failed');
+    } catch (e) {
+      toast.error(`Storage test failed: ${e}`);
+    }
   }
 </script>
 
@@ -120,9 +123,5 @@
 
   <div class="row">
     <button onclick={testStorage} type="button">Test storage</button>
-    {#if storageTest}
-      <span class="badge {storageTest.ok ? 'ok' : 'err'}">{storageTest.ok ? 'ok' : 'fail'}</span>
-      <span class="muted">{storageTest.message ?? ''}</span>
-    {/if}
   </div>
 </div>

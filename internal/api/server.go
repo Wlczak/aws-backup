@@ -90,6 +90,12 @@ type Server struct {
 	// runWg tracks engine goroutines spawned by handleTriggerRun so the
 	// CLI can wait for them on shutdown before tearing down DB / storage.
 	runWg sync.WaitGroup
+	// pendingConfig holds a validated, on-disk-persisted Config that the
+	// operator saved while a backup run was in flight. The post-run
+	// goroutine drains it and calls ApplySettings + updateConfig once the
+	// run finishes, so settings changes don't have to wait for the run to
+	// end before the operator can submit them. Guarded by runMu.
+	pendingConfig *config.Config
 	// shutdownCh is closed once at the top of Shutdown. The post-run
 	// DB-sync goroutine watches it so an in-flight DB upload aborts
 	// promptly when the service is shutting down — otherwise a 600 s

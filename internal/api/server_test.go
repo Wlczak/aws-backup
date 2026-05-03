@@ -262,6 +262,167 @@ func TestSettingsConfigSharedMutex(t *testing.T) {
 	wg.Wait()
 }
 
+// TestSettingsPutDuringRunDefers verifies that a PUT during an in-flight
+// run no longer 409s — the merged config is persisted to disk and stashed
+// as pendingConfig, ApplySettings is NOT called yet, GET surfaces
+// pending_apply=true, and once the run "finishes" (we simulate by
+// invoking the same flow the post-run goroutine uses) ApplySettings is
+// called with (live, pending) and live state catches up.
+func TestSettingsPutDuringRunDefers(t *testing.T) {
+	ts, deps := newTestServer(t)
+
+	var applyCalls int
+	var lastPrev, lastNext config.Config
+	srv := &Server{deps: Deps{
+		DB:          deps.DB,
+		Bus:         deps.Bus,
+		Config:      deps.Config,
+		ConfigPath:  deps.ConfigPath,
+		BuildEngine: deps.BuildEngine,
+		ApplySettings: func(prev, next config.Config) error {
+			applyCalls++
+			lastPrev, lastNext = prev, next
+			return nil
+		},
+	}}
+	// Pretend a run is in flight.
+	srv.currentRun = 99
+	srv.currentRunCancel = func() {}
+	ts.Config.Handler = srv.Router()
+
+	body := *deps.Config
+	body.S3.Bucket = "queued-bucket"
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s want 200", resp.StatusCode, d)
+	}
+	var saved settingsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if !saved.PendingApply {
+		t.Error("response.pending_apply=false, want true")
+	}
+	if saved.S3.Bucket != "queued-bucket" {
+		t.Errorf("response.s3.bucket=%q want queued-bucket", saved.S3.Bucket)
+	}
+	if applyCalls != 0 {
+		t.Errorf("ApplySettings called %d times during run; want 0", applyCalls)
+	}
+	if deps.Config.S3.Bucket == "queued-bucket" {
+		t.Error("live config was mutated mid-run")
+	}
+	if srv.pendingConfig == nil || srv.pendingConfig.S3.Bucket != "queued-bucket" {
+		t.Errorf("pendingConfig=%+v want queued-bucket", srv.pendingConfig)
+	}
+
+	// GET surfaces the pending values + flag.
+	var got settingsResponse
+	getJSON(t, ts, "/api/settings", &got)
+	if !got.PendingApply || got.S3.Bucket != "queued-bucket" {
+		t.Errorf("GET surface: pending=%v bucket=%q", got.PendingApply, got.S3.Bucket)
+	}
+
+	// Simulate run completion: the post-run goroutine clears currentRun,
+	// drains pending, and calls applyPendingSettings.
+	srv.runMu.Lock()
+	srv.currentRun = 0
+	srv.currentRunCancel = nil
+	pending := srv.pendingConfig
+	srv.pendingConfig = nil
+	srv.runMu.Unlock()
+	srv.applyPendingSettings(pending, nil)
+
+	if applyCalls != 1 {
+		t.Errorf("ApplySettings calls=%d after run end; want 1", applyCalls)
+	}
+	if lastPrev.S3.Bucket == lastNext.S3.Bucket {
+		t.Errorf("prev/next look identical post-apply: prev=%q next=%q",
+			lastPrev.S3.Bucket, lastNext.S3.Bucket)
+	}
+	if lastNext.S3.Bucket != "queued-bucket" {
+		t.Errorf("apply received next.bucket=%q want queued-bucket", lastNext.S3.Bucket)
+	}
+	if deps.Config.S3.Bucket != "queued-bucket" {
+		t.Errorf("live config not updated post-apply: %q", deps.Config.S3.Bucket)
+	}
+
+	// GET now reflects live state with no pending flag.
+	var after settingsResponse
+	getJSON(t, ts, "/api/settings", &after)
+	if after.PendingApply {
+		t.Error("pending_apply still true after apply")
+	}
+}
+
+// TestSettingsPutDuringRunComposesPending verifies that successive PUTs
+// during one run compose against the previous pending config so a
+// redacted-secret echo doesn't blank the credentials the operator just
+// queued.
+func TestSettingsPutDuringRunComposesPending(t *testing.T) {
+	ts, deps := newTestServer(t)
+	deps.Config.S3.SecretAccessKey = "live-secret"
+
+	srv := &Server{deps: Deps{
+		DB:            deps.DB,
+		Bus:           deps.Bus,
+		Config:        deps.Config,
+		ConfigPath:    deps.ConfigPath,
+		BuildEngine:   deps.BuildEngine,
+		ApplySettings: func(prev, next config.Config) error { return nil },
+	}}
+	srv.currentRun = 99
+	srv.currentRunCancel = func() {}
+	ts.Config.Handler = srv.Router()
+
+	// First PUT: change the secret to a real new value.
+	first := *deps.Config
+	first.S3.SecretAccessKey = "new-secret"
+	first.S3.Bucket = "first-bucket"
+	b, _ := json.Marshal(first)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := ts.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("first PUT status=%d want 200", resp.StatusCode)
+	}
+
+	// Second PUT: GET-then-PUT pattern with the redacted secret echoed
+	// back. Should preserve "new-secret" (from pendingConfig), NOT fall
+	// back to "live-secret".
+	second := *deps.Config
+	second.S3.SecretAccessKey = config.RedactedMarker
+	second.S3.Bucket = "second-bucket"
+	b, _ = json.Marshal(second)
+	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = ts.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("second PUT status=%d want 200", resp.StatusCode)
+	}
+
+	if srv.pendingConfig == nil {
+		t.Fatal("pendingConfig nil after second PUT")
+	}
+	if srv.pendingConfig.S3.SecretAccessKey != "new-secret" {
+		t.Errorf("secret=%q want new-secret (composed against pending)",
+			srv.pendingConfig.S3.SecretAccessKey)
+	}
+	if srv.pendingConfig.S3.Bucket != "second-bucket" {
+		t.Errorf("bucket=%q want second-bucket", srv.pendingConfig.S3.Bucket)
+	}
+}
+
 func TestSettingsPutInvalidRejected(t *testing.T) {
 	ts, deps := newTestServer(t)
 	bad := config.Default()
