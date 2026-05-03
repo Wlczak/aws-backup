@@ -3,50 +3,74 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/Wlczak/aws-backup/internal/config"
 )
 
-func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
-	cfg, ok := s.snapshotConfig()
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
-		return
-	}
-	writeJSON(w, http.StatusOK, cfg.Redacted())
+// settingsResponse embeds config.Config so its fields are promoted to the
+// top of the JSON object; PendingApply is added alongside. Callers that
+// decode into a plain config.Config still work because the JSON decoder
+// ignores the extra field.
+type settingsResponse struct {
+	config.Config
+	PendingApply bool `json:"pending_apply"`
 }
 
-// handlePutSettings accepts a full Config in the body. Fields equal to
-// RedactedMarker ("***") preserve the existing value so clients that GET
-// then PUT don't accidentally blank out credentials they never saw.
-//
-// Ordering: validate -> ApplySettings (hot-swap live components) ->
-// Save to disk -> update in-memory Config. Any step can fail; failures
-// after ApplySettings try to roll back by calling it again with the
-// original config.
-//
-// Refuses to run while a backup is in progress: the hot-swap closes the
-// previously-active Source/Storage handles, which would break a run
-// holding references to them. 409 the caller and let them retry.
-func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
-	prev, ok := s.snapshotConfig()
+func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
+	live, ok := s.snapshotConfig()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
 
 	s.runMu.Lock()
-	if s.currentRun != 0 {
-		current := s.currentRun
-		s.runMu.Unlock()
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":          "cannot change settings while a backup run is in progress",
-			"current_run_id": current,
-		})
+	pending := s.pendingConfig
+	s.runMu.Unlock()
+
+	cfg := live
+	if pending != nil {
+		cfg = *pending
+	}
+	writeJSON(w, http.StatusOK, settingsResponse{
+		Config:       cfg.Redacted(),
+		PendingApply: pending != nil,
+	})
+}
+
+// handlePutSettings accepts a full Config in the body. Fields equal to
+// RedactedMarker ("***") preserve the existing value so clients that GET
+// then PUT don't accidentally blank out credentials they never saw.
+//
+// When no run is in flight: validate -> ApplySettings (hot-swap live
+// components) -> Save to disk -> update in-memory Config. Any step can
+// fail; failures after ApplySettings try to roll back by calling it
+// again with the original config.
+//
+// When a run IS in flight: validate -> Save to disk -> stash as
+// pendingConfig. The post-run goroutine drains pendingConfig and calls
+// ApplySettings + updateConfig once the run finishes. This lets the
+// operator queue a config change without waiting for the run to end.
+// The response carries `pending_apply: true` so the UI can show that
+// the save is queued rather than live.
+func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
+	live, ok := s.snapshotConfig()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
+
+	s.runMu.Lock()
 	defer s.runMu.Unlock()
+
+	// Successive PUTs during one run compose against the most recent
+	// pending config (if any), so a redacted-secret echo doesn't blank
+	// out credentials the user just saved.
+	prev := live
+	if s.pendingConfig != nil {
+		prev = *s.pendingConfig
+	}
 
 	var next config.Config
 	if err := decodeJSON(r, &next); err != nil {
@@ -59,8 +83,26 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.currentRun != 0 {
+		// Defer the apply until the run finishes. Persist to disk now so
+		// the change survives restart, but leave live state alone.
+		if s.deps.ConfigPath != "" {
+			if err := config.Save(s.deps.ConfigPath, merged); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
+				return
+			}
+		}
+		queued := merged
+		s.pendingConfig = &queued
+		writeJSON(w, http.StatusOK, settingsResponse{
+			Config:       merged.Redacted(),
+			PendingApply: true,
+		})
+		return
+	}
+
 	if s.deps.ApplySettings != nil {
-		if err := s.deps.ApplySettings(prev, merged); err != nil {
+		if err := s.deps.ApplySettings(live, merged); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("apply settings: %w", err))
 			return
 		}
@@ -75,9 +117,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			// to restart and log the rollback failure.
 			var rollbackErr error
 			if s.deps.ApplySettings != nil {
-				rollbackErr = s.deps.ApplySettings(merged, prev)
+				rollbackErr = s.deps.ApplySettings(merged, live)
 			}
-			s.setStoragePrefix(prev.S3.KeyPrefix)
+			s.setStoragePrefix(live.S3.KeyPrefix)
 			if rollbackErr != nil {
 				if s.deps.Logger != nil {
 					s.deps.Logger.Error("settings rollback failed after save error",
@@ -93,7 +135,45 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.updateConfig(merged)
-	writeJSON(w, http.StatusOK, merged.Redacted())
+	// No run in flight, so a pending config (if any was somehow set) is
+	// stale — clear it so the UI doesn't keep flagging pending_apply.
+	s.pendingConfig = nil
+	writeJSON(w, http.StatusOK, settingsResponse{
+		Config:       merged.Redacted(),
+		PendingApply: false,
+	})
+}
+
+// applyPendingSettings runs ApplySettings + updateConfig for a config
+// that was queued during an in-flight run. Called from the post-run
+// goroutine after currentRun has been cleared, so no engine still holds
+// the old source/storage references that ApplySettings will close.
+//
+// On apply failure we keep the disk state (the operator's intent) but
+// leave live state on the previous config and clear pending — the disk
+// vs live divergence is the agreed failure mode (a follow-up PUT, now
+// allowed since no run is in flight, or a process restart will resolve
+// it).
+func (s *Server) applyPendingSettings(pending *config.Config, logger *slog.Logger) {
+	if pending == nil {
+		return
+	}
+	live, ok := s.snapshotConfig()
+	if !ok {
+		return
+	}
+	if s.deps.ApplySettings != nil {
+		if err := s.deps.ApplySettings(live, *pending); err != nil {
+			if logger != nil {
+				logger.Error("apply pending settings failed", "err", err)
+			}
+			return
+		}
+	}
+	s.updateConfig(*pending)
+	if logger != nil {
+		logger.Info("pending settings applied after run")
+	}
 }
 
 func mergeSecrets(next, existing config.Config) config.Config {

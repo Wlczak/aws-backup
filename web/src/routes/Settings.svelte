@@ -12,6 +12,7 @@
   let cfg = $state<Config | null>(null);
   let saving = $state(false);
   let scheduleHuman = $state('');
+  let pendingApply = $state(false);
 
   const sections = [
     { id: 'source',  label: 'Source'   },
@@ -34,7 +35,10 @@
 
   async function load() {
     try {
-      cfg = (await api.settings()) as Config;
+      const resp = await api.settings();
+      const { pending_apply, ...rest } = resp;
+      cfg = rest as Config;
+      pendingApply = pending_apply;
       scheduleHuman = humanize(cfg.backup.schedule);
     } catch (e) {
       toast.error(`Failed to load settings: ${e}`);
@@ -45,9 +49,14 @@
     if (!cfg) return;
     saving = true;
     try {
-      cfg = (await api.updateSettings(cfg)) as Config;
+      const resp = await api.updateSettings(cfg);
+      const { pending_apply, ...rest } = resp;
+      cfg = rest as Config;
+      pendingApply = pending_apply;
       scheduleHuman = humanize(cfg.backup.schedule);
-      toast.success('Settings saved');
+      toast.success(pending_apply
+        ? 'Saved — will apply when the current backup finishes'
+        : 'Settings saved');
     } catch (e) {
       toast.error(`Failed to save settings: ${e}`);
     } finally {
@@ -84,6 +93,12 @@
     >{s.label}</button>
   {/each}
 </nav>
+
+{#if pendingApply}
+  <div class="banner">
+    Settings saved — will apply when the current backup finishes.
+  </div>
+{/if}
 
 {#if cfg}
   {#if active === 'source'}
@@ -130,6 +145,15 @@
     color: var(--text);
   }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  .banner {
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid #d29922;
+    border-radius: 4px;
+    background: rgba(210, 153, 34, 0.08);
+    font-size: 0.9rem;
+  }
   :global(.card .row) { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem; flex-wrap: wrap; }
   :global(.card .row-2) {
     display: grid;

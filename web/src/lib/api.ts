@@ -142,6 +142,12 @@ export interface Config {
   server: ServerConfig;
 }
 
+// SettingsResponse mirrors the wire shape of GET/PUT /api/settings: a
+// full Config plus a `pending_apply` flag that's true when the saved
+// config is queued behind an in-flight backup run and will be applied
+// once the run finishes.
+export type SettingsResponse = Config & { pending_apply: boolean };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     ...init,
@@ -210,9 +216,9 @@ export const api = {
       body: JSON.stringify({ ids }),
     }),
 
-  settings: () => request<Config>('/api/settings'),
+  settings: () => request<SettingsResponse>('/api/settings'),
   updateSettings: (cfg: Config) =>
-    request<Config>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+    request<SettingsResponse>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
 
   testSource: () => request<TestResult>('/api/smb/test'),
   testStorage: () => request<TestResult>('/api/s3/test'),
