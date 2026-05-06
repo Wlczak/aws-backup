@@ -79,6 +79,18 @@ type S3Config struct {
 	// Lowering it earns parallel-part throughput and finer-grained retry
 	// for medium-sized objects at the cost of slightly more S3 requests.
 	MultipartThreshold int64 `json:"multipart_threshold"`
+	// ResumeThreshold is the byte size at or above which uploads go through
+	// the resumable multipart driver — `CreateMultipartUpload` + per-part
+	// `UploadPart`, with the UploadId persisted to the local index so the
+	// next run picks up where the last one died. 0 = default (100 MiB).
+	// Below this the existing single-shot path is used; resume on a 50 MB
+	// file isn't worth the bookkeeping. (#162)
+	ResumeThreshold int64 `json:"resume_threshold"`
+	// PartSize is the byte size of one multipart part on the resumable
+	// path. 0 = default (16 MiB → 10k parts × 16 MiB ≈ 160 GiB ceiling).
+	// S3 requires every part except the last to be at least 5 MiB and at
+	// most 5 GiB. (#162)
+	PartSize int64 `json:"part_size"`
 }
 
 type BackupConfig struct {
@@ -281,6 +293,21 @@ func (c Config) Validate() error {
 	}
 	if c.S3.MultipartThreshold > 5*1024*1024*1024 {
 		errs = append(errs, fmt.Errorf("s3.multipart_threshold %d exceeds S3's 5 GiB single-PutObject ceiling", c.S3.MultipartThreshold))
+	}
+	if c.S3.ResumeThreshold < 0 {
+		errs = append(errs, fmt.Errorf("s3.resume_threshold must be >= 0 (got %d)", c.S3.ResumeThreshold))
+	}
+	if c.S3.PartSize < 0 {
+		errs = append(errs, fmt.Errorf("s3.part_size must be >= 0 (got %d)", c.S3.PartSize))
+	}
+	if c.S3.PartSize > 0 && c.S3.PartSize < 5*1024*1024 {
+		errs = append(errs, fmt.Errorf("s3.part_size %d below S3's 5 MiB minimum part size", c.S3.PartSize))
+	}
+	if c.S3.PartSize > 5*1024*1024*1024 {
+		errs = append(errs, fmt.Errorf("s3.part_size %d exceeds S3's 5 GiB maximum part size", c.S3.PartSize))
+	}
+	if c.S3.ResumeThreshold > 0 && c.S3.PartSize > 0 && c.S3.ResumeThreshold < c.S3.PartSize {
+		errs = append(errs, fmt.Errorf("s3.resume_threshold (%d) must be >= s3.part_size (%d)", c.S3.ResumeThreshold, c.S3.PartSize))
 	}
 	// Glacier-tier classes are AWS-only; S3-compatible endpoints (MinIO,
 	// etc.) reject them with InvalidStorageClass on first upload. Catch it
