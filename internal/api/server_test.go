@@ -107,6 +107,37 @@ func TestStatusEmpty(t *testing.T) {
 	}
 }
 
+// TestStatusStaleCurrentRunIDIsClean verifies that when currentRun
+// points at a row that no longer exists (manual delete, test cleanup
+// race), /api/status returns 200 with no current run rather than a
+// 500. (#182)
+func TestStatusStaleCurrentRunIDIsClean(t *testing.T) {
+	_, deps := newTestServer(t)
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 99999 // no such row
+	srv.runMu.Unlock()
+
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	resp, err := ts.Client().Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatalf("GET /api/status: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var got statusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Current != nil {
+		t.Errorf("current=%+v want nil (stale id should look idle)", got.Current)
+	}
+}
+
 func TestSettingsRedaction(t *testing.T) {
 	ts, deps := newTestServer(t)
 	deps.Config.S3.AccessKeyID = "AKIA12345"

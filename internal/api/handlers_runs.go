@@ -371,17 +371,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{}
 	if current > 0 {
 		run, err := s.deps.DB.GetRun(r.Context(), current)
-		if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			// The run row was deleted out from under us (manual mutation,
+			// test cleanup race). Treat as no-current-run rather than
+			// 500ing — the dashboard polls this every few seconds and a
+			// red banner here is more misleading than a clean idle. (#182)
+		case err != nil:
 			// Don't return 200 with empty body — the dashboard polls this
 			// every few seconds and would render a green "idle" while the
 			// DB is unreachable. Surface the failure so the SPA can show
 			// it. (#117)
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("get current run: %w", err))
 			return
+		default:
+			sum := toSummary(run)
+			resp.Current = &sum
+			resp.StopRequested = s.currentRunStopReq.Load()
 		}
-		sum := toSummary(run)
-		resp.Current = &sum
-		resp.StopRequested = s.currentRunStopReq.Load()
 	}
 
 	runs, _, err := s.deps.DB.ListRuns(r.Context(), 1, 1)
