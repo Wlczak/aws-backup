@@ -12,7 +12,10 @@
   let scanNew = $state(0);
   let scanChanged = $state(0);
   let scanActive = $state(false);
-  let uploads = $state({ completed: 0, failed: 0, started: 0, total: 0 });
+  // `total` is authoritative from the `upload_plan` SSE event; the other
+  // counters are derived from `itemProgress` so an SSE replay or
+  // reconnect can't double-count them. (#199)
+  let uploadsTotal = $state(0);
   let triggering = $state(false);
   let err = $state('');
 
@@ -53,6 +56,18 @@
       ...patch,
     };
   }
+
+  // Derive counters from `itemProgress` so they're idempotent under SSE
+  // replay/reconnect. `total` still comes from the `upload_plan` event. (#199)
+  let uploads = $derived.by(() => {
+    let completed = 0, failed = 0, started = 0;
+    for (const it of Object.values(itemProgress)) {
+      if (it.status === 'done') { completed++; started++; }
+      else if (it.status === 'failed') { failed++; started++; }
+      else if (it.phase === 'upload') started++;
+    }
+    return { completed, failed, started, total: uploadsTotal };
+  });
 
   let itemList = $derived(
     Object.values(itemProgress).sort((a, b) => {
@@ -111,7 +126,7 @@
         scanSeen = payload.seen ?? 0;
         scanActive = false;
       }
-      if (type === 'upload_plan') uploads.total = payload.total_files ?? 0;
+      if (type === 'upload_plan') uploadsTotal = payload.total_files ?? 0;
       if (type === 'copy_progress' && payload.key) {
         upsertItem(payload.key, {
           bytesUploaded: payload.bytes_copied ?? 0,
@@ -122,7 +137,6 @@
         });
       }
       if (type === 'upload_start') {
-        uploads.started++;
         if (payload.key) {
           // Reset bar to 0 on phase switch — the upload size differs from
           // the copy size for zips (compression) so we can't carry over.
@@ -146,7 +160,6 @@
         });
       }
       if (type === 'upload_complete') {
-        uploads.completed++;
         if (payload.key) {
           upsertItem(payload.key, {
             bytesUploaded: payload.size ?? itemProgress[payload.key]?.size ?? 0,
@@ -158,7 +171,6 @@
         }
       }
       if (type === 'upload_failed' && payload.key) {
-        uploads.failed++;
         upsertItem(payload.key, {
           status: 'failed',
           error: payload.error ?? '',
@@ -166,7 +178,7 @@
       }
       if (type === 'run_start') {
         itemProgress = {};
-        uploads = { completed: 0, failed: 0, started: 0, total: 0 };
+        uploadsTotal = 0;
         scanSeen = 0;
         scanNew = 0;
         scanChanged = 0;

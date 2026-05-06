@@ -59,3 +59,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #205 | — | `db_sync_failed` clears the pending 8s auto-hide timer so a recent `db_sync_complete` doesn't wipe the failure banner |
 | #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
 | #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
+| #199 | — | Dashboard upload counters derived from `itemProgress` so SSE replay/reconnect can't double-count |
