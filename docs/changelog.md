@@ -57,3 +57,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
 | #170 | — | `reconcileFromS3` skips orphan sidecar delete on cancel — no spurious "orphan delete failed" log on user stop |
 | #172 | — | `ListPending` selects only `id, path, size, mtime` (the columns the engine consumes) instead of `SELECT *` |
+| #174 | — | `source.Scan` flush goroutine recovers from panic and surfaces it via `flushErrCh` so a bad flush can't deadlock Scan |
