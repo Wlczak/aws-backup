@@ -115,7 +115,7 @@ func TestSSEReplayOnConnect(t *testing.T) {
 		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan started"}},
 		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan complete"}},
 	}
-	replay := func(_ context.Context) []engine.Event { return replayed }
+	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, time.Time{} }
 	srv := httptest.NewServer(sseHandler(bus, slog.Default(), replay))
 	defer srv.Close()
 
@@ -180,6 +180,95 @@ func TestSSEReplayOnConnect(t *testing.T) {
 	}
 	if got.event != engine.EventRunComplete {
 		t.Errorf("live event: got %q want run_complete", got.event)
+	}
+}
+
+// TestSSEReplayDedupesRunLogOverlap verifies that run_log events whose
+// timestamps fall at or before the replay cutoff are dropped from the
+// live stream, while later events (and non-run_log events at any time)
+// pass through. (#176)
+func TestSSEReplayDedupesRunLogOverlap(t *testing.T) {
+	bus := events.NewBus(8)
+	cutoff := time.Now()
+	replayed := []engine.Event{
+		{Type: engine.EventRunStart, RunID: 9, At: cutoff.Add(-time.Second)},
+		{Type: engine.EventRunLog, RunID: 9, At: cutoff.Add(-500 * time.Millisecond),
+			Data: map[string]any{"level": "info", "message": "replayed"}},
+	}
+	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, cutoff }
+	srv := httptest.NewServer(sseHandler(bus, slog.Default(), replay))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	scanFrame := func(timeout time.Duration) (sseFrame, error) {
+		type res struct {
+			f   sseFrame
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			var f sseFrame
+			for sc.Scan() {
+				line := sc.Text()
+				switch {
+				case strings.HasPrefix(line, "event: "):
+					f.event = strings.TrimPrefix(line, "event: ")
+				case strings.HasPrefix(line, "data: "):
+					f.data = strings.TrimPrefix(line, "data: ")
+				case line == "" && f.event != "":
+					ch <- res{f: f}
+					return
+				}
+			}
+			ch <- res{err: sc.Err()}
+		}()
+		select {
+		case r := <-ch:
+			return r.f, r.err
+		case <-time.After(timeout):
+			return sseFrame{}, io.ErrUnexpectedEOF
+		}
+	}
+
+	// Drain the two replay frames.
+	for i := 0; i < 2; i++ {
+		if _, err := scanFrame(time.Second); err != nil {
+			t.Fatalf("replay frame %d: %v", i, err)
+		}
+	}
+
+	waitFor(t, func() bool { return bus.SubscriberCount() == 1 }, 500*time.Millisecond)
+
+	// 1. Stale run_log (At <= cutoff) — must be dropped.
+	bus.Publish(engine.Event{Type: engine.EventRunLog, RunID: 9, At: cutoff,
+		Data: map[string]any{"level": "info", "message": "stale dup"}})
+	// 2. A non-run_log event with At <= cutoff — must pass through.
+	bus.Publish(engine.Event{Type: engine.EventUploadComplete, RunID: 9, At: cutoff.Add(-time.Millisecond)})
+	// 3. A fresh run_log (At > cutoff) — must pass through.
+	bus.Publish(engine.Event{Type: engine.EventRunLog, RunID: 9, At: cutoff.Add(time.Second),
+		Data: map[string]any{"level": "info", "message": "fresh"}})
+	// 4. Another stale run_log AFTER the fresh one — cutoff has been
+	// cleared, so this must also pass through.
+	bus.Publish(engine.Event{Type: engine.EventRunLog, RunID: 9, At: cutoff.Add(-2 * time.Second),
+		Data: map[string]any{"level": "info", "message": "post-cutoff"}})
+
+	// Expect: upload_complete, run_log (fresh), run_log (post-cutoff).
+	wantTypes := []string{engine.EventUploadComplete, engine.EventRunLog, engine.EventRunLog}
+	for i, want := range wantTypes {
+		got, err := scanFrame(time.Second)
+		if err != nil {
+			t.Fatalf("live frame %d: %v", i, err)
+		}
+		if got.event != want {
+			t.Errorf("live frame %d: got %q want %q", i, got.event, want)
+		}
 	}
 }
 
