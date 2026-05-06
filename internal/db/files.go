@@ -4,11 +4,51 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// flexTimeLayouts is the list of textual timestamp formats the
+// `glebarez/sqlite` driver might hand back for a TIMESTAMP column.
+// Order is significant: the canonical Go-default layout (the one GORM
+// writes today) is checked first so the common path is one Parse.
+//
+// Old DBs created before goose migrations were introduced may carry
+// rows in any of these formats — `time.Time.String()`-style with
+// `MST`, RFC3339 with or without nanos, the SQLite-default
+// `YYYY-MM-DD HH:MM:SS`, etc. SQLite stores TIMESTAMP as TEXT and
+// makes no attempt to canonicalise; aggregates like `MIN(...)` then
+// surface whichever stored string sorts smallest.
+var flexTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// parseFlexTime tries every known layout against s. Returns
+// (zero, false) if every layout fails. Callers treat that as
+// "skip this row" rather than fatal — a single corrupted timestamp
+// shouldn't 500 the whole dashboard.
+func parseFlexTime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range flexTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
 
 // likeEscape escapes the LIKE meta-characters % and _ (plus the escape
 // character itself) in a user-supplied search term so a query like
@@ -383,16 +423,28 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 
 	// Soonest expiry across rows that are still in the restored window —
 	// surfaces "your restored copies expire on …" on the dashboard.
-	var soonest sql.NullTime
+	//
+	// Scan into NullString rather than NullTime: the pure-Go
+	// `glebarez/sqlite` driver hands back the raw TEXT for any row
+	// whose stored format doesn't match its expected layout, and
+	// `sql.NullTime.Scan` then fails with "string into *time.Time".
+	// Pre-migrations DBs in this project carry mixed formats from
+	// older code paths, so we scan defensively and parse with a list
+	// of known layouts. If no layout matches we log and skip — a
+	// single bad row shouldn't 500 the dashboard.
+	var soonest sql.NullString
 	if err := db.g.WithContext(ctx).Model(&File{}).
 		Select("MIN(restore_expires_at)").
 		Where("restore_status = ? AND restore_expires_at IS NOT NULL AND restore_expires_at > ?", RestoreStatusRestored, time.Now()).
 		Scan(&soonest).Error; err != nil {
 		return s, err
 	}
-	if soonest.Valid {
-		t := soonest.Time
-		s.RestoreSoonestExp = &t
+	if soonest.Valid && soonest.String != "" {
+		if t, ok := parseFlexTime(soonest.String); ok {
+			s.RestoreSoonestExp = &t
+		} else {
+			slog.Warn("Stats: unparseable MIN(restore_expires_at)", "value", soonest.String)
+		}
 	}
 
 	if err := db.g.WithContext(ctx).Model(&File{}).
