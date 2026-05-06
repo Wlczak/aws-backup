@@ -52,6 +52,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #64 | — | `/api/files?all=true` capped at 50k rows; oversized indexes 400 with paginate hint |
 | #75 | — | Restore verifies bytes against DB md5 in flight; `RestoreOptions.SkipChecksum` opts out |
 | #182 | — | `/api/status` treats a stale `currentRun` id as idle (200 + null current) instead of 500 |
+| #181 | — | Scheduler trigger uses `context.Background()`; old 5 min timeout only canceled bookkeeping while the engine ran unbounded |
 | — | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase |
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
