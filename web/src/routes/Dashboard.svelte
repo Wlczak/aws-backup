@@ -71,6 +71,20 @@
 
   let es: { close: () => void } | null = null;
   let pollTimer: number | undefined;
+  let pollDestroyed = false;
+
+  // SSE drives most updates; polling is a backstop for missed events and
+  // to surface server-side state changes the bus doesn't emit. Use 3s
+  // while a run is active, 30s when idle — an idle dashboard otherwise
+  // burns ~1200 status calls/hour for no value. (#70)
+  function scheduleNextPoll() {
+    if (pollDestroyed) return;
+    const delay = status?.current ? 3000 : 30000;
+    pollTimer = window.setTimeout(async () => {
+      await refresh();
+      scheduleNextPoll();
+    }, delay);
+  }
 
   async function refresh() {
     try {
@@ -83,8 +97,7 @@
   }
 
   onMount(() => {
-    refresh();
-    pollTimer = window.setInterval(refresh, 3000);
+    refresh().then(() => scheduleNextPoll());
     es = subscribeEvents((type, data) => {
       const d = data as any;
       const payload = d?.data ?? {};
@@ -213,13 +226,19 @@
         ? `[${payload.level ?? 'log'}] ${payload.message ?? ''}`
         : `[${type}] ${JSON.stringify(d.data ?? d)}`;
       logLines = [...logLines.slice(-49), line];
-      if (type === 'run_complete' || type === 'run_start') refresh();
+      if (type === 'run_complete' || type === 'run_start') {
+        // Reset the poll cadence so an idle 30s timer doesn't keep ticking
+        // after a run starts (and vice versa after it ends). (#70)
+        if (pollTimer) clearTimeout(pollTimer);
+        refresh().then(() => scheduleNextPoll());
+      }
     });
   });
 
   onDestroy(() => {
+    pollDestroyed = true;
     es?.close();
-    if (pollTimer) clearInterval(pollTimer);
+    if (pollTimer) clearTimeout(pollTimer);
     if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
   });
 

@@ -48,6 +48,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #138 | d26c7fa | Pre-flight `ensureTmpSpace` with 64 MiB margin (cross-platform) |
 | #143 | — | Boot-UI HTTP server during S3 index download |
 | #153 | — | `Deps.ConfigMu` shared with cmd-side `appState.mu` |
+| #70 | — | Dashboard polls `/api/status` at 30s when idle, 3s during a run |
 | — | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase |
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
