@@ -2,7 +2,19 @@
 
 The SQLite index models the **state of the S3 bucket**, not the local source. See `CLAUDE.md`.
 
-## Schema (owned by GORM AutoMigrate)
+## Schema (owned by goose migrations)
+
+Migrations live in `internal/db/migrations/*.sql` and are embedded into the binary via `go:embed`. `db.Open` runs them on every start:
+
+- **Fresh DB** — every migration runs from version 0.
+- **Pre-existing DB created by the old AutoMigrate path** — detected via "the `files` table exists but `goose_db_version` does not", stamped at the baseline version (`00001_baseline.sql`) so it isn't re-run, then any newer migrations apply normally.
+- **Already-migrated DB** — goose is a no-op.
+
+Naming: `NNNNN_short_description.sql` with a `-- +goose Up` block and a matching `-- +goose Down` block. Wrap any statement that contains semicolons (e.g. `CREATE TABLE`) in `-- +goose StatementBegin / StatementEnd` so the parser doesn't split on the inner semicolon.
+
+The current schema below is the cumulative state after all migrations.
+
+
 
 ```sql
 CREATE TABLE files (
@@ -47,6 +59,23 @@ CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE multipart_uploads (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id         INTEGER,                                 -- > 0 for individual uploads (mutually exclusive with zip_key)
+    zip_key         TEXT,                                    -- non-empty for zip-group uploads
+    s3_key          TEXT     NOT NULL,
+    upload_id       TEXT     NOT NULL,
+    part_size       INTEGER  NOT NULL,
+    size            INTEGER  NOT NULL,
+    content_sha256  TEXT     NOT NULL,
+    started_at      DATETIME NOT NULL,
+    last_active_at  DATETIME NOT NULL
+);
+-- Partial UNIQUE indexes enforce the (file_id | zip_key) natural key
+-- so a crash window in UpsertMultipartUpload can't leave duplicates (#173).
+CREATE UNIQUE INDEX idx_mpu_file_id_unique ON multipart_uploads(file_id) WHERE file_id > 0;
+CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE zip_key != '';
 ```
 
 `stopped` is a graceful-stop terminal status distinct from `cancelled` (force-cancel mid-stream): see #124.
@@ -66,3 +95,32 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 ## Zip naming + sidecar
 
 `{topdir}/{topdir}_{subdir}_{N}.zip` where N is the per-directory counter, seeded from `MAX(DB, S3 listing)`. Sidecar `{zipKey}.index.txt` is uploaded **before** the zip (#95) so partial uploads never leave a zip without an index. Sidecars are uploaded with `Storage.PutStandard` (#125) so they remain instantly listable even when the zip is in Deep Archive.
+
+## Conventions
+
+### Schema lives in goose migrations; GORM owns queries
+
+The split:
+
+- **Schema** — every change ships as a new `internal/db/migrations/NNNNN_*.sql` (Up + Down). `db.Open` runs goose Up; AutoMigrate is **not** called.
+- **Queries** — go through GORM models, tags, and the typed query builder. The `gorm:"column:…"` tags are still load-bearing (GORM uses them to map fields ↔ SQL column names). Tags like `gorm:"index"` / `gorm:"uniqueIndex"` are inert under goose; keep them off the model when adding new fields, and document indexes only in the migration.
+
+Don't reach for `db.Exec("CREATE …")` / `tx.Raw(…)` from application code. Raw DDL outside the migrations directory creates a parallel surface to keep in sync.
+
+### Adding a column / table
+
+1. Write a new migration `NNNNN_add_X.sql` with `-- +goose Up` and `-- +goose Down` blocks. Wrap statements containing semicolons (e.g. `CREATE TABLE`) in `-- +goose StatementBegin / StatementEnd`.
+2. Update the GORM model struct so queries can reference the new column.
+3. Update the schema dump above.
+4. If it's a constraint GORM tags can't express (partial UNIQUE, CHECK), put it directly in the migration. See `00002_multipart_unique_indexes.sql` for a worked example (#173).
+
+## Schema-drift behaviour
+
+The app does not gate on a schema version (no "this binary requires DB ≥ vN" check). It opens whatever DB it's pointed at and tries to migrate forward:
+
+- **Fresh DB** — goose runs every migration from version 0.
+- **Pre-existing DB created by the old AutoMigrate path** — `Open` detects "the `files` table exists but `goose_db_version` does not" and stamps the baseline as applied without re-running it, then applies any newer migrations.
+- **Already-migrated DB at the latest version** — no-op.
+- **DB at a version newer than the binary embeds** — goose currently leaves it alone; the binary will run, but anything that depends on a removed column / changed type will fail at query time. There's no downgrade guard.
+- **DBs synced from S3 (#143)** are subject to the same rules — the boot-time download lands the file before `Open` runs, so additive drift across binary versions self-heals via goose.
+- **Data-format drift inside a column** — SQLite is flexibly typed (TIMESTAMP is TEXT). If different code paths or external tools write `"2026-05-06 14:00:00"` vs `"2026-05-06T14:00:00.123Z"`, both coexist; the pure-Go `glebarez/sqlite` driver only parses one shape, and aggregates like `MIN(timestamp_col)` can return an unparseable string that fails on Scan. When you need to harden a column, the typical pattern is to scan into a `string` first and parse with multiple layouts, or to write a one-shot normalisation pass as a migration.

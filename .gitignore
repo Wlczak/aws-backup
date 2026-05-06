@@ -28,3 +28,4 @@ yourfile.txt
 .vscode/
 .idea/
 *.swp
+.claude/

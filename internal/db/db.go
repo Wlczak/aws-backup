@@ -1,8 +1,11 @@
 // Package db owns the sqlite index: schema, migrations, and typed queries.
 //
 // Uses github.com/glebarez/sqlite (pure Go, no CGO) so cross-compiling
-// works without a C toolchain. Schema management is handled by GORM's
-// AutoMigrate, removing the need for an embedded schema.sql.
+// works without a C toolchain. Schema management goes through goose,
+// with `*.sql` migrations embedded under `migrations/`. GORM tags on
+// the model structs are advisory (they document column types and let
+// the typed query builder map fields) but do not run AutoMigrate —
+// schema lives in the migrations.
 package db
 
 import (
@@ -50,7 +53,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	if err := gdb.WithContext(ctx).AutoMigrate(&File{}, &Run{}, &RunLog{}, &Setting{}, &MultipartUpload{}); err != nil {
+	if err := runMigrations(ctx, sqlDB); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
