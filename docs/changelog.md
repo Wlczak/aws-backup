@@ -59,3 +59,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #172 | — | `ListPending` selects only `id, path, size, mtime` (the columns the engine consumes) instead of `SELECT *` |
 | #174 | — | `source.Scan` flush goroutine recovers from panic and surfaces it via `flushErrCh` so a bad flush can't deadlock Scan |
 | #175 | — | `S3Storage.Get` translates `InvalidObjectState` to new `ErrGlacierThawing` sentinel; restore wraps it as "still thawing" in `RestoreStats.Errors` |
+| #190 | — | inventory `parseSchema` strips surrounding double-quotes per column so quoted manifest schemas still match bare names |
