@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
@@ -22,8 +23,15 @@ import (
 // a client that refreshes mid-run receive the full run history rather
 // than starting blind. (#130)
 //
+// replay also returns a cutoff time (the moment captured before the
+// replay query started). The live forwarder drops EventRunLog events
+// whose At is at or before the cutoff to avoid double-emitting log
+// rows that landed on the bus while ListLogs was running. The window
+// is brief — once a live run_log with At > cutoff arrives, the cutoff
+// is cleared so future events flow unconditionally. (#176)
+//
 // log is used to surface marshal errors.
-func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) []engine.Event) http.Handler {
+func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) ([]engine.Event, time.Time)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -48,8 +56,11 @@ func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) 
 		fmt.Fprint(w, ": connected\n\n")
 
 		// Replay in-flight run history if a run is active.
+		var replayCutoff time.Time
 		if replay != nil {
-			for _, ev := range replay(r.Context()) {
+			var evs []engine.Event
+			evs, replayCutoff = replay(r.Context())
+			for _, ev := range evs {
 				if err := writeSSEEvent(w, ev); err != nil {
 					// Skip one bad replay entry rather than killing the
 					// whole connection before the live stream begins.
@@ -70,6 +81,18 @@ func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) 
 			case ev, ok := <-sub.Chan():
 				if !ok {
 					return
+				}
+				// Drop run_log events whose timestamp is within the
+				// replay window — those rows were already flushed via
+				// ListLogs above, and the bus delivered duplicates that
+				// landed between our subscribe + the DB read. Once a
+				// fresher run_log arrives, clear the cutoff so we don't
+				// keep checking on every future event. (#176)
+				if !replayCutoff.IsZero() && ev.Type == engine.EventRunLog {
+					if !ev.At.After(replayCutoff) {
+						continue
+					}
+					replayCutoff = time.Time{}
 				}
 				if err := writeSSEEvent(w, ev); err != nil {
 					// A marshal failure means a code defect (e.g. an

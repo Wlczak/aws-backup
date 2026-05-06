@@ -319,17 +319,17 @@ func (s *Server) IsStopRequested() bool {
 // connect it returns a burst of engine.Events that reconstruct the
 // in-flight run's history from the DB so clients that refresh mid-run
 // see the full log rather than starting blank. (#130)
-func (s *Server) sseReplay(ctx context.Context) []engine.Event {
+func (s *Server) sseReplay(ctx context.Context) ([]engine.Event, time.Time) {
 	s.runMu.Lock()
 	runID := s.currentRun
 	s.runMu.Unlock()
 	if runID == 0 {
-		return nil
+		return nil, time.Time{}
 	}
 
 	run, err := s.deps.DB.GetRun(ctx, runID)
 	if err != nil {
-		return nil
+		return nil, time.Time{}
 	}
 
 	evts := []engine.Event{
@@ -345,9 +345,15 @@ func (s *Server) sseReplay(ctx context.Context) []engine.Event {
 		},
 	}
 
+	// Capture the cutoff *before* ListLogs so anything written to the DB
+	// after this point is "newer than the replay" — those rows arrive
+	// via the bus and the live forwarder will pass them through. Rows
+	// that were already on the bus and also already in ListLogs share
+	// timestamps <= cutoff and the live forwarder drops them. (#176)
+	cutoff := time.Now()
 	logs, err := s.deps.DB.ListLogs(ctx, runID)
 	if err != nil {
-		return evts
+		return evts, cutoff
 	}
 	for _, l := range logs {
 		evts = append(evts, engine.Event{
@@ -357,5 +363,5 @@ func (s *Server) sseReplay(ctx context.Context) []engine.Event {
 			Data:  map[string]any{"level": l.Level, "message": l.Message},
 		})
 	}
-	return evts
+	return evts, cutoff
 }

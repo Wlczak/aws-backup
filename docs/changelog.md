@@ -52,6 +52,19 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #64 | — | `/api/files?all=true` capped at 50k rows; oversized indexes 400 with paginate hint |
 | #75 | — | Restore verifies bytes against DB md5 in flight; `RestoreOptions.SkipChecksum` opts out |
 | #182 | — | `/api/status` treats a stale `currentRun` id as idle (200 + null current) instead of 500 |
+| #181 | — | Scheduler trigger uses `context.Background()`; old 5 min timeout only canceled bookkeeping while the engine ran unbounded |
+| #183 | — | `decodeJSON` sanitises CR/LF and caps decoder errors at 256 chars (log-injection guard) |
+| #176 | — | SSE replay captures cutoff before `ListLogs`; live forwarder drops `run_log` events with `At <= cutoff` to dedupe overlap |
 | — | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase |
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
+| #170 | — | `reconcileFromS3` skips orphan sidecar delete on cancel — no spurious "orphan delete failed" log on user stop |
+| #172 | — | `ListPending` selects only `id, path, size, mtime` (the columns the engine consumes) instead of `SELECT *` |
+| #174 | — | `source.Scan` flush goroutine recovers from panic and surfaces it via `flushErrCh` so a bad flush can't deadlock Scan |
+| #175 | — | `S3Storage.Get` translates `InvalidObjectState` to new `ErrGlacierThawing` sentinel; restore wraps it as "still thawing" in `RestoreStats.Errors` |
+| #190 | — | inventory `parseSchema` strips surrounding double-quotes per column so quoted manifest schemas still match bare names |
+| #198 | — | `Dashboard.triggerRun` no longer resets state after the await — `run_start` SSE handler is the sole source of truth |
+| #205 | — | `db_sync_failed` clears the pending 8s auto-hide timer so a recent `db_sync_complete` doesn't wipe the failure banner |
+| #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
+| #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
+| #199 | — | Dashboard upload counters derived from `itemProgress` so SSE replay/reconnect can't double-count |

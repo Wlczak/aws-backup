@@ -119,11 +119,13 @@ func (s *Scheduler) setScheduleLocked(expr string) error {
 		s.mu.Lock()
 		s.triggered++
 		s.mu.Unlock()
-		// Give the trigger a timeout so a misbehaving engine doesn't
-		// starve the next tick.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := s.trigger(ctx); err != nil {
+		// No timeout: the trigger only dispatches the run (CreateRun +
+		// goroutine handoff in handleTriggerRun) — the engine itself runs
+		// on context.Background(). A 5-minute timeout here would cancel
+		// only the bookkeeping (and historically did), while letting the
+		// actual work run unbounded. If dispatch is ever slow that's a
+		// real bug to surface, not silently mask. (#181)
+		if err := s.trigger(context.Background()); err != nil {
 			s.logger.Warn("scheduler trigger failed", "error", err)
 		}
 	})
