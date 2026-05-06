@@ -15,7 +15,7 @@ POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
 
 # File index
-GET    /api/files                     ?status=&search=&page=&limit=&all=
+GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
 GET    /api/files/stats               counts by status + restore_status, total size (2s cache)
 POST   /api/files/{id}/retry          mark single file pending
 POST   /api/files/retry               batch: ids[], or all_failed:true, or paths[]

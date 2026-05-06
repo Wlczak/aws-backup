@@ -43,15 +43,32 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	if limit > maxPageLimit {
 		limit = maxPageLimit
 	}
-	files, total, err := s.deps.DB.ListFiles(r.Context(), db.FilesFilter{
+	// `all=true` powers the Files tree view, which needs every row in one
+	// shot. Cap the result so a million-row index can't OOM the server or
+	// saturate the uplink on a single anonymous request — the caller
+	// must paginate normally above the cap. (#64)
+	filter := db.FilesFilter{
 		Status: q.Get("status"),
 		Search: q.Get("search"),
 		Page:   page,
 		Limit:  limit,
 		All:    all,
-	})
+	}
+	if all {
+		filter.All = false
+		filter.Page = 1
+		filter.Limit = maxAllRows + 1
+	}
+	files, total, err := s.deps.DB.ListFiles(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if all && total > maxAllRows {
+		writeError(w, http.StatusBadRequest, fmt.Errorf(
+			"index has %d rows, exceeds the %d-row cap on all=true; paginate via page/limit instead",
+			total, maxAllRows,
+		))
 		return
 	}
 	out := make([]fileEntry, 0, len(files))

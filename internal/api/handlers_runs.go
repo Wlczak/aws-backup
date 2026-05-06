@@ -401,6 +401,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // result sets via `?limit=2147483647`. (#65)
 const maxPageLimit = 1000
 
+// maxAllRows caps `/api/files?all=true`, which the Files tree view uses
+// to fetch the whole index in one shot. Above this, the handler 400s and
+// the caller must paginate. Sized for a tree view of a typical home
+// backup; arbitrary millions-of-rows would OOM the server. (#64)
+const maxAllRows = 50000
+
 func intParam(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)
 	if v == "" {
