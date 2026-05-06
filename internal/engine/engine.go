@@ -962,17 +962,32 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 		return int64(len(item.group.Files)), item.zipSize, nil
 	}
 
-	f, err := os.Open(item.zipTmpPath)
-	if err != nil {
-		return 0, 0, err
+	var (
+		res storage.PutResult
+		err error
+	)
+	if _, _, ok := e.shouldUseResumable(item.zipSize); ok {
+		// Resumable path: persist UploadId across runs. IfAbsent
+		// preserves the existing zip-collision retry semantics — a
+		// HEAD probe up front returns ErrAlreadyExists for the
+		// engine to advance the counter slot. (#162)
+		res, err = e.putResumable(ctx, item.zipKey, item.zipTmpPath, item.zipSize, item.zipSHA256, resumePutOpts{
+			ZipKey:   item.zipRel,
+			IfAbsent: true,
+		})
+	} else {
+		f, openErr := os.Open(item.zipTmpPath)
+		if openErr != nil {
+			return 0, 0, openErr
+		}
+		// PutIfAbsent so a retry under the same key can't silently overwrite a
+		// prior DEEP_ARCHIVE object whose content may differ; the caller catches
+		// ErrAlreadyExists and advances the counter slot. uploadProgressCtx wraps
+		// the SDK's HTTP transport for byte-accurate progress including multipart
+		// part bodies. (#116)
+		res, err = e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, item.zipKey, item.zipSize), item.zipKey, f, item.zipSize)
+		f.Close()
 	}
-	// PutIfAbsent so a retry under the same key can't silently overwrite a
-	// prior DEEP_ARCHIVE object whose content may differ; the caller catches
-	// ErrAlreadyExists and advances the counter slot. uploadProgressCtx wraps
-	// the SDK's HTTP transport for byte-accurate progress including multipart
-	// part bodies. (#116)
-	res, err := e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, item.zipKey, item.zipSize), item.zipKey, f, item.zipSize)
-	f.Close()
 	if err != nil {
 		// Leave tmp in place — next run can reuse it instead of re-reading
 		// the source. A genuinely-broken tmp gets cleaned up on the next
@@ -1053,12 +1068,24 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 		Data: map[string]any{"key": ind.key, "size": ind.size},
 	})
 
-	f, err := os.Open(ind.tmpPath)
-	if err != nil {
-		return 0, err
+	var (
+		res storage.PutResult
+		err error
+	)
+	if _, _, ok := e.shouldUseResumable(ind.size); ok {
+		// Resumable path: persist UploadId across runs so a mid-upload
+		// crash doesn't waste the parts S3 already accepted. (#162)
+		res, err = e.putResumable(ctx, ind.key, ind.tmpPath, ind.size, ind.sha256hex, resumePutOpts{
+			FileID: ind.pf.ID,
+		})
+	} else {
+		f, openErr := os.Open(ind.tmpPath)
+		if openErr != nil {
+			return 0, openErr
+		}
+		res, err = e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, ind.key, ind.size), ind.key, f, ind.size)
+		f.Close()
 	}
-	res, err := e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, ind.key, ind.size), ind.key, f, ind.size)
-	f.Close()
 	if err != nil {
 		// Leave tmp in place — next run's stageIndividualGroup picks it up
 		// via tryReuseTmp instead of re-reading the source. (#127)

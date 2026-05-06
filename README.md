@@ -135,6 +135,35 @@ AWS_BACKUP_TEST_SMB_USER=user AWS_BACKUP_TEST_SMB_PASS=pass \
 go test ./internal/source -run SMB -v
 ```
 
+## Recommended bucket lifecycle rule
+
+The resumable multipart path persists `UploadId` across runs but does
+not actively abort orphans (a tmp that's deleted before the next run
+or a config change to a new bucket leaves the upload stranded).
+Configure a lifecycle rule on the backup bucket so abandoned multipart
+uploads stop accruing storage cost:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "aws-backup-abort-incomplete-mpu",
+      "Status": "Enabled",
+      "Filter": {},
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+```
+
+Apply via the AWS console or:
+
+```sh
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket your-backup-bucket \
+  --lifecycle-configuration file://lifecycle.json
+```
+
 ## Layout
 
 ```text

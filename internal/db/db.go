@@ -50,7 +50,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	if err := gdb.WithContext(ctx).AutoMigrate(&File{}, &Run{}, &RunLog{}, &Setting{}); err != nil {
+	if err := gdb.WithContext(ctx).AutoMigrate(&File{}, &Run{}, &RunLog{}, &Setting{}, &MultipartUpload{}); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
