@@ -88,3 +88,12 @@ type Storage interface {
 
 // ErrUnsupported is returned by operations a given backend does not implement.
 var ErrUnsupported = errors.New("storage: operation unsupported by this backend")
+
+// ResumableStorage is the optional capability the engine type-asserts
+// for to decide whether large files should go through PutResumable.
+// MemStorage and any future test fakes that don't implement it
+// transparently keep the single-shot path. (#162)
+type ResumableStorage interface {
+	ResumeThreshold() int64
+	PartSize() int64
+}

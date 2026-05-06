@@ -18,6 +18,10 @@
   };
   let multipartValue = $state(0);
   let multipartUnit = $state<ByteUnit>('MiB');
+  let resumeValue = $state(0);
+  let resumeUnit = $state<ByteUnit>('MiB');
+  let partValue = $state(0);
+  let partUnit = $state<ByteUnit>('MiB');
 
   function decodeBytes(b: number): { value: number; unit: ByteUnit } {
     if (!b) return { value: 0, unit: 'MiB' };
@@ -30,6 +34,8 @@
 
   // Re-decode whenever the parent swaps cfg (load / save round-trip).
   let lastSeenBytes = $state(NaN);
+  let lastSeenResume = $state(NaN);
+  let lastSeenPart = $state(NaN);
   $effect(() => {
     const b = cfg.s3.multipart_threshold;
     if (b !== lastSeenBytes) {
@@ -39,13 +45,43 @@
       lastSeenBytes = b;
     }
   });
+  $effect(() => {
+    const b = cfg.s3.resume_threshold ?? 0;
+    if (b !== lastSeenResume) {
+      const { value, unit } = decodeBytes(b);
+      resumeValue = value;
+      resumeUnit = unit;
+      lastSeenResume = b;
+    }
+  });
+  $effect(() => {
+    const b = cfg.s3.part_size ?? 0;
+    if (b !== lastSeenPart) {
+      const { value, unit } = decodeBytes(b);
+      partValue = value;
+      partUnit = unit;
+      lastSeenPart = b;
+    }
+  });
 
   let multipartMax = $derived(Math.floor((5 * byteUnitMul.GiB) / byteUnitMul[multipartUnit]));
+  let resumeMax = $derived(Math.floor((5 * byteUnitMul.GiB) / byteUnitMul[resumeUnit]));
+  let partMax = $derived(Math.floor((5 * byteUnitMul.GiB) / byteUnitMul[partUnit]));
 
   $effect(() => {
     const bytes = multipartValue * byteUnitMul[multipartUnit];
     cfg.s3.multipart_threshold = bytes;
     lastSeenBytes = bytes;
+  });
+  $effect(() => {
+    const bytes = resumeValue * byteUnitMul[resumeUnit];
+    cfg.s3.resume_threshold = bytes;
+    lastSeenResume = bytes;
+  });
+  $effect(() => {
+    const bytes = partValue * byteUnitMul[partUnit];
+    cfg.s3.part_size = bytes;
+    lastSeenPart = bytes;
   });
 
   async function testStorage() {
@@ -108,6 +144,35 @@
     </div>
     <small class="muted">Bodies at or above this size route through the multipart uploader. Lowering it earns parallel-part throughput and finer-grained retry on medium-sized objects.</small>
   </label>
+  <label>
+    <span>Resume threshold (0 = default 100&nbsp;MiB)</span>
+    <div class="row-2">
+      <input type="number" min="0" max={resumeMax} bind:value={resumeValue} />
+      <select bind:value={resumeUnit}>
+        <option value="B">B</option>
+        <option value="KiB">KiB</option>
+        <option value="MiB">MiB</option>
+        <option value="GiB">GiB</option>
+      </select>
+    </div>
+    <small class="muted">Files at or above this size use the resumable multipart driver: the UploadId is persisted across runs so a crash mid-upload doesn't waste accepted parts.</small>
+  </label>
+  <label>
+    <span>Part size (0 = default 16&nbsp;MiB; min 5&nbsp;MiB, max 5&nbsp;GiB)</span>
+    <div class="row-2">
+      <input type="number" min="0" max={partMax} bind:value={partValue} />
+      <select bind:value={partUnit}>
+        <option value="MiB">MiB</option>
+        <option value="GiB">GiB</option>
+      </select>
+    </div>
+    <small class="muted">Byte size of one multipart part. Larger parts mean fewer requests but coarser resume granularity. 10&nbsp;000 parts × part size = max object size.</small>
+  </label>
+  <p class="muted">
+    Heads up: nothing aborts orphaned multipart uploads automatically. Add an
+    <code>AbortIncompleteMultipartUpload</code> lifecycle rule on the bucket
+    (e.g. 7&nbsp;days) so abandoned uploads stop accruing storage cost.
+  </p>
   <div class="row-2">
     <label>
       <span>Access key ID</span>

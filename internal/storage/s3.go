@@ -26,6 +26,17 @@ import (
 // finer-grained retry on medium-sized objects.
 const defaultMultipartThreshold = 5 * 1024 * 1024 * 1024 // 5 GiB
 
+// DefaultResumeThreshold is the byte size at or above which uploads
+// go through the hand-rolled resumable multipart path that persists
+// the UploadId across runs. (#162)
+const DefaultResumeThreshold int64 = 100 * 1024 * 1024 // 100 MiB
+
+// DefaultPartSize is the byte size of one multipart part on the
+// resumable path. 16 MiB hits the S3 sweet spot — large enough that
+// 10k parts × 16 MiB ≈ 160 GiB covers the realistic upper end, small
+// enough that one stalled part isn't a multi-minute setback. (#162)
+const DefaultPartSize int64 = 16 * 1024 * 1024 // 16 MiB
+
 // S3Config holds everything S3Storage needs. The Endpoint field is what
 // points the client at MinIO (or another S3-compatible service); set to
 // "" to talk to real AWS.
@@ -41,6 +52,13 @@ type S3Config struct {
 	// route through the multipart uploader instead of single PutObject.
 	// 0 (or any non-positive value) selects defaultMultipartThreshold.
 	MultipartThreshold int64
+	// ResumeThreshold is the byte size at or above which the engine
+	// should pick the resumable multipart path (PutResumable) instead
+	// of the single-shot Put. 0 → DefaultResumeThreshold (100 MiB).
+	ResumeThreshold int64
+	// PartSize is the byte size of one part on the resumable path.
+	// 0 → DefaultPartSize (16 MiB).
+	PartSize int64
 }
 
 // S3Storage is the real S3 / MinIO backend.
@@ -50,6 +68,8 @@ type S3Storage struct {
 	bucket             string
 	storageClass       s3types.StorageClass
 	multipartThreshold int64
+	resumeThreshold    int64
+	partSize           int64
 }
 
 // NewS3Storage builds an S3 client from cfg. When Endpoint is set the
@@ -96,14 +116,40 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 	if mt <= 0 {
 		mt = defaultMultipartThreshold
 	}
+	rt := cfg.ResumeThreshold
+	if rt <= 0 {
+		rt = DefaultResumeThreshold
+	}
+	ps := cfg.PartSize
+	if ps <= 0 {
+		ps = DefaultPartSize
+	}
 	return &S3Storage{
 		client:             client,
 		uploader:           transfermanager.New(client),
 		bucket:             cfg.Bucket,
 		storageClass:       s3types.StorageClass(cfg.StorageClass),
 		multipartThreshold: mt,
+		resumeThreshold:    rt,
+		partSize:           ps,
 	}, nil
 }
+
+// ResumeThreshold returns the byte size at or above which uploads
+// should use the resumable multipart path. The engine reads this so
+// it can branch without knowing about S3Config internals.
+func (s *S3Storage) ResumeThreshold() int64 { return s.resumeThreshold }
+
+// PartSize returns the configured multipart part size.
+func (s *S3Storage) PartSize() int64 { return s.partSize }
+
+// Bucket returns the configured bucket name.
+func (s *S3Storage) Bucket() string { return s.bucket }
+
+// Client returns the underlying *s3.Client. Exposed so adjacent
+// packages can issue bucket-level operations (inventory, lifecycle,
+// etc.) without each loading their own AWS credentials.
+func (s *S3Storage) Client() *s3.Client { return s.client }
 
 // Put uploads body under key. Bodies <= 5 GiB go through PutObject with a
 // server-verified SHA256 checksum. Bodies above that limit (or of unknown

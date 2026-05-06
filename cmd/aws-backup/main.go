@@ -149,6 +149,8 @@ func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appSta
 		SecretAccessKey:    cfg.S3.SecretAccessKey,
 		StorageClass:       cfg.S3.StorageClass,
 		MultipartThreshold: cfg.S3.MultipartThreshold,
+		ResumeThreshold:    cfg.S3.ResumeThreshold,
+		PartSize:           cfg.S3.PartSize,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init storage: %w", err)
@@ -512,6 +514,8 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 			SecretAccessKey:    next.S3.SecretAccessKey,
 			StorageClass:       next.S3.StorageClass,
 			MultipartThreshold: next.S3.MultipartThreshold,
+			ResumeThreshold:    next.S3.ResumeThreshold,
+			PartSize:           next.S3.PartSize,
 		})
 		if err != nil {
 			if newSrc != nil {

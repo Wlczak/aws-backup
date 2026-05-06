@@ -112,6 +112,8 @@ export interface S3Config {
   storage_class: 'DEEP_ARCHIVE' | 'STANDARD' | '';
   key_prefix: string;
   multipart_threshold: number;
+  resume_threshold: number;
+  part_size: number;
 }
 export interface BackupConfig {
   chunk_size: number;
