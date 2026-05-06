@@ -194,6 +194,9 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 	}
 	rc, err := s.Get(ctx, f.S3Key)
 	if err != nil {
+		if errors.Is(err, storage.ErrGlacierThawing) {
+			return 0, fmt.Errorf("get %s: still thawing from glacier: %w", f.S3Key, err)
+		}
 		return 0, fmt.Errorf("get %s: %w", f.S3Key, err)
 	}
 	defer rc.Close()
@@ -217,7 +220,11 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 	rc, err := opts.Storage.Get(ctx, key)
 	if err != nil {
 		tmp.Close()
-		errs = append(errs, zipName+": get zip "+key+": "+err.Error())
+		if errors.Is(err, storage.ErrGlacierThawing) {
+			errs = append(errs, zipName+": get zip "+key+": still thawing from glacier: "+err.Error())
+		} else {
+			errs = append(errs, zipName+": get zip "+key+": "+err.Error())
+		}
 		return
 	}
 	if _, err := io.Copy(tmp, rc); err != nil {
