@@ -23,7 +23,7 @@
       {#each tabs as t}
         <button
           class:active={$route === t.id || $route.startsWith(t.id + '/')}
-          on:click={() => go(t.id)}
+          onclick={() => go(t.id)}
           type="button"
         >{t.label}</button>
       {/each}
