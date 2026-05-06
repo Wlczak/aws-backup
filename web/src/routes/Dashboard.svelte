@@ -211,6 +211,9 @@
         dbSyncHideTimer = window.setTimeout(() => { dbSync = null; }, 8000);
       }
       if (type === 'db_sync_failed') {
+        // Cancel any pending auto-hide from a recent `db_sync_complete`
+        // so it doesn't wipe the failure banner 8s later. (#205)
+        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
         dbSync = {
           reason: payload.reason ?? dbSync?.reason ?? 'complete',
           bytes: dbSync?.bytes ?? 0,

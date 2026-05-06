@@ -56,3 +56,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
 | #198 | — | `Dashboard.triggerRun` no longer resets state after the await — `run_start` SSE handler is the sole source of truth |
+| #205 | — | `db_sync_failed` clears the pending 8s auto-hide timer so a recent `db_sync_complete` doesn't wipe the failure banner |
