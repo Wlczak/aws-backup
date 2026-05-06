@@ -20,10 +20,16 @@ import (
 // and on aborted-by-checksum-mismatch (storage-side). A row that
 // outlives the local tmp file is harmless — it just gets discarded the
 // next time the engine sees the local file is gone or differs.
+// The `uniqueIndex` tags below carry partial-WHERE clauses so the
+// natural-key invariant (one in-flight upload per file or per zip) is
+// enforced at the schema level — without them, only application-level
+// discipline in UpsertMultipartUpload's delete-then-create kept rows
+// from duplicating, and a crash window or a future concurrent path
+// could leave two rows with the same discriminator. (#173)
 type MultipartUpload struct {
 	ID            int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	FileID        int64     `gorm:"column:file_id;index"`
-	ZipKey        string    `gorm:"column:zip_key;index"`
+	FileID        int64     `gorm:"column:file_id;uniqueIndex:idx_mpu_file_id_unique,where:file_id > 0"`
+	ZipKey        string    `gorm:"column:zip_key;uniqueIndex:idx_mpu_zip_key_unique,where:zip_key != ''"`
 	S3Key         string    `gorm:"column:s3_key;not null"`
 	UploadID      string    `gorm:"column:upload_id;not null"`
 	PartSize      int64     `gorm:"column:part_size;not null"`
