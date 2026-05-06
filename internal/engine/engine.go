@@ -664,6 +664,13 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 			// across runs. Best-effort: a delete failure just defers
 			// cleanup to a future run. (#121)
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: index %s has no matching zip, deleting orphan", k))
+			// Skip the delete on cancellation: the failure is just the
+			// cancel surfacing through the SDK and logging it as an
+			// orphan-delete error is misleading. The next run will pick
+			// the sidecar up. (#170)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if delErr := e.opts.Storage.Delete(ctx, k); delErr != nil {
 				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: orphan delete %s failed: %v", k, delErr))
 			}
