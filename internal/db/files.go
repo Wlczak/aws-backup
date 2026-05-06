@@ -578,6 +578,21 @@ func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 	return keys, err
 }
 
+// ListAllS3Keys returns every distinct non-empty s3_key in the index,
+// covering both individually-uploaded files and zip archives. Used by the
+// full restore-status scan, which must HEAD every restorable object —
+// filtering out zip-bundled rows would silently skip restore updates for
+// any file stored inside a zip.
+func (db *DB) ListAllS3Keys(ctx context.Context) ([]string, error) {
+	var keys []string
+	err := db.g.WithContext(ctx).Model(&File{}).
+		Where("COALESCE(s3_key,'') != ''").
+		Distinct("s3_key").
+		Order("s3_key").
+		Pluck("s3_key", &keys).Error
+	return keys, err
+}
+
 // ReconcileZip marks files as uploaded based on an S3 index sidecar.
 //
 // The match is restricted to rows that look genuinely orphaned in the
@@ -654,6 +669,24 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	result := db.g.WithContext(ctx).Model(&File{}).
 		Where("s3_key = ? AND restore_status != ?", s3Key, RestoreStatusRestored).
 		Update("restore_status", RestoreStatusInProgress)
+	return result.RowsAffected, result.Error
+}
+
+// ClearRestoreStatus wipes restore_status + restore_expires_at for every
+// row whose s3_key matches. Used by the restore scanner when HEAD returns
+// no x-amz-restore header — i.e. the temporary copy expired (or was never
+// restored), so any stale 'in_progress' / 'restored' state in the index
+// must be cleared.
+func (db *DB) ClearRestoreStatus(ctx context.Context, s3Key string) (int64, error) {
+	if s3Key == "" {
+		return 0, nil
+	}
+	result := db.g.WithContext(ctx).Model(&File{}).
+		Where("s3_key = ? AND (restore_status != '' OR restore_expires_at IS NOT NULL)", s3Key).
+		Updates(map[string]any{
+			"restore_status":     "",
+			"restore_expires_at": nil,
+		})
 	return result.RowsAffected, result.Error
 }
 

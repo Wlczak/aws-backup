@@ -71,3 +71,5 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
 | #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
 | #199 | — | Dashboard upload counters derived from `itemProgress` so SSE replay/reconnect can't double-count |
+| — | — | `Scanner.RunFull` walks all distinct s3_keys (incl. zip archives) via new `ListAllS3Keys`; previously filtered to individual uploads, so restore status of zip-bundled files never updated |
+| — | — | `Scanner.applyKey` clears stale `restore_status` / `restore_expires_at` when HEAD returns no `x-amz-restore` header, so expired restored copies stop showing as "restored" forever |

@@ -5,10 +5,11 @@
 //
 // Two entry points exist:
 //
-//   - RunFull walks every individually-uploaded s3_key in the index and
-//     issues a HEAD per object. This is the authoritative reconciliation
-//     used to recover from missed SQS notifications or to seed restore
-//     state when the SQS subscription was added late.
+//   - RunFull walks every distinct s3_key in the index — individually
+//     uploaded files and zip archives alike — and issues a HEAD per
+//     object. This is the authoritative reconciliation used to recover
+//     from missed SQS notifications or to seed restore state when the
+//     SQS subscription was added late.
 //
 //   - RunPending walks only files whose local restore_status is
 //     "in_progress". Cheap; safe to run after every SQS drain to catch
@@ -46,10 +47,11 @@ const progressEmitEvery = 50
 
 // DB is the slice of *db.DB the scanner needs.
 type DB interface {
-	ListIndividualS3Keys(ctx context.Context) ([]string, error)
+	ListAllS3Keys(ctx context.Context) ([]string, error)
 	ListFilesByRestoreStatus(ctx context.Context, status string) ([]string, error)
 	MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, error)
 	MarkRestored(ctx context.Context, s3Key string, expiresAt time.Time) (int64, error)
+	ClearRestoreStatus(ctx context.Context, s3Key string) (int64, error)
 }
 
 // Mode labels a scan run.
@@ -101,7 +103,7 @@ var ErrBusy = errors.New("scanner: another restore scan is already running")
 // RunFull HEADs every individually-uploaded file and updates restore
 // status accordingly.
 func (s *Scanner) RunFull(ctx context.Context) (Result, error) {
-	keys, err := s.db.ListIndividualS3Keys(ctx)
+	keys, err := s.db.ListAllS3Keys(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("list keys: %w", err)
 	}
@@ -290,7 +292,15 @@ func (s *Scanner) applyKey(ctx context.Context, st storage.Storage, key string) 
 		}
 		return int(n), false
 	}
-	return 0, false
+	// No x-amz-restore header: object isn't currently restored. Clear any
+	// stale 'in_progress' / 'restored' rows so an expired temporary copy
+	// doesn't linger in the index forever.
+	n, err := s.db.ClearRestoreStatus(ctx, key)
+	if err != nil {
+		s.logger.Warn("restore scan clear status failed", "key", key, "err", err)
+		return 0, true
+	}
+	return int(n), false
 }
 
 func (s *Scanner) publish(ev engine.Event) {
