@@ -171,6 +171,7 @@
         scanNew = 0;
         scanChanged = 0;
         scanActive = true;
+        logLines = [];
         // Clear any leftover DB-sync card from the previous run so it
         // doesn't linger across a new triggerRun.
         if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
@@ -253,13 +254,10 @@
     err = '';
     try {
       await api.triggerRun({ mode });
-      uploads = { completed: 0, failed: 0, started: 0, total: 0 };
-      scanSeen = 0;
-      scanNew = 0;
-      scanChanged = 0;
-      scanActive = false;
-      logLines = [];
-      itemProgress = {};
+      // Don't reset state here — the `run_start` SSE handler is the source
+      // of truth and clears uploads/scan/itemProgress/logLines as soon as
+      // the engine actually starts. Resetting after the await races with
+      // events that may already have arrived. (#198)
     } catch (e) {
       err = String(e);
     } finally {

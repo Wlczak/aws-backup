@@ -55,3 +55,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase |
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
+| #198 | — | `Dashboard.triggerRun` no longer resets state after the await — `run_start` SSE handler is the sole source of truth |
