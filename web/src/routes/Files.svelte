@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { api, type FilesPage, type FileRow } from '../lib/api';
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import { selection, toggle, clear, ids, paths } from '../lib/selection';
@@ -33,30 +33,41 @@
   );
 
   let searchTimer: number | undefined;
+  // Guard async load() against assigning to torn-down state if the
+  // route unmounts mid-fetch. (#207)
+  let aborted = false;
 
   async function load() {
     try {
+      let next: FilesPage;
       if (viewMode === 'tree') {
-        data = await api.files({
+        next = await api.files({
           all: true,
           status: status || undefined,
           search: search || undefined,
         });
       } else {
-        data = await api.files({
+        next = await api.files({
           page,
           limit,
           status: status || undefined,
           search: search || undefined,
         });
       }
+      if (aborted) return;
+      data = next;
       err = '';
     } catch (e) {
+      if (aborted) return;
       err = String(e);
     }
   }
 
   onMount(load);
+  onDestroy(() => {
+    aborted = true;
+    if (searchTimer) clearTimeout(searchTimer);
+  });
 
   function setView(m: ViewMode) {
     if (m === viewMode) return;

@@ -2,9 +2,12 @@
 
 export function bytes(n: number): string {
   if (n === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  const i = Math.min(units.length - 1, Math.floor(Math.log10(Math.abs(n)) / 3));
-  const v = n / Math.pow(1000, i);
+  // Base-2 (KiB / MiB / GiB) to match `du`, Linux conventions, and the
+  // StorageSettings page that already shows MiB. Previously this was
+  // base-10 (KB / MB), which displayed inconsistently with config UI. (#208)
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(Math.abs(n)) / Math.log(1024)));
+  const v = n / Math.pow(1024, i);
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 

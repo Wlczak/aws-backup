@@ -63,3 +63,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #174 | — | `source.Scan` flush goroutine recovers from panic and surfaces it via `flushErrCh` so a bad flush can't deadlock Scan |
 | #175 | — | `S3Storage.Get` translates `InvalidObjectState` to new `ErrGlacierThawing` sentinel; restore wraps it as "still thawing" in `RestoreStats.Errors` |
 | #190 | — | inventory `parseSchema` strips surrounding double-quotes per column so quoted manifest schemas still match bare names |
+| #198 | — | `Dashboard.triggerRun` no longer resets state after the await — `run_start` SSE handler is the sole source of truth |
+| #205 | — | `db_sync_failed` clears the pending 8s auto-hide timer so a recent `db_sync_complete` doesn't wipe the failure banner |
+| #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
+| #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
+| #199 | — | Dashboard upload counters derived from `itemProgress` so SSE replay/reconnect can't double-count |
