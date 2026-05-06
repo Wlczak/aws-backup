@@ -480,7 +480,13 @@ func (db *DB) ListPending(ctx context.Context, includeFailed bool) ([]File, erro
 		statuses = append(statuses, StatusFailed)
 	}
 	var files []File
-	err := db.g.WithContext(ctx).Where("status IN ?", statuses).Order("path").Find(&files).Error
+	// The engine's PendingFile only reads ID/Path/Size/MTime; pulling the
+	// full row (md5/sha256/zip_name/etc.) wastes I/O on large indexes. (#172)
+	err := db.g.WithContext(ctx).
+		Select("id, path, size, mtime").
+		Where("status IN ?", statuses).
+		Order("path").
+		Find(&files).Error
 	return files, err
 }
 

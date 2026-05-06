@@ -334,10 +334,16 @@ func fetchManifest(ctx context.Context, client API, bucket, key string) (*manife
 }
 
 // parseSchema turns "Bucket, Key, Size" into a column-name → index map.
+// S3 Inventory's manifest schema field sometimes wraps individual column
+// names in double quotes (e.g. `"Bucket", "Key", "Size"`); strip them so
+// downstream lookups by bare name still match. (#190)
 func parseSchema(s string) map[string]int {
 	out := map[string]int{}
 	for i, col := range strings.Split(s, ",") {
-		out[strings.TrimSpace(col)] = i
+		name := strings.TrimSpace(col)
+		name = strings.Trim(name, `"`)
+		name = strings.TrimSpace(name)
+		out[name] = i
 	}
 	return out
 }

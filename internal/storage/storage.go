@@ -13,6 +13,12 @@ import (
 // ErrNotFound is returned by Head / GetRestoreStatus when a key is absent.
 var ErrNotFound = errors.New("storage: key not found")
 
+// ErrGlacierThawing is returned by Get when the object lives in a Glacier
+// tier and is not yet (or no longer) restored to a downloadable state.
+// Callers (the restore engine) translate it into an operator-friendly
+// "still thawing" message instead of leaking the raw SDK error. (#175)
+var ErrGlacierThawing = errors.New("storage: object is in glacier and not restored")
+
 // ErrAlreadyExists is returned by PutIfAbsent when an object already
 // exists at the requested key. Callers (the engine's zip path) treat it
 // as a signal to advance to the next counter slot rather than silently

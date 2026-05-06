@@ -389,6 +389,10 @@ func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 			switch apiErr.ErrorCode() {
 			case "NotFound", "NoSuchKey":
 				return nil, ErrNotFound
+			case "InvalidObjectState":
+				// Object is in a Glacier tier and either has no active
+				// restore or the restore is still in progress. (#175)
+				return nil, ErrGlacierThawing
 			}
 		}
 		return nil, err

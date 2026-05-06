@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -101,6 +102,14 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 	done := make(chan struct{})
 	flushErrCh := make(chan error, 1)
 	go func() {
+		// A panic inside flush (e.g. a downstream DB driver bug) would
+		// otherwise leave Scan blocked on flushErrCh forever; recover
+		// surfaces it to the walker as a normal error. (#174)
+		defer func() {
+			if r := recover(); r != nil {
+				flushErrCh <- fmt.Errorf("flush panic: %v", r)
+			}
+		}()
 		ticker := time.NewTicker(flushInterval)
 		defer ticker.Stop()
 		for {
