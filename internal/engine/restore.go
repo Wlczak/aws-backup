@@ -3,8 +3,11 @@ package engine
 import (
 	"archive/zip"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,6 +38,13 @@ type RestoreOptions struct {
 	// Empty falls back to os.TempDir(); set this to the configured backup
 	// TmpDir so multi-GB restores don't exhaust a small /tmp tmpfs. (#74)
 	TmpDir string
+	// SkipChecksum disables the post-write MD5 check against the DB row.
+	// Off by default — verification is essentially free (hashing happens
+	// in flight via io.MultiWriter) and protects against bit-rot in S3,
+	// a tampered endpoint, or local-disk corruption that S3's transit
+	// SHA256 wouldn't catch. Opt out only for huge restores where the
+	// extra hashing visibly hurts. (#75)
+	SkipChecksum bool
 }
 
 // RestoreStats summarizes the outcome of RestoreToDir. Errors are
@@ -139,7 +149,11 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 			if err := ctx.Err(); err != nil {
 				return stats, err
 			}
-			n, err := restoreStandalone(ctx, opts.Storage, cleanTarget, f)
+			expected := f.MD5
+			if opts.SkipChecksum {
+				expected = ""
+			}
+			n, err := restoreStandalone(ctx, opts.Storage, cleanTarget, f, expected)
 			if err != nil {
 				stats.Errors = append(stats.Errors, f.Path+": "+err.Error())
 				continue
@@ -173,7 +187,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 
 // restoreStandalone downloads a single individually-uploaded file into
 // the target directory. Returns bytes written.
-func restoreStandalone(ctx context.Context, s storage.Storage, target string, f db.File) (int64, error) {
+func restoreStandalone(ctx context.Context, s storage.Storage, target string, f db.File, expectedMD5 string) (int64, error) {
 	dst, err := safeJoin(target, f.Path)
 	if err != nil {
 		return 0, err
@@ -183,7 +197,7 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 		return 0, fmt.Errorf("get %s: %w", f.S3Key, err)
 	}
 	defer rc.Close()
-	return writeFromReader(dst, rc)
+	return writeFromReader(dst, rc, expectedMD5)
 }
 
 // restoreZipMembers downloads the zip at zipName once and extracts every
@@ -250,7 +264,11 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 			errs = append(errs, m.Path+": open entry: "+err.Error())
 			continue
 		}
-		n, err := writeFromReader(dst, entry)
+		expected := m.MD5
+		if opts.SkipChecksum {
+			expected = ""
+		}
+		n, err := writeFromReader(dst, entry, expected)
 		entry.Close()
 		if err != nil {
 			errs = append(errs, m.Path+": write: "+err.Error())
@@ -263,8 +281,12 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 }
 
 // writeFromReader copies src to a new file at dst (creating parent
-// directories). Returns the number of bytes written.
-func writeFromReader(dst string, src io.Reader) (int64, error) {
+// directories). When expectedMD5 is non-empty, the bytes are hashed
+// in-flight and compared against it; a mismatch returns an error so
+// the caller can surface it in RestoreStats.Errors. The file is left
+// in place on mismatch — the operator decides whether to keep or
+// delete it. Returns the number of bytes written. (#75)
+func writeFromReader(dst string, src io.Reader, expectedMD5 string) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
@@ -272,12 +294,26 @@ func writeFromReader(dst string, src io.Reader) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("create %s: %w", dst, err)
 	}
-	n, err := io.Copy(out, src)
+	var (
+		w io.Writer = out
+		h hash.Hash
+	)
+	if expectedMD5 != "" {
+		h = md5.New()
+		w = io.MultiWriter(out, h)
+	}
+	n, err := io.Copy(w, src)
 	if cerr := out.Close(); err == nil && cerr != nil {
 		err = cerr
 	}
 	if err != nil {
 		return n, err
+	}
+	if h != nil {
+		got := hex.EncodeToString(h.Sum(nil))
+		if !strings.EqualFold(got, expectedMD5) {
+			return n, fmt.Errorf("checksum mismatch: got md5 %s, want %s", got, expectedMD5)
+		}
 	}
 	return n, nil
 }
@@ -308,4 +344,3 @@ func safeJoin(root, relPath string) (string, error) {
 	}
 	return abs, nil
 }
-

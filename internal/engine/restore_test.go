@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +16,11 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
+
+func md5hex(s string) string {
+	h := md5.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
+}
 
 func TestRestoreToDirMixed(t *testing.T) {
 	ctx := context.Background()
@@ -34,13 +41,21 @@ func TestRestoreToDirMixed(t *testing.T) {
 	for i, r := range res {
 		ids[seed[i].Path] = r.ID
 	}
-	if err := d.MarkUploadedBatch(ctx, []int64{ids["notes.txt"]}, "md5", "backups/notes.txt", now); err != nil {
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["notes.txt"]}, md5hex("hello"), "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "md5",
+	// MarkUploadedBatch sets the same md5 on every id; per-file md5s are
+	// fine for this test because each file's bytes are identical-length
+	// distinct content (the verifier only fires when md5 disagrees with
+	// the bytes actually written, not within the batch).
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, md5hex("aaa"),
+		"backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"),
 		"backups/photos/photos_1.zip", now); err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +117,10 @@ func TestRestoreToDirPrefixFilter(t *testing.T) {
 	}
 	res, _ := d.UpsertFileBatch(ctx, seed, now)
 	ids := map[string]int64{seed[0].Path: res[0].ID, seed[1].Path: res[1].ID}
-	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, "m", "backups/photos/a.jpg", now); err != nil {
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, md5hex("aaa"), "backups/photos/a.jpg", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/readme.md"]}, "m", "backups/docs/readme.md", now); err != nil {
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/readme.md"]}, md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,6 +161,53 @@ func TestRestoreToDirUnknownPath(t *testing.T) {
 	}
 	if len(stats.Skipped) != 1 || !strings.Contains(stats.Skipped[0], "nope/absent") {
 		t.Errorf("expected Skipped to mention nope/absent, got %v", stats.Skipped)
+	}
+}
+
+// TestRestoreToDirChecksumMismatch verifies that restore detects bytes
+// that don't match the DB-recorded md5 (simulating S3 bit-rot, a
+// tampered endpoint, or local-disk corruption) and surfaces them in
+// stats.Errors instead of silently writing a corrupt file. (#75)
+func TestRestoreToDirChecksumMismatch(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, _ := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
+	id := res[0].ID
+	// Record an md5 that does NOT match what's in storage.
+	wrongMD5 := md5hex("not-the-real-content")
+	if err := d.MarkUploadedBatch(ctx, []int64{id}, wrongMD5, "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/notes.txt", "hello")
+
+	target := t.TempDir()
+	stats, err := RestoreToDir(ctx, RestoreOptions{
+		DB: d, Storage: store, KeyPrefix: "backups/", TargetDir: target,
+		Paths: []string{"/"},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+	if stats.FilesWritten != 0 {
+		t.Errorf("FilesWritten: got %d want 0 on mismatch", stats.FilesWritten)
+	}
+	if len(stats.Errors) == 0 || !strings.Contains(stats.Errors[0], "checksum mismatch") {
+		t.Errorf("expected checksum-mismatch error, got %v", stats.Errors)
+	}
+
+	// SkipChecksum opt-out path: same setup, mismatch tolerated.
+	stats2, err := RestoreToDir(ctx, RestoreOptions{
+		DB: d, Storage: store, KeyPrefix: "backups/", TargetDir: t.TempDir(),
+		Paths: []string{"/"}, SkipChecksum: true,
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir SkipChecksum: %v", err)
+	}
+	if stats2.FilesWritten != 1 {
+		t.Errorf("SkipChecksum: FilesWritten got %d want 1", stats2.FilesWritten)
 	}
 }
 

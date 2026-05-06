@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,11 @@ import (
 	"github.com/Wlczak/aws-backup/internal/events"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
+
+func md5hex(s string) string {
+	h := md5.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
+}
 
 func TestRestoreTriggerValidatesRequest(t *testing.T) {
 	ts, _, _ := newSyncTestServer(t)
@@ -55,7 +62,7 @@ func TestRestoreTriggerDownloadsStandalone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, "md5", "backups/notes.txt", now); err != nil {
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("hello"), "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Put(ctx, "backups/notes.txt",
