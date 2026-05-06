@@ -57,6 +57,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #176 | — | SSE replay captures cutoff before `ListLogs`; live forwarder drops `run_log` events with `At <= cutoff` to dedupe overlap |
 | #169 | — | `runPipeline` logs which group was abandoned when a retry can't be re-queued during a stop, instead of silently bumping `groupErrCount` |
 | #173 | — | Schema management migrated from GORM `AutoMigrate` to goose-embedded SQL migrations; `00002_multipart_unique_indexes.sql` enforces partial UNIQUE on `multipart_uploads(file_id|zip_key)` |
+| —    | — | `Stats` MIN(restore_expires_at) scans a `NullString` and parses with multiple layouts; legacy DBs no longer 500 the dashboard on data-format drift |
 | — | 4b3b2b9 | Live `copy_progress` SSE event for source→tmp phase |
 | — | ea82784 | `S3.MultipartThreshold` config option |
 | — | ad3af15 | Settings PUT during a run is queued, not 409'd; applied post-run |
