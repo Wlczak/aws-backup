@@ -216,7 +216,10 @@ func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := ts.Client().Do(req)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("PUT /api/settings: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 500 {
 		t.Fatalf("status=%d want 500", resp.StatusCode)
@@ -390,7 +393,10 @@ func TestSettingsPutDuringRunComposesPending(t *testing.T) {
 	b, _ := json.Marshal(first)
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := ts.Client().Do(req)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("first PUT /api/settings: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("first PUT status=%d want 200", resp.StatusCode)
@@ -405,7 +411,10 @@ func TestSettingsPutDuringRunComposesPending(t *testing.T) {
 	b, _ = json.Marshal(second)
 	req, _ = http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ = ts.Client().Do(req)
+	resp, err = ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("second PUT /api/settings: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("second PUT status=%d want 200", resp.StatusCode)
@@ -431,7 +440,10 @@ func TestSettingsPutInvalidRejected(t *testing.T) {
 	b, _ := json.Marshal(bad)
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := ts.Client().Do(req)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("PUT /api/settings: %v", err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("status=%d want 400", resp.StatusCode)
 	}
