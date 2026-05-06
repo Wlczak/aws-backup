@@ -58,3 +58,4 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #198 | — | `Dashboard.triggerRun` no longer resets state after the await — `run_start` SSE handler is the sole source of truth |
 | #205 | — | `db_sync_failed` clears the pending 8s auto-hide timer so a recent `db_sync_complete` doesn't wipe the failure banner |
 | #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
+| #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
