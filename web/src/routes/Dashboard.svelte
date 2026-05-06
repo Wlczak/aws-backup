@@ -299,6 +299,7 @@
   } | null>(null);
 
   let syncingRestore = $state(false);
+  let scanningRestore = $state(false);
   let restoreSyncInfo = $state('');
   async function syncRestore() {
     syncingRestore = true;
@@ -314,6 +315,20 @@
       err = String(e);
     } finally {
       syncingRestore = false;
+    }
+  }
+  async function fullScanRestore() {
+    scanningRestore = true;
+    restoreSyncInfo = '';
+    err = '';
+    try {
+      const r = await api.restoreScanFull();
+      restoreSyncInfo = `Full scan: ${r.scanned} HEADed, ${r.updated} updated, ${r.errors} error(s).`;
+      await refresh();
+    } catch (e) {
+      err = String(e);
+    } finally {
+      scanningRestore = false;
     }
   }
 
@@ -544,9 +559,13 @@
       {/if}
       {#if restoreSyncInfo}<div class="sync-info" style="margin-top: 0.5rem">{restoreSyncInfo}</div>{/if}
       <div class="run-actions">
-        <button onclick={syncRestore} type="button" disabled={syncingRestore}
+        <button onclick={syncRestore} type="button" disabled={syncingRestore || scanningRestore}
                 title="Drain SQS now instead of waiting on the background poll">
-          {syncingRestore ? 'Syncing…' : 'Sync restore status'}
+          {syncingRestore ? 'Syncing…' : 'Sync now'}
+        </button>
+        <button onclick={fullScanRestore} type="button" disabled={syncingRestore || scanningRestore}
+                title="HEAD every uploaded file to authoritatively reconcile restore status">
+          {scanningRestore ? 'Scanning…' : 'Full scan'}
         </button>
       </div>
     {/if}

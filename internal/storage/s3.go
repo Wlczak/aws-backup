@@ -259,7 +259,12 @@ func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 		}
 		return HeadResult{}, err
 	}
-	r := HeadResult{Key: key, ETag: aws.ToString(out.ETag), StorageClass: string(out.StorageClass)}
+	r := HeadResult{
+		Key:          key,
+		ETag:         aws.ToString(out.ETag),
+		StorageClass: string(out.StorageClass),
+		Restore:      aws.ToString(out.Restore),
+	}
 	if out.ContentLength != nil {
 		r.Size = *out.ContentLength
 	}
@@ -356,6 +361,14 @@ func (s *S3Storage) Delete(ctx context.Context, key string) error {
 
 // Close is a no-op; the SDK's HTTP client doesn't require teardown.
 func (s *S3Storage) Close() error { return nil }
+
+// Client returns the underlying S3 SDK client. Exposed so peripheral
+// packages (inventory configuration, etc.) can issue bucket-level S3
+// API calls without each one having to re-load AWS credentials.
+func (s *S3Storage) Client() *s3.Client { return s.client }
+
+// Bucket returns the configured bucket name.
+func (s *S3Storage) Bucket() string { return s.bucket }
 
 // base64ToHex converts base64 (std, padded) to lower-case hex.
 func base64ToHex(b64 string) (string, error) {

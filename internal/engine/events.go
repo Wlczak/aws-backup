@@ -37,6 +37,14 @@ const (
 	EventDBSyncProgress = "db_sync_progress"
 	EventDBSyncComplete = "db_sync_complete"
 	EventDBSyncFailed   = "db_sync_failed"
+	// Restore-status scan events accompany the on-demand HEAD-per-object
+	// reconciliation (full scan, pending-only refresh after SQS drain, and
+	// inventory-driven sync). Mode in Data labels the source: "full",
+	// "pending", or "inventory".
+	EventRestoreScanStart    = "restore_scan_start"
+	EventRestoreScanProgress = "restore_scan_progress"
+	EventRestoreScanComplete = "restore_scan_complete"
+	EventRestoreScanFailed   = "restore_scan_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

@@ -52,6 +52,13 @@ type Consumer struct {
 	maxMsgs  int32
 	db       FileRestoreUpdater
 	logger   *slog.Logger
+	// OnDrainComplete fires after each successful DrainAll, with the
+	// number of messages processed in that drain. The CLI uses this to
+	// kick off a "pending-only" restore-status scan so files locally
+	// stuck in_progress (because their completion notification was
+	// dropped or arrived before the queue was wired up) get reconciled
+	// without waiting for a manual full scan. nil disables the hook.
+	OnDrainComplete func(ctx context.Context, processed int)
 }
 
 // New builds a Consumer, loading AWS credentials from cfg + the parent
@@ -130,6 +137,9 @@ func (c *Consumer) DrainAll(ctx context.Context) (int, error) {
 			return total, fmt.Errorf("sqs receive: %w", err)
 		}
 		if len(out.Messages) == 0 {
+			if c.OnDrainComplete != nil {
+				c.OnDrainComplete(ctx, total)
+			}
 			return total, nil
 		}
 		for _, msg := range out.Messages {
