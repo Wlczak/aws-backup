@@ -24,6 +24,8 @@ import (
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
 	"github.com/Wlczak/aws-backup/internal/restore"
+	"github.com/Wlczak/aws-backup/internal/restore/inventory"
+	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 	"github.com/Wlczak/aws-backup/internal/scheduler"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
@@ -109,6 +111,13 @@ type appState struct {
 	// "Sync restore status" button can call DrainAll alongside the
 	// background poll. nil when SQS is disabled.
 	sqsConsumer *restore.Consumer
+	// restoreScanner reconciles restore status by HEADing every (or only
+	// pending) individually-uploaded file. Lazily wired in runServe.
+	restoreScanner *scanner.Scanner
+	// inventoryMgr manages the bucket's S3 inventory configuration. nil
+	// only when storage is not an *storage.S3Storage (memory storage in
+	// tests).
+	inventoryMgr *inventory.Manager
 }
 
 // loadAppState loads config + storage, refreshes the local index.db from
@@ -628,8 +637,35 @@ func runServe(cfgPath string) {
 			logger.Warn("sqs restore consumer disabled", "err", err)
 		} else if consumer != nil {
 			app.sqsConsumer = consumer
+			// Hook up the post-drain pending-only refresh so a missed
+			// SQS notification (queue subscribed late, redrive timeout,
+			// etc.) still gets reconciled the next time the operator
+			// clicks "Sync now".
+			consumer.OnDrainComplete = func(ctx context.Context, processed int) {
+				if app.restoreScanner == nil {
+					return
+				}
+				if _, err := app.restoreScanner.RunPending(ctx); err != nil && !errors.Is(err, scanner.ErrBusy) {
+					logger.Warn("post-drain pending scan failed", "err", err)
+				}
+			}
 		}
 	}
+
+	// Restore scanner: thin closure over the live storage so a settings
+	// hot-swap is observed without rebuilding it.
+	app.restoreScanner = scanner.New(app.db, app.liveStorage, app.bus, logger)
+
+	// Inventory manager: needs the live underlying *s3.Client. Resolves
+	// per-call so a hot-swapped S3Storage flows through.
+	app.inventoryMgr = inventory.New(func() (inventory.API, string, bool) {
+		st := app.liveStorage()
+		s3st, ok := st.(*storage.S3Storage)
+		if !ok || s3st == nil {
+			return nil, "", false
+		}
+		return s3st.Client(), s3st.Bucket(), true
+	}, "")
 
 	srv := api.NewServer(api.Deps{
 		DB:                app.db,
@@ -642,6 +678,8 @@ func runServe(cfgPath string) {
 		ConfigMu:          &app.mu,
 		SyncDBToS3:        app.syncDBToS3,
 		SyncRestoreStatus: app.syncRestoreStatus(),
+		RestoreScanner:    app.restoreScanner,
+		Inventory:         app.inventoryMgr,
 		ApplySettings: func(prev, next config.Config) error {
 			return app.applySettings(context.Background(), prev, next)
 		},

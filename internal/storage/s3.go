@@ -305,7 +305,12 @@ func (s *S3Storage) Head(ctx context.Context, key string) (HeadResult, error) {
 		}
 		return HeadResult{}, err
 	}
-	r := HeadResult{Key: key, ETag: aws.ToString(out.ETag), StorageClass: string(out.StorageClass)}
+	r := HeadResult{
+		Key:          key,
+		ETag:         aws.ToString(out.ETag),
+		StorageClass: string(out.StorageClass),
+		Restore:      aws.ToString(out.Restore),
+	}
 	if out.ContentLength != nil {
 		r.Size = *out.ContentLength
 	}

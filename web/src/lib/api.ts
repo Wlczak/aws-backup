@@ -282,7 +282,43 @@ export const api = {
     request<{ processed: number }>('/api/restore/sync-status', {
       method: 'POST',
     }),
+
+  restoreScanFull: () =>
+    request<RestoreScanResult>('/api/restore/scan/full', { method: 'POST' }),
+  restoreScanPending: () =>
+    request<RestoreScanResult>('/api/restore/scan/pending', { method: 'POST' }),
+
+  inventoryGet: () => request<InventoryStatus>('/api/restore/inventory'),
+  inventoryPut: (frequency: 'daily' | 'weekly') =>
+    request<InventoryStatus>('/api/restore/inventory', {
+      method: 'PUT',
+      body: JSON.stringify({ frequency }),
+    }),
+  inventoryDelete: () =>
+    request<{ enabled: false }>('/api/restore/inventory', {
+      method: 'DELETE',
+    }),
+  inventorySync: () =>
+    request<RestoreScanResult>('/api/restore/inventory/sync', {
+      method: 'POST',
+    }),
 };
+
+export interface RestoreScanResult {
+  mode: 'full' | 'pending' | 'inventory';
+  scanned: number;
+  updated: number;
+  errors: number;
+  duration_ns: number;
+}
+
+export interface InventoryStatus {
+  enabled: boolean;
+  id?: string;
+  frequency?: 'Daily' | 'Weekly';
+  destination?: string;
+  format?: string;
+}
 
 // subscribeEvents opens a live EventSource against /api/events. Returns
 // an AbortController-style { close } — callers should invoke it on
@@ -310,6 +346,7 @@ export function subscribeEvents(
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
     'run_start', 'run_log', 'run_complete',
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
+    'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   if (onStatus) {

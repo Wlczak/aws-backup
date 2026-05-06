@@ -36,6 +36,13 @@ type HeadResult struct {
 	StorageClass   string
 	ChecksumSHA256 string // hex-encoded; empty if backend didn't echo it
 	LastModified   time.Time
+	// Restore is the raw S3 x-amz-restore header, e.g.
+	// `ongoing-request="false", expiry-date="Fri, 21 Dec 2012 00:00:00 GMT"`
+	// when the object has been restored from Glacier, or
+	// `ongoing-request="true"` while the restore is still in progress.
+	// Empty when the object has never been restored or has cooled back
+	// to the archive tier.
+	Restore string
 }
 
 // Storage is the subset of S3-like operations aws-backup needs.

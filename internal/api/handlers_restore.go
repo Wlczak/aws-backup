@@ -9,6 +9,8 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/pathutil"
+	"github.com/Wlczak/aws-backup/internal/restore/inventory"
+	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 )
 
 // Deep Archive pricing the estimator uses. Kept in code (not config) so
@@ -233,4 +235,134 @@ func (s *Server) handleRestoreSyncStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"processed": processed})
+}
+
+// handleRestoreScanFull triggers an authoritative full HEAD-per-object
+// reconciliation of restore status. Long-running on big indexes;
+// progress streams via SSE (restore_scan_*).
+func (s *Server) handleRestoreScanFull(w http.ResponseWriter, r *http.Request) {
+	if s.deps.RestoreScanner == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("restore scanner not configured (storage missing)"))
+		return
+	}
+	res, err := s.deps.RestoreScanner.RunFull(r.Context())
+	if err != nil {
+		if errors.Is(err, scanner.ErrBusy) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore scan full: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleRestoreScanPending HEADs only files locally marked in_progress
+// to catch SQS notifications that never arrived.
+func (s *Server) handleRestoreScanPending(w http.ResponseWriter, r *http.Request) {
+	if s.deps.RestoreScanner == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("restore scanner not configured (storage missing)"))
+		return
+	}
+	res, err := s.deps.RestoreScanner.RunPending(r.Context())
+	if err != nil {
+		if errors.Is(err, scanner.ErrBusy) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore scan pending: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleInventoryGet returns the current S3 inventory configuration on
+// the backup bucket, or {enabled: false} when none is set.
+func (s *Server) handleInventoryGet(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Inventory == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("inventory manager not configured (storage missing)"))
+		return
+	}
+	st, err := s.deps.Inventory.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("get inventory: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+type inventoryPutRequest struct {
+	Frequency string `json:"frequency"` // "daily" | "weekly"
+}
+
+// handleInventoryPut installs (or replaces) the bucket's inventory
+// configuration with the requested frequency.
+func (s *Server) handleInventoryPut(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Inventory == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("inventory manager not configured (storage missing)"))
+		return
+	}
+	var req inventoryPutRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	freq, err := inventory.ParseFrequency(req.Frequency)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.deps.Inventory.Put(r.Context(), freq); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("put inventory: %w", err))
+		return
+	}
+	st, err := s.deps.Inventory.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("read back inventory: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleInventoryDelete removes the inventory configuration. Idempotent.
+func (s *Server) handleInventoryDelete(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Inventory == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("inventory manager not configured (storage missing)"))
+		return
+	}
+	if err := s.deps.Inventory.Delete(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("delete inventory: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+// handleInventorySync enumerates keys from the latest inventory manifest
+// and runs them through the restore scanner.
+func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Inventory == nil || s.deps.RestoreScanner == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			errors.New("inventory manager or scanner not configured (storage missing)"))
+		return
+	}
+	keys, err := s.deps.Inventory.ListLatestKeys(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("list inventory keys: %w", err))
+		return
+	}
+	res, err := s.deps.RestoreScanner.RunKeys(r.Context(), scanner.ModeInventory, keys)
+	if err != nil {
+		if errors.Is(err, scanner.ErrBusy) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("inventory scan: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

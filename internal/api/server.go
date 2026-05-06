@@ -18,6 +18,8 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
+	"github.com/Wlczak/aws-backup/internal/restore/inventory"
+	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 	"github.com/Wlczak/aws-backup/internal/storage"
 	webassets "github.com/Wlczak/aws-backup/web"
 )
@@ -64,7 +66,16 @@ type Deps struct {
 	// Returns the number of messages processed. nil means "SQS not
 	// configured" — the handler returns 503 so the UI can surface that.
 	SyncRestoreStatus func(ctx context.Context) (int, error)
-	Logger            *slog.Logger
+	// RestoreScanner reconciles restore status by HEADing every (or only
+	// pending) individually-uploaded file. nil disables the on-demand
+	// scan endpoints (handlers return 503).
+	RestoreScanner *scanner.Scanner
+	// Inventory manages the bucket's S3 inventory configuration. nil
+	// disables the inventory endpoints (handlers return 503). Typically
+	// nil only in tests; in production it's wired even when no inventory
+	// is configured because the GET handler is what tells the UI that.
+	Inventory *inventory.Manager
+	Logger    *slog.Logger
 }
 
 // Server exposes the Router for tests and for the CLI to Serve() from.
@@ -258,6 +269,12 @@ func (s *Server) Router() http.Handler {
 		r.Post("/restore/estimate", s.handleRestoreEstimate)
 		r.Post("/restore/trigger", s.handleRestoreTrigger)
 		r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
+		r.Post("/restore/scan/full", s.handleRestoreScanFull)
+		r.Post("/restore/scan/pending", s.handleRestoreScanPending)
+		r.Get("/restore/inventory", s.handleInventoryGet)
+		r.Put("/restore/inventory", s.handleInventoryPut)
+		r.Delete("/restore/inventory", s.handleInventoryDelete)
+		r.Post("/restore/inventory/sync", s.handleInventorySync)
 
 		r.Post("/sync", s.handleSync)
 		r.Post("/sync/full", s.handleSyncFull)

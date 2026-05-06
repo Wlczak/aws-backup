@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type RestoreEstimate } from '../lib/api';
+  import {
+    api,
+    subscribeEvents,
+    type RestoreEstimate,
+    type RestoreScanResult,
+    type InventoryStatus,
+  } from '../lib/api';
   import { bytes } from '../lib/format';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
@@ -19,6 +25,16 @@
   let confirmTrigger = $state(false);
   let syncing = $state(false);
 
+  // Restore-status sync state.
+  let scanBusy = $state(false);
+  let scanResult = $state<RestoreScanResult | null>(null);
+  let scanProgress = $state<{ scanned: number; total: number; mode: string } | null>(null);
+
+  // Inventory state.
+  let inventory = $state<InventoryStatus | null>(null);
+  let inventoryFreq = $state<'daily' | 'weekly'>('daily');
+  let inventoryBusy = $state(false);
+
   onMount(() => {
     const pre = selectionPaths();
     if (pre.length > 0) {
@@ -26,7 +42,107 @@
       info = `Pre-filled ${pre.length} path(s) from Files selection.`;
       clearSelection();
     }
+    // Best-effort load of inventory status; absence is normal.
+    loadInventory();
+    const sub = subscribeEvents((type, data) => {
+      if (type === 'restore_scan_progress') {
+        const d = data as { scanned: number; total: number; mode: string };
+        scanProgress = { scanned: d.scanned, total: d.total, mode: d.mode };
+      } else if (type === 'restore_scan_complete') {
+        scanProgress = null;
+      } else if (type === 'restore_scan_failed') {
+        scanProgress = null;
+      }
+    });
+    return () => sub.close();
   });
+
+  async function loadInventory() {
+    try {
+      inventory = await api.inventoryGet();
+      if (inventory.frequency === 'Weekly') inventoryFreq = 'weekly';
+      else inventoryFreq = 'daily';
+    } catch {
+      inventory = null;
+    }
+  }
+
+  async function doScanFull() {
+    scanBusy = true;
+    err = '';
+    info = '';
+    scanResult = null;
+    try {
+      scanResult = await api.restoreScanFull();
+      info = `Full scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated, ${scanResult.errors} error(s).`;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      scanBusy = false;
+    }
+  }
+
+  async function doScanPending() {
+    scanBusy = true;
+    err = '';
+    info = '';
+    scanResult = null;
+    try {
+      scanResult = await api.restoreScanPending();
+      info =
+        scanResult.scanned === 0
+          ? 'No files in restore-pending state.'
+          : `Pending scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated.`;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      scanBusy = false;
+    }
+  }
+
+  async function doInventoryEnable() {
+    inventoryBusy = true;
+    err = '';
+    info = '';
+    try {
+      inventory = await api.inventoryPut(inventoryFreq);
+      info = `Inventory enabled (${inventory.frequency}).`;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      inventoryBusy = false;
+    }
+  }
+
+  async function doInventoryDisable() {
+    inventoryBusy = true;
+    err = '';
+    info = '';
+    try {
+      await api.inventoryDelete();
+      inventory = { enabled: false };
+      info = 'Inventory disabled.';
+    } catch (e) {
+      err = String(e);
+    } finally {
+      inventoryBusy = false;
+    }
+  }
+
+  async function doInventorySync() {
+    inventoryBusy = true;
+    err = '';
+    info = '';
+    scanResult = null;
+    try {
+      scanResult = await api.inventorySync();
+      info = `Inventory sync: ${scanResult.scanned} keys HEADed, ${scanResult.updated} updated.`;
+    } catch (e) {
+      err = String(e);
+    } finally {
+      inventoryBusy = false;
+    }
+  }
 
   function paths(): string[] {
     return raw
@@ -101,16 +217,73 @@
 <h1>Restore from Glacier Deep Archive</h1>
 
 <div class="card">
-  <div class="label">Restore status</div>
+  <div class="label">Restore status sync</div>
   <p class="muted">
-    Drains the SQS queue of pending S3 Glacier restore events and applies them to
-    the local index. The background poller already does this on its own cadence —
-    use this button to force an immediate sync after a Glacier restore lands.
+    Three ways to reconcile local restore status with what S3 actually reports.
+    The background SQS poller already updates state on its own cadence — these
+    buttons force an immediate refresh.
   </p>
   <div class="actions">
-    <button onclick={doSyncStatus} disabled={syncing} type="button">
-      {syncing ? 'Syncing…' : 'Sync restore status'}
+    <button onclick={doSyncStatus} disabled={syncing || scanBusy} type="button">
+      {syncing ? 'Draining…' : 'Drain SQS now'}
     </button>
+    <button onclick={doScanPending} disabled={scanBusy || syncing} type="button">
+      {scanBusy ? 'Scanning…' : 'Scan pending only'}
+    </button>
+    <button onclick={doScanFull} disabled={scanBusy || syncing} type="button">
+      {scanBusy ? 'Scanning…' : 'Full HEAD scan'}
+    </button>
+  </div>
+  {#if scanProgress}
+    <p class="muted" style="margin-top: 0.5rem">
+      {scanProgress.mode}: {scanProgress.scanned.toLocaleString()} / {scanProgress.total.toLocaleString()} HEADed
+    </p>
+  {/if}
+</div>
+
+<div class="card">
+  <div class="label">S3 Inventory</div>
+  <p class="muted">
+    A scheduled S3 inventory report enumerates every key in the bucket so the
+    "Sync from inventory" action can refresh restore status without paying for
+    a full ListObjectsV2 sweep. Reports are written under
+    <code class="mono">_inventory/</code> on the same backup bucket. First report
+    lands within 24–48&nbsp;h after enabling.
+  </p>
+  {#if inventory}
+    <div class="stats" style="margin-top: 0.5rem">
+      <div>
+        <div class="muted">State</div>
+        <div class="big">{inventory.enabled ? 'Enabled' : 'Disabled'}</div>
+      </div>
+      {#if inventory.enabled}
+        <div>
+          <div class="muted">Frequency</div>
+          <div class="big">{inventory.frequency ?? '—'}</div>
+        </div>
+        <div>
+          <div class="muted">Destination</div>
+          <div class="mono small">{inventory.destination ?? '—'}</div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+  <div class="actions">
+    <select bind:value={inventoryFreq} disabled={inventoryBusy}>
+      <option value="daily">Daily</option>
+      <option value="weekly">Weekly</option>
+    </select>
+    <button onclick={doInventoryEnable} disabled={inventoryBusy} type="button">
+      {inventory?.enabled ? 'Update' : 'Enable'}
+    </button>
+    {#if inventory?.enabled}
+      <button onclick={doInventoryDisable} disabled={inventoryBusy} type="button">
+        Disable
+      </button>
+      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy} type="button">
+        Sync from inventory
+      </button>
+    {/if}
   </div>
 </div>
 
