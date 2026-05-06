@@ -560,7 +560,14 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 				inflight++ // re-counts the group
 				workCh <- *rg
 			} else {
-				// Can't re-queue during stop; count as error.
+				// Can't re-queue during stop; count as error and log
+				// loudly so operators can see which group was abandoned
+				// rather than just watching groupErrCount tick up
+				// silently. (#169)
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf(
+					"abandoned retry due to stop request: dir=%q attempts=%d files=%d",
+					dir, rg.attempts+1, len(rg.group.Files),
+				))
 				groupErrCount++
 			}
 			// This result consumed one inflight slot; the re-queued item adds another.
