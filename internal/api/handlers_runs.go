@@ -426,9 +426,33 @@ func intParam(r *http.Request, key string, def int) int {
 	return n
 }
 
-// decodeJSON is a small helper for PUT/POST bodies.
+// decodeJSON is a small helper for PUT/POST bodies. Decoder errors can
+// embed bytes from the request body (offsets, field names, snippets),
+// so we sanitise the message before returning it: CR/LF are collapsed
+// to spaces (so a malicious body can't forge log lines / response
+// headers) and the result is capped at 256 chars. (#183)
 func decodeJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return errors.New(sanitizeDecodeErr(err.Error()))
+	}
+	return nil
+}
+
+// sanitizeDecodeErr collapses CR/LF in s to spaces and truncates the
+// result to maxDecodeErrLen runes. Exported via lowercase for testing.
+func sanitizeDecodeErr(s string) string {
+	const maxDecodeErrLen = 256
+	b := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r == '\r' || r == '\n' {
+			r = ' '
+		}
+		b = append(b, r)
+		if len(b) >= maxDecodeErrLen {
+			break
+		}
+	}
+	return string(b)
 }
