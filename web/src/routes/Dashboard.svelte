@@ -26,6 +26,11 @@
     percent: number;
     status: 'active' | 'done' | 'failed';
     phase: 'copy' | 'upload';
+    // Number of source files this item represents — 1 for an
+    // individual upload, len(group.Files) for a zip group. The engine
+    // emits this on `upload_start` / `upload_complete` for zips so the
+    // dashboard counters reflect file count, not group count. (#count-zips)
+    files: number;
     error?: string;
     updatedAt: number;
   };
@@ -56,6 +61,7 @@
       percent: prev?.percent ?? 0,
       status: prev?.status ?? 'active',
       phase: prev?.phase ?? 'copy',
+      files: prev?.files ?? 1,
       error: prev?.error,
       updatedAt: Date.now(),
       ...patch,
@@ -79,9 +85,10 @@
   let uploads = $derived.by(() => {
     let completed = 0, failed = 0, started = 0;
     for (const it of Object.values(itemProgress)) {
-      if (it.status === 'done') { completed++; started++; }
-      else if (it.status === 'failed') { failed++; started++; }
-      else if (it.phase === 'upload') started++;
+      const n = it.files || 1;
+      if (it.status === 'done') { completed += n; started += n; }
+      else if (it.status === 'failed') { failed += n; started += n; }
+      else if (it.phase === 'upload') started += n;
     }
     return { completed, failed, started, total: uploadsTotal };
   });
@@ -179,6 +186,7 @@
             percent: 0,
             status: 'active',
             phase: 'upload',
+            files: payload.files ?? 1,
             error: undefined,
           });
         }
@@ -200,6 +208,7 @@
             percent: 100,
             status: 'done',
             phase: 'upload',
+            files: payload.files ?? itemProgress[payload.key]?.files ?? 1,
           });
         }
       }
