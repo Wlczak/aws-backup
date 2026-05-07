@@ -426,6 +426,15 @@ func fetchManifest(ctx context.Context, client API, bucket, key string) (*manife
 		return nil, fmt.Errorf("manifest sourceBucket %q does not match read bucket %q",
 			mf.SourceBucket, bucket)
 	}
+	// Every entry must carry an MD5checksum: fetchDataKeys would otherwise
+	// silently skip per-data-file verification on an empty value, which is
+	// exactly the back-door an attacker with PutObject on _inventory/ could
+	// use to ship unsigned data. (#232)
+	for i, f := range mf.Files {
+		if strings.TrimSpace(f.MD5Checksum) == "" {
+			return nil, fmt.Errorf("manifest entry %d (key %q) has empty MD5checksum", i, f.Key)
+		}
+	}
 	return &mf, nil
 }
 
