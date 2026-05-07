@@ -154,10 +154,10 @@ export type SettingsResponse = Config & { pending_apply: boolean };
 // callers can branch on `e.kind` (e.g. show an "offline" UX for network).
 // `body` carries the first 200 chars of an unparseable response. (#203)
 export class ApiError extends Error {
-  kind: 'network' | 'http' | 'parse';
+  kind: 'network' | 'http' | 'parse' | 'abort';
   status?: number;
   body?: string;
-  constructor(kind: 'network' | 'http' | 'parse', message: string, opts?: { status?: number; body?: string }) {
+  constructor(kind: 'network' | 'http' | 'parse' | 'abort', message: string, opts?: { status?: number; body?: string }) {
     super(message);
     this.name = 'ApiError';
     this.kind = kind;
@@ -177,6 +177,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       },
     });
   } catch (e) {
+    // Surface AbortError as its own kind so callers can ignore it
+    // silently (intentional abort isn't an error to toast). (#204)
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new ApiError('abort', 'aborted');
+    }
     throw new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!resp.ok) {
@@ -213,14 +218,17 @@ export const api = {
   stopRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/stop`, { method: 'POST' }),
   continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
 
-  files: (opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {}) => {
+  files: (
+    opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {},
+    signal?: AbortSignal,
+  ) => {
     const qs = new URLSearchParams();
     if (opts.page) qs.set('page', String(opts.page));
     if (opts.limit) qs.set('limit', String(opts.limit));
     if (opts.status) qs.set('status', opts.status);
     if (opts.search) qs.set('search', opts.search);
     if (opts.all) qs.set('all', 'true');
-    return request<FilesPage>(`/api/files?${qs.toString()}`);
+    return request<FilesPage>(`/api/files?${qs.toString()}`, { signal });
   },
   fileStats: () => request<FileStats>('/api/files/stats'),
   retryFile: (id: number) =>

@@ -36,25 +36,21 @@
   // Guard async load() against assigning to torn-down state if the
   // route unmounts mid-fetch. (#207)
   let aborted = false;
+  // Abort any in-flight load before issuing a new one so a stale earlier
+  // response (e.g. from a "a" search) can't overwrite a fresher one
+  // (e.g. "abc"). (#204)
+  let inflight: AbortController | null = null;
 
   async function load() {
+    if (inflight) inflight.abort();
+    const ctl = new AbortController();
+    inflight = ctl;
     try {
-      let next: FilesPage;
-      if (viewMode === 'tree') {
-        next = await api.files({
-          all: true,
-          status: status || undefined,
-          search: search || undefined,
-        });
-      } else {
-        next = await api.files({
-          page,
-          limit,
-          status: status || undefined,
-          search: search || undefined,
-        });
-      }
-      if (aborted) return;
+      const opts = viewMode === 'tree'
+        ? { all: true, status: status || undefined, search: search || undefined }
+        : { page, limit, status: status || undefined, search: search || undefined };
+      const next = await api.files(opts, ctl.signal);
+      if (aborted || ctl.signal.aborted) return;
       data = next;
       // Tree mode loads `all=true`, so the response is the authoritative
       // set of known file ids. Drop any selection rows whose backing file
@@ -65,7 +61,7 @@
         pruneToIds(present);
       }
     } catch (e) {
-      if (aborted) return;
+      if (aborted || ctl.signal.aborted) return;
       toast.error(String(e));
     }
   }
@@ -73,6 +69,7 @@
   onMount(load);
   onDestroy(() => {
     aborted = true;
+    if (inflight) inflight.abort();
     if (searchTimer) clearTimeout(searchTimer);
   });
 
