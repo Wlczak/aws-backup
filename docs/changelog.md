@@ -77,3 +77,24 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #211 | 4e64502 | Dashboard/Files/Logs/Restore route polling+action errors through `toast.error` per the project convention; inline `{#if err}` cards removed |
 | #202 | 141f9f7 | `Restore.loadInventory` guards on an `aborted` flag so navigating away mid-fetch doesn't write to torn-down `$state` |
 | #203 | 552799a | `request<T>` throws a typed `ApiError` with `kind: 'network' \| 'http' \| 'parse'`; HTTP errors carry `status` + first 200 chars of the body |
+| #212 | 87770e9 | `selection.pruneToIds(present)`; Files tree-mode load drops dangling selection rows so deletions don't carry into Restore preload |
+| #204 | bf6a791 | `api.files` accepts `AbortSignal`; Files.svelte aborts the prior load before each new one; AbortError surfaced as `ApiError` kind=`abort` |
+| #197 | 93dd96d | `Server.inventorySyncBusy` CAS-guards `handleInventorySync` so concurrent clicks 409 instead of both downloading the manifest |
+| #193 | 93dd96d | `restoreZipMembers` falls back to a case-folded zip-member lookup with a slog.Info "used X" line; ambiguous case-insensitive matches surface as a per-member error |
+| #194 | 93dd96d | `writeFromReader` removes the partial dst on any non-checksum error so a zero-byte file doesn't masquerade as a tiny successful restore on retry |
+| #188 | dc20388 | `findLatestManifest` skips manifests younger than a 5-minute settle window so a too-fresh manifest doesn't hit NoSuchKey on its data files |
+| #189 | dc20388 | `ListLatestKeys` reads LastModified for the chosen manifest and slog.Warns when its age exceeds 2× the configured frequency |
+| #192 | dc20388 | Scanner shares a `golang.org/x/time/rate` token bucket (4000 rps, burst 200) across the worker pool to stay under S3's 5500 rps per-prefix HEAD/GET ceiling |
+| #191 | dc20388 | `handleRestoreScanFull` and `handleInventorySync` reject with 409 when a backup run is in flight to avoid HEAD-driven status writes racing engine writes on the same `s3_key` |
+| #185 | f31f152 | `Consumer.receiveMu` serialises Receive+process between Run and DrainAll so the drain can't fire `OnDrainComplete` while Run is mid-batch |
+| #186 | f31f152 | `handleMessage` spawns a heartbeat that calls `ChangeMessageVisibility(visSec)` every visSec/3 so a slow batch can't be redelivered mid-process |
+| #187 | f31f152 | `fetchManifest` verifies sibling `manifest.checksum` MD5, asserts `sourceBucket` matches the read bucket, and propagates per-data-file MD5s into `fetchDataKeys` |
+| #180 | 4b78a81 | `applyPendingSettings` bails when shutdownCh is closed; persisted config reapplies on next start instead of building new clients during teardown |
+| #179 | 4b78a81 | `cachedStats` releases the mutex on cache-hit and uses `singleflight.Do` for misses; errors get a 500ms backoff so a degraded DB isn't replayed instantly |
+| #178 | 4b78a81 | `cachedAllFiles` mirrors `cachedStats` (2s TTL keyed on status\|search, singleflight, 500ms error backoff) so a poll loop can't saturate SQLite via `?all=true` |
+| #177 | 4b78a81 | `handleTestSource` wraps `source.FromConfig` in a 10s `context.WithTimeout` so a black-holed SMB host can't pin a goroutine for the OS default ~75s |
+| #171 | bb9a1c6 | `MarkUploadedMany` checks ctx between rows; `ReconcileZip` checks ctx between chunks so a cancel releases the SQLite write lock at the next chunk boundary |
+| #167 | bb9a1c6 | `putResumable` takes runID and tags every emitted `EventUploadProgress`; resume-path emits also throttled to `defaultProgressInterval` |
+| #166 | bb9a1c6 | `PutResumable` derives an `uploadCtx` cancelled on first worker error; coalesces errors via `errors.Join`; verifies `len(completed)==expected` before `CompleteMultipart` |
+| #168 | bb9a1c6 | `countingReadCloser` tracks per-roundtrip bytes, exposes `Seek` forwarding, and wraps `req.GetBody`; both refund prior bytes via `fn(-n)` so retries don't double-count |
+| #132 | 8051920 | `handleDeleteCloudPaths` calls `MarkMissingByPaths` for every successfully-deleted source path so the next existence check doesn't re-upload them |
