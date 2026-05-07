@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -145,27 +144,40 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 }
 
 type restoreTriggerRequest struct {
-	Paths     []string `json:"paths"`
-	TargetDir string   `json:"target_dir"`
+	Paths []string `json:"paths"`
+	// Days is how long the restored copy stays in the standard tier
+	// before reverting to the archive class. AWS S3 accepts 1..N (N
+	// depends on retrieval tier); we clamp to [1, 30] to keep the UI
+	// honest and avoid runaway dollar costs from a typo.
+	Days int `json:"days"`
 }
 
 type restoreTriggerResponse struct {
-	FilesWritten int64    `json:"files_written"`
-	BytesWritten int64    `json:"bytes_written"`
-	Skipped      []string `json:"skipped,omitempty"`
-	Errors       []string `json:"errors,omitempty"`
+	KeysRequested         int      `json:"keys_requested"`
+	KeysAlreadyInProgress int      `json:"keys_already_in_progress"`
+	KeysAlreadyAvailable  int      `json:"keys_already_available"`
+	FilesAffected         int64    `json:"files_affected"`
+	BytesAffected         int64    `json:"bytes_affected"`
+	UnknownPaths          []string `json:"unknown_paths,omitempty"`
+	Errors                []string `json:"errors,omitempty"`
 }
 
-// handleRestoreTrigger downloads each selected file from S3 and writes
-// it under target_dir. Files stored individually are streamed directly
-// from their s3_key; files stored inside a zip archive are downloaded
-// once per archive and extracted selectively.
-//
-// This path assumes the S3 objects are already retrievable. If the
-// bucket stores them in DEEP_ARCHIVE and they haven't been restored out
-// of band, Storage.Get will fail and the per-file error is reported in
-// the response. Wiring s3:RestoreObject + readiness polling is a
-// follow-up (see the "feature 19" note).
+// restoreDaysMin / restoreDaysMax bound the operator-facing days value.
+// AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
+// cost of a typo bounded; the operator can re-issue the restore later
+// to extend.
+const (
+	restoreDaysMin = 1
+	restoreDaysMax = 30
+)
+
+// handleRestoreTrigger issues a Glacier restore (s3:RestoreObject) for
+// every unique S3 key covering the matched DB rows. It does NOT
+// download anything — Glacier objects aren't readable until S3 has
+// thawed them, which takes hours, so this endpoint just kicks off the
+// thaw. Track completion via /api/restore/sync-status (SQS) or a
+// /api/restore/scan/* HEAD sweep; the affected DB rows immediately move
+// to restore_status='in_progress' so the UI reflects the request.
 func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -182,36 +194,31 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
 		return
 	}
-	if req.TargetDir == "" {
-		writeError(w, http.StatusBadRequest, errors.New("target_dir is required"))
-		return
-	}
-	if !filepath.IsAbs(req.TargetDir) {
-		writeError(w, http.StatusBadRequest, errors.New("target_dir must be an absolute path"))
+	if req.Days < restoreDaysMin || req.Days > restoreDaysMax {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("days must be in [%d, %d] (got %d)", restoreDaysMin, restoreDaysMax, req.Days))
 		return
 	}
 
-	var tmpDir string
-	if cfg, ok := s.snapshotConfig(); ok {
-		tmpDir = cfg.Backup.TmpDir
-	}
-	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
+	stats, err := engine.RequestRestore(r.Context(), engine.RestoreRequestOptions{
 		DB:        s.deps.DB,
 		Storage:   st,
 		KeyPrefix: s.storagePrefix(),
-		TargetDir: req.TargetDir,
 		Paths:     req.Paths,
-		TmpDir:    tmpDir,
+		Days:      req.Days,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, restoreTriggerResponse{
-		FilesWritten: stats.FilesWritten,
-		BytesWritten: stats.BytesWritten,
-		Skipped:      stats.Skipped,
-		Errors:       stats.Errors,
+		KeysRequested:         stats.KeysRequested,
+		KeysAlreadyInProgress: stats.KeysAlreadyInProgress,
+		KeysAlreadyAvailable:  stats.KeysAlreadyAvailable,
+		FilesAffected:         stats.FilesAffected,
+		BytesAffected:         stats.BytesAffected,
+		UnknownPaths:          stats.UnknownPaths,
+		Errors:                stats.Errors,
 	})
 }
 

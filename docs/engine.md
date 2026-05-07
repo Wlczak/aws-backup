@@ -64,4 +64,4 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 - `Post` event → `db.MarkRestoreInProgress(s3_key)`
 - `Completed` event → `db.MarkRestored(s3_key, expiresAt)` — sets `restore_expires_at` so the UI can warn before the temporary copy expires
 - `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/egress cost breakdown plus expected wait window
-- `POST /api/restore/trigger` issues the S3 RestoreObject calls for selected paths; the actual file delivery happens later via SQS callbacks
+- `POST /api/restore/trigger` issues `s3:RestoreObject` for every unique key covering the selected paths and asks AWS to keep the thawed copy in standard storage for `days` (1..30). It does NOT download anything — Glacier objects aren't readable until they thaw (12–48 h Standard tier). Matched DB rows immediately flip to `restore_status='in_progress'` so the UI reflects the request; final state lands via SQS (`s3:ObjectRestore:Completed`) or a HEAD scan. Storage-level `RestoreAlreadyInProgress` / `InvalidObjectState` are mapped to soft-success counts in the response, not errors

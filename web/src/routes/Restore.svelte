@@ -12,12 +12,15 @@
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
-  let targetDir = $state('');
+  let days = $state(7);
   let estimate = $state<RestoreEstimate | null>(null);
   let triggerResult = $state<{
-    files_written: number;
-    bytes_written: number;
-    skipped?: string[];
+    keys_requested: number;
+    keys_already_in_progress: number;
+    keys_already_available: number;
+    files_affected: number;
+    bytes_affected: number;
+    unknown_paths?: string[];
     errors?: string[];
   } | null>(null);
   let loading = $state(false);
@@ -29,7 +32,7 @@
   // restore on B with no second confirm. (#209)
   $effect(() => {
     void raw;
-    void targetDir;
+    void days;
     confirmTrigger = false;
   });
 
@@ -193,8 +196,8 @@
 
   async function doTrigger() {
     const p = paths();
-    if (!targetDir.trim()) {
-      toast.error('target directory is required');
+    if (!Number.isInteger(days) || days < 1 || days > 30) {
+      toast.error('days must be an integer between 1 and 30');
       confirmTrigger = false;
       return;
     }
@@ -205,8 +208,14 @@
     loading = true;
     triggerResult = null;
     try {
-      triggerResult = await api.restoreTrigger(p, targetDir.trim());
-      toast.success(`Restored ${triggerResult.files_written.toLocaleString()} file(s) (${bytes(triggerResult.bytes_written)}).`);
+      triggerResult = await api.restoreTrigger(p, days);
+      const r = triggerResult;
+      const parts: string[] = [];
+      if (r.keys_requested > 0) parts.push(`${r.keys_requested} requested`);
+      if (r.keys_already_in_progress > 0) parts.push(`${r.keys_already_in_progress} already thawing`);
+      if (r.keys_already_available > 0) parts.push(`${r.keys_already_available} already available`);
+      const summary = parts.length > 0 ? parts.join(' · ') : 'no keys to restore';
+      toast.success(`Retrieval ${summary} for ${r.files_affected.toLocaleString()} file(s).`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -298,16 +307,22 @@
   </p>
   <textarea bind:value={raw} placeholder={"photos\ndocs/2024\nfamily-archive.zip"}></textarea>
 
-  <div class="label" style="margin-top: 0.75rem">Target directory (absolute path)</div>
-  <p class="muted">Restored files are written here, preserving their source-relative paths.</p>
-  <input type="text" bind:value={targetDir} placeholder="/home/me/restored" class="mono targetdir" />
+  <div class="label" style="margin-top: 0.75rem">Days to keep restored (1–30)</div>
+  <p class="muted">
+    AWS will keep the thawed copy in standard storage for this many days. After
+    that, the object reverts to the archive class and a new restore must be
+    issued. The actual download is done out-of-band once status flips to
+    <code class="mono">restored</code> — track via "Drain SQS now" or
+    "Scan pending only" above.
+  </p>
+  <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
 
   <div class="actions">
     <button class="primary" onclick={doEstimate} disabled={loading} type="button">
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
     <button onclick={doTrigger} disabled={loading || !estimate} type="button">
-      {confirmTrigger ? 'Click again to confirm' : 'Download & restore'}
+      {confirmTrigger ? 'Click again to confirm' : 'Request retrieval'}
     </button>
     <button type="button" onclick={() => { raw = '/'; estimate = null; }} title="Select all files">
       Select all
@@ -317,15 +332,25 @@
 
 {#if triggerResult}
   <div class="card">
-    <div class="label">Restore result</div>
+    <div class="label">Retrieval request result</div>
+    <p class="muted">
+      AWS has accepted the restore request. Glacier objects typically thaw
+      within 12–48 h (Standard tier). The matching files are now marked
+      <code class="mono">in_progress</code>; status flips to
+      <code class="mono">restored</code> once SQS notifies us or a HEAD scan
+      observes <code class="mono">x-amz-restore</code>.
+    </p>
     <div class="stats">
-      <div><div class="muted">Files written</div><div class="big">{triggerResult.files_written.toLocaleString()}</div></div>
-      <div><div class="muted">Bytes</div><div class="big">{bytes(triggerResult.bytes_written)}</div></div>
+      <div><div class="muted">Keys requested</div><div class="big">{triggerResult.keys_requested.toLocaleString()}</div></div>
+      <div><div class="muted">Already thawing</div><div class="big">{triggerResult.keys_already_in_progress.toLocaleString()}</div></div>
+      <div><div class="muted">Already available</div><div class="big">{triggerResult.keys_already_available.toLocaleString()}</div></div>
+      <div><div class="muted">Files affected</div><div class="big">{triggerResult.files_affected.toLocaleString()}</div></div>
+      <div><div class="muted">Data</div><div class="big">{bytes(triggerResult.bytes_affected)}</div></div>
     </div>
-    {#if triggerResult.skipped?.length}
+    {#if triggerResult.unknown_paths?.length}
       <details style="margin-top: 0.75rem">
-        <summary>{triggerResult.skipped.length} skipped</summary>
-        <ul class="mono small">{#each triggerResult.skipped as p}<li>{p}</li>{/each}</ul>
+        <summary>{triggerResult.unknown_paths.length} unknown path(s)</summary>
+        <ul class="mono small">{#each triggerResult.unknown_paths as p}<li>{p}</li>{/each}</ul>
       </details>
     {/if}
     {#if triggerResult.errors?.length}
@@ -384,7 +409,6 @@
 
 <style>
   .err { color: var(--err); border-color: var(--err); }
-  .info { color: var(--accent); border-color: var(--accent); }
   .warn { color: var(--warn); }
   .label { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
   textarea {
@@ -394,8 +418,8 @@
     font-size: 0.9rem;
     margin-top: 0.5rem;
   }
-  .targetdir {
-    width: 100%;
+  .daysinput {
+    width: 6rem;
     padding: 0.4rem 0.5rem;
     font-size: 0.9rem;
   }

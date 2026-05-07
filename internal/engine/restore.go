@@ -57,6 +57,194 @@ type RestoreStats struct {
 	Errors       []string
 }
 
+// RestoreRequestOptions configures a RequestRestore call. Only operates
+// on the bucket — no local writes, no downloads. Use this to ask S3 to
+// thaw archived objects out into the standard tier so they're available
+// for download (or later inspection) for `Days` days.
+type RestoreRequestOptions struct {
+	DB        *db.DB
+	Storage   storage.Storage
+	KeyPrefix string
+	// Paths selects which DB rows to thaw by prefix match. "" or "/"
+	// means "every uploaded row". Unknown paths land in
+	// RestoreRequestStats.UnknownPaths.
+	Paths []string
+	// Days bounds how long the restored copy stays in the standard tier
+	// before reverting. 1..30 is the operator-friendly range; AWS S3
+	// accepts 1..N where N depends on the retrieval tier. Validated by
+	// the caller (the API handler clamps to [1, 30]).
+	Days int
+}
+
+// RestoreRequestStats summarizes the outcome of RequestRestore.
+type RestoreRequestStats struct {
+	// KeysRequested is the number of distinct S3 keys (zip archives +
+	// standalone objects) for which a fresh restore was issued.
+	KeysRequested int
+	// KeysAlreadyInProgress is the number of keys S3 reported as already
+	// thawing (RestoreAlreadyInProgress). The caller treats this as a
+	// soft-success — there's nothing more to do.
+	KeysAlreadyInProgress int
+	// KeysAlreadyAvailable is the number of keys whose storage class
+	// doesn't need restoration (STANDARD, GLACIER_IR with active
+	// restore, etc. — i.e. ErrNotArchived).
+	KeysAlreadyAvailable int
+	// FilesAffected is the number of DB rows covered by the requested
+	// keys (zip archives count their members).
+	FilesAffected int64
+	// BytesAffected is the cumulative size of the affected DB rows.
+	BytesAffected int64
+	UnknownPaths  []string
+	Errors        []string
+}
+
+// RequestRestore issues a Glacier restore (s3:RestoreObject) for every
+// unique S3 key covering the matched DB rows, asking AWS to keep the
+// thawed copy in the standard tier for opts.Days days. Multiple files
+// inside one zip share a single restore call. Successful new requests
+// flip the matching DB rows to restore_status='in_progress' so the UI
+// reflects state immediately rather than waiting for the SQS Restore
+// Initiated event.
+//
+// Per-key errors are collected in RestoreRequestStats.Errors; the
+// function only returns a hard error for setup failures.
+func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreRequestStats, error) {
+	var stats RestoreRequestStats
+	if opts.DB == nil {
+		return stats, errors.New("restore: DB is required")
+	}
+	if opts.Storage == nil {
+		return stats, errors.New("restore: Storage is required")
+	}
+	if opts.Days < 1 {
+		return stats, fmt.Errorf("restore: Days must be >= 1 (got %d)", opts.Days)
+	}
+
+	wantAll := false
+	wantSet := make(map[string]struct{}, len(opts.Paths))
+	for _, p := range opts.Paths {
+		if p == "" || p == "/" {
+			wantAll = true
+			break
+		}
+		wantSet[p] = struct{}{}
+	}
+
+	// Group matching rows by the S3 key that would actually be restored —
+	// the zip archive's key for zipped members, or the row's own s3_key
+	// for individually-uploaded files.
+	type keyGroup struct {
+		fileCount int64
+		bytes     int64
+		s3Keys    []string // for MarkRestoreInProgress on success
+	}
+	byKey := map[string]*keyGroup{}
+	matched := map[string]bool{}
+
+	const pageSize = 1000
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		rows, _, err := opts.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
+		if err != nil {
+			return stats, fmt.Errorf("list files: %w", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, f := range rows {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+				continue
+			}
+			if !wantAll {
+				hit := false
+				for req := range wantSet {
+					if pathutil.HasPrefixPath(f.Path, req) {
+						hit = true
+						matched[req] = true
+						break
+					}
+				}
+				if !hit {
+					continue
+				}
+			}
+			var key string
+			if f.ZipName != "" {
+				key = pathutil.JoinKey(opts.KeyPrefix, f.ZipName)
+			} else if f.S3Key != "" {
+				key = f.S3Key
+			} else {
+				continue
+			}
+			g, ok := byKey[key]
+			if !ok {
+				g = &keyGroup{}
+				byKey[key] = g
+			}
+			g.fileCount++
+			g.bytes += f.Size
+			if f.S3Key != "" {
+				g.s3Keys = append(g.s3Keys, f.S3Key)
+			}
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	if !wantAll {
+		for req := range wantSet {
+			if !matched[req] {
+				stats.UnknownPaths = append(stats.UnknownPaths, req)
+			}
+		}
+	}
+
+	// Sort keys so the output is deterministic + so a partial cancellation
+	// processes them in a predictable order.
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		g := byKey[key]
+		stats.FilesAffected += g.fileCount
+		stats.BytesAffected += g.bytes
+
+		err := opts.Storage.Restore(ctx, key, opts.Days)
+		switch {
+		case err == nil:
+			stats.KeysRequested++
+			// Flip every covered s3_key to in_progress so the UI reflects
+			// the new state without waiting on the SQS event. For zipped
+			// members we don't currently track restore on the zip key
+			// itself; the SQS path will catch that when the bucket is
+			// configured to deliver Restore events for zip objects.
+			for _, sk := range g.s3Keys {
+				if _, mErr := opts.DB.MarkRestoreInProgress(ctx, sk); mErr != nil {
+					stats.Errors = append(stats.Errors, key+": mark in_progress: "+mErr.Error())
+				}
+			}
+		case errors.Is(err, storage.ErrRestoreInProgress):
+			stats.KeysAlreadyInProgress++
+			for _, sk := range g.s3Keys {
+				_, _ = opts.DB.MarkRestoreInProgress(ctx, sk)
+			}
+		case errors.Is(err, storage.ErrNotArchived):
+			stats.KeysAlreadyAvailable++
+		default:
+			stats.Errors = append(stats.Errors, key+": "+err.Error())
+		}
+	}
+	return stats, nil
+}
+
 // RestoreToDir downloads every DB file matching opts.Paths and writes it
 // beneath opts.TargetDir. Files stored individually are streamed from
 // their s3_key; files inside a zip archive are downloaded once per zip

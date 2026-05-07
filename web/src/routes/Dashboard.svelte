@@ -394,9 +394,17 @@
   let backupStarted = $state(false);
 
   let showRestoreForm = $state(false);
-  let restoreTargetDir = $state('');
+  let restoreDays = $state(7);
   let restoring = $state(false);
-  let restoreResult = $state<{ files_written: number; bytes_written: number; skipped?: string[]; errors?: string[] } | null>(null);
+  let restoreResult = $state<{
+    keys_requested: number;
+    keys_already_in_progress: number;
+    keys_already_available: number;
+    files_affected: number;
+    bytes_affected: number;
+    unknown_paths?: string[];
+    errors?: string[];
+  } | null>(null);
 
   let showDeleteConfirm = $state(false);
   let deleting = $state(false);
@@ -428,10 +436,14 @@
   }
 
   async function restoreMissing() {
-    if (!restoreTargetDir || !fullSyncResult?.cloud_missing_from_local?.length) return;
+    if (!fullSyncResult?.cloud_missing_from_local?.length) return;
+    if (!Number.isInteger(restoreDays) || restoreDays < 1 || restoreDays > 30) {
+      toast.error('days must be an integer between 1 and 30');
+      return;
+    }
     restoring = true; restoreResult = null;
     try {
-      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreTargetDir);
+      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays);
     } catch (e) {
       toast.error(String(e)); // (#226)
     } finally {
@@ -678,8 +690,9 @@
           <div class="fix-row">
             {#if restoreResult}
               <span class="ok-text">
-                Restored {restoreResult.files_written} file(s) · {bytes(restoreResult.bytes_written)}
-                {#if restoreResult.skipped?.length} · {restoreResult.skipped.length} skipped{/if}
+                Retrieval requested · {restoreResult.keys_requested} key(s) · {restoreResult.files_affected} file(s) · {bytes(restoreResult.bytes_affected)}
+                {#if restoreResult.keys_already_in_progress > 0} · {restoreResult.keys_already_in_progress} already thawing{/if}
+                {#if restoreResult.keys_already_available > 0} · {restoreResult.keys_already_available} already available{/if}
                 {#if restoreResult.errors?.length} · {restoreResult.errors.length} error(s){/if}
               </span>
             {:else if deleteResult}
@@ -690,19 +703,25 @@
               </span>
             {:else if showRestoreForm}
               <div class="fix-form">
-                <input
-                  type="text"
-                  bind:value={restoreTargetDir}
-                  placeholder="/absolute/path/to/restore/into"
-                  class="path-input"
-                />
+                <label class="muted small" style="display: flex; align-items: center; gap: 0.4rem">
+                  Days to keep restored
+                  <input
+                    type="number"
+                    bind:value={restoreDays}
+                    min="1"
+                    max="30"
+                    step="1"
+                    class="path-input"
+                    style="width: 5rem"
+                  />
+                </label>
                 <button
                   class="primary fix-btn"
                   onclick={restoreMissing}
                   type="button"
-                  disabled={restoring || !restoreTargetDir}
+                  disabled={restoring}
                 >
-                  {restoring ? 'Restoring…' : `Restore ${fullSyncResult.cloud_missing_from_local?.length ?? fullSyncResult.cloud_missing_count} file(s)`}
+                  {restoring ? 'Requesting…' : `Request retrieval for ${fullSyncResult.cloud_missing_from_local?.length ?? fullSyncResult.cloud_missing_count} file(s)`}
                 </button>
                 <button onclick={() => showRestoreForm = false} type="button">Cancel</button>
               </div>

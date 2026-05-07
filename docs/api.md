@@ -32,7 +32,7 @@ GET    /api/s3/test                   HeadBucket round-trip
 
 # Restore (Glacier)
 POST   /api/restore/estimate          {paths: []} → cost + wait estimate
-POST   /api/restore/trigger           {paths: []} → initiate S3 batch restore
+POST   /api/restore/trigger           {paths: [], days: 1..30} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
 
 # Sync / reconcile

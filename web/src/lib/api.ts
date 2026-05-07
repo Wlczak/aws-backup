@@ -307,15 +307,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths }),
     }),
-  restoreTrigger: (paths: string[], targetDir: string) =>
+  /**
+   * Issue a Glacier restore request for every unique S3 key covering the
+   * matched paths. Does NOT download anything — Glacier objects aren't
+   * readable until S3 has thawed them (hours to a day). Track completion
+   * via restoreSyncStatus / restoreScanFull / restoreScanPending. The
+   * affected DB rows immediately move to restore_status='in_progress'
+   * so the UI reflects the request.
+   */
+  restoreTrigger: (paths: string[], days: number) =>
     request<{
-      files_written: number;
-      bytes_written: number;
-      skipped?: string[];
+      keys_requested: number;
+      keys_already_in_progress: number;
+      keys_already_available: number;
+      files_affected: number;
+      bytes_affected: number;
+      unknown_paths?: string[];
       errors?: string[];
     }>('/api/restore/trigger', {
       method: 'POST',
-      body: JSON.stringify({ paths, target_dir: targetDir }),
+      body: JSON.stringify({ paths, days }),
     }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {

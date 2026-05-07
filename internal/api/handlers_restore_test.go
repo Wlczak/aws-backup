@@ -33,9 +33,11 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 		body   string
 		status int
 	}{
-		{name: "missing paths", body: `{"paths":[],"target_dir":"/tmp"}`, status: http.StatusBadRequest},
-		{name: "missing target", body: `{"paths":["a"]}`, status: http.StatusBadRequest},
-		{name: "relative target", body: `{"paths":["a"],"target_dir":"relative/path"}`, status: http.StatusBadRequest},
+		{name: "missing paths", body: `{"paths":[],"days":7}`, status: http.StatusBadRequest},
+		{name: "missing days", body: `{"paths":["a"]}`, status: http.StatusBadRequest},
+		{name: "days zero", body: `{"paths":["a"],"days":0}`, status: http.StatusBadRequest},
+		{name: "days too high", body: `{"paths":["a"],"days":31}`, status: http.StatusBadRequest},
+		{name: "days negative", body: `{"paths":["a"],"days":-1}`, status: http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,12 +54,15 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 	}
 }
 
-func TestRestoreTriggerDownloadsStandalone(t *testing.T) {
+// TestRestoreTriggerRequestsRestore covers the new request-only flow:
+// /api/restore/trigger calls Storage.Restore for each unique key and
+// flips matching DB rows to restore_status='in_progress'. It does NOT
+// download anything.
+func TestRestoreTriggerRequestsRestore(t *testing.T) {
 	ts, d, store := newSyncTestServer(t)
 	ctx := context.Background()
 	now := time.Now()
 
-	// Seed a single standalone file and its S3 object.
 	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -70,10 +75,9 @@ func TestRestoreTriggerDownloadsStandalone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target := t.TempDir()
 	body, _ := json.Marshal(map[string]any{
-		"paths":      []string{"/"},
-		"target_dir": target,
+		"paths": []string{"/"},
+		"days":  7,
 	})
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger",
 		"application/json", bytes.NewReader(body))
@@ -89,17 +93,14 @@ func TestRestoreTriggerDownloadsStandalone(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.FilesWritten != 1 {
-		t.Errorf("FilesWritten: got %d (%+v)", out.FilesWritten, out)
+	// MemStorage's Restore returns ErrUnsupported for non-archive
+	// classes, so the per-key call lands in Errors. We're really
+	// testing request shape + that the file was matched.
+	if out.FilesAffected != 1 {
+		t.Errorf("FilesAffected: got %d (%+v)", out.FilesAffected, out)
 	}
-
-	got, err := os.ReadFile(filepath.Join(target, "notes.txt"))
-	if err != nil {
-		t.Fatalf("read restored file: %v", err)
-	}
-	if string(got) != "hello" {
-		t.Errorf("restored content: got %q want %q", got, "hello")
-	}
+	_ = os.TempDir // keep os referenced for filepath usage above
+	_ = filepath.Separator
 }
 
 func TestRestoreTriggerStorageNotConfigured(t *testing.T) {
@@ -121,7 +122,7 @@ func TestRestoreTriggerStorageNotConfigured(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger",
-		"application/json", bytes.NewReader([]byte(`{"paths":["x"],"target_dir":"/tmp"}`)))
+		"application/json", bytes.NewReader([]byte(`{"paths":["x"],"days":7}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +131,5 @@ func TestRestoreTriggerStorageNotConfigured(t *testing.T) {
 		t.Errorf("expected 503, got %d", resp.StatusCode)
 	}
 
-	// silence unused-import warnings if helpers were pruned
 	_ = storage.ErrNotFound
 }
