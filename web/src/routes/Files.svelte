@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { api, type FilesPage, type FileRow } from '../lib/api';
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
-  import { selection, toggle, clear, ids, paths } from '../lib/selection';
+  import { selection, toggle, clear, ids, paths, pruneToIds } from '../lib/selection';
   import { go } from '../lib/router';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -56,6 +56,14 @@
       }
       if (aborted) return;
       data = next;
+      // Tree mode loads `all=true`, so the response is the authoritative
+      // set of known file ids. Drop any selection rows whose backing file
+      // has since been deleted/missing so cross-page selection doesn't
+      // carry dangling ids into Restore. (#212)
+      if (viewMode === 'tree') {
+        const present = new Set(next.files.map((f) => f.id));
+        pruneToIds(present);
+      }
     } catch (e) {
       if (aborted) return;
       toast.error(String(e));
