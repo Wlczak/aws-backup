@@ -720,8 +720,17 @@ func runServe(cfgPath string) {
 	// server is wired up; the consumer itself was constructed earlier so
 	// the "Sync restore status" button can drain on demand alongside this
 	// loop.
+	// Track the SQS consumer goroutine so shutdown can wait for it
+	// before app.close() tears down the DB. Without the wait, an
+	// in-flight handleMessage → MarkRestoreComplete races a closed
+	// *sql.DB. (#258)
+	var sqsDone chan struct{}
 	if app.sqsConsumer != nil {
-		go func() { _ = app.sqsConsumer.Run(ctx) }()
+		sqsDone = make(chan struct{})
+		go func() {
+			defer close(sqsDone)
+			_ = app.sqsConsumer.Run(ctx)
+		}()
 	}
 
 	addr := net.JoinHostPort(app.cfg.Server.Host, strconv.Itoa(app.cfg.Server.Port))
@@ -763,6 +772,16 @@ func runServe(cfgPath string) {
 	// wait for it before app.close() tears down DB and storage.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("engine shutdown", "error", err)
+	}
+	// Wait for the SQS consumer to exit before app.close() runs. Run()
+	// returns once ctx is done and any in-flight handleMessage has
+	// completed; without this wait MarkRestore* could race db.Close. (#258)
+	if sqsDone != nil {
+		select {
+		case <-sqsDone:
+		case <-shutdownCtx.Done():
+			logger.Warn("sqs consumer did not exit before shutdown deadline")
+		}
 	}
 }
 
