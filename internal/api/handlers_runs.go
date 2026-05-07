@@ -204,14 +204,20 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		s.runMu.Lock()
 		s.currentRun = 0
 		s.currentRunCancel = nil
-		// Drain any settings the operator queued mid-run. Apply them
-		// outside the lock so the swap's I/O (closing old source/storage,
-		// dialling new ones) doesn't hold runMu against a concurrent
-		// /api/runs trigger or /api/settings PUT.
+		s.runMu.Unlock()
+		// applyMu serialises against PUT /api/settings so a fresh PUT
+		// can't slip into the (currentRun==0, pendingConfig drained) gap
+		// and get reverted by the apply below. We drain pendingConfig
+		// AFTER acquiring applyMu so a concurrent PUT that already won
+		// applyMu and ran ApplySettings + cleared pendingConfig leaves
+		// us with a nil pending and we apply nothing. (#255)
+		s.applyMu.Lock()
+		s.runMu.Lock()
 		pending := s.pendingConfig
 		s.pendingConfig = nil
 		s.runMu.Unlock()
 		s.applyPendingSettings(pending, logger)
+		s.applyMu.Unlock()
 		s.maybeSyncDBToS3(syncDBToS3, logger, runID, mode, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true

@@ -110,6 +110,13 @@ type Server struct {
 	// run finishes, so settings changes don't have to wait for the run to
 	// end before the operator can submit them. Guarded by runMu.
 	pendingConfig *config.Config
+	// applyMu serialises ApplySettings + Save + updateConfig so a concurrent
+	// PUT /api/settings can't run between the post-run goroutine clearing
+	// pendingConfig and that goroutine actually applying it — the previous
+	// release-and-then-apply window let a fresh PUT silently get reverted
+	// by the queued apply. Always acquired AFTER any runMu acquisition has
+	// been released. (#255)
+	applyMu sync.Mutex
 	// shutdownCh is closed once at the top of Shutdown. The post-run
 	// DB-sync goroutine watches it so an in-flight DB upload aborts
 	// promptly when the service is shutting down — otherwise a 600 s

@@ -61,6 +61,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Acquire applyMu BEFORE runMu so we serialise against the post-run
+	// goroutine's apply: that goroutine takes runMu briefly to flip
+	// currentRun=0 and then takes applyMu to drain pendingConfig. If we
+	// took only runMu and saw currentRun==0, our save could land in the
+	// gap between its runMu.Unlock and applyMu.Lock and then be reverted
+	// by the queued apply. (#255)
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 
