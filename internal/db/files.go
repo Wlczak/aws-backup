@@ -883,6 +883,58 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	return result.RowsAffected, result.Error
 }
 
+// MarkRestoreInProgressMany is the bulk variant of MarkRestoreInProgress.
+// Runs one UPDATE per chunk of s3_keys so a "restore folder" click that
+// covers thousands of rows doesn't serialise into a thousand SQLite
+// commits — the original loop took minutes on big zip groups because
+// each iteration was its own transaction. (#restore-batch)
+func (db *DB) MarkRestoreInProgressMany(ctx context.Context, s3Keys []string) (int64, error) {
+	if len(s3Keys) == 0 {
+		return 0, nil
+	}
+	// Dedupe — callers may pass repeats (e.g. every member of a zip
+	// group carries the same s3_key) and the WHERE clause matches the
+	// same rows on each duplicate, so the work would otherwise scale
+	// O(unique_keys × duplicate_factor).
+	seen := make(map[string]struct{}, len(s3Keys))
+	uniq := make([]string, 0, len(s3Keys))
+	for _, k := range s3Keys {
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		uniq = append(uniq, k)
+	}
+	if len(uniq) == 0 {
+		return 0, nil
+	}
+	var total int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(uniq) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := uniq
+			if len(chunk) > sqlChunkSize {
+				chunk = uniq[:sqlChunkSize]
+			}
+			uniq = uniq[len(chunk):]
+			res := tx.Model(&File{}).
+				Where("s3_key IN ? AND COALESCE(restore_status,'') != ?", chunk, RestoreStatusRestored).
+				Update("restore_status", RestoreStatusInProgress)
+			if res.Error != nil {
+				return res.Error
+			}
+			total += res.RowsAffected
+		}
+		return nil
+	})
+	return total, err
+}
+
 // MarkRestoreCleared resets restore_status / restore_expires_at on every
 // row whose s3_key matches and is currently 'in_progress' or 'restored'.
 // Used when the restore scanner observes a HEAD with no x-amz-restore

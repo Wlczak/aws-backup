@@ -222,20 +222,15 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 		case err == nil:
 			stats.KeysRequested++
 			// Flip every covered s3_key to in_progress so the UI reflects
-			// the new state without waiting on the SQS event. For zipped
-			// members we don't currently track restore on the zip key
-			// itself; the SQS path will catch that when the bucket is
-			// configured to deliver Restore events for zip objects.
-			for _, sk := range g.s3Keys {
-				if _, mErr := opts.DB.MarkRestoreInProgress(ctx, sk); mErr != nil {
-					stats.Errors = append(stats.Errors, key+": mark in_progress: "+mErr.Error())
-				}
+			// the new state without waiting on the SQS event. One bulk
+			// UPDATE per group — the previous per-file loop was O(N) commits
+			// and made a 2000-file zip restore take minutes. (#restore-batch)
+			if _, mErr := opts.DB.MarkRestoreInProgressMany(ctx, g.s3Keys); mErr != nil {
+				stats.Errors = append(stats.Errors, key+": mark in_progress: "+mErr.Error())
 			}
 		case errors.Is(err, storage.ErrRestoreInProgress):
 			stats.KeysAlreadyInProgress++
-			for _, sk := range g.s3Keys {
-				_, _ = opts.DB.MarkRestoreInProgress(ctx, sk)
-			}
+			_, _ = opts.DB.MarkRestoreInProgressMany(ctx, g.s3Keys)
 		case errors.Is(err, storage.ErrNotArchived):
 			stats.KeysAlreadyAvailable++
 		default:
