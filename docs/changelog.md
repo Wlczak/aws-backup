@@ -71,3 +71,9 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #207 | — | `Files.svelte` clears `searchTimer` and aborts in-flight `load()` writes on unmount |
 | #208 | — | `format.bytes()` switched to base-2 (KiB/MiB/GiB) to match StorageSettings + `du` conventions |
 | #199 | — | Dashboard upload counters derived from `itemProgress` so SSE replay/reconnect can't double-count |
+| #201 | 76093d0 | `subscribeEvents` adds an `onmessage` fallback so untyped SSE frames are forwarded (and warned on in dev) instead of silently dropped |
+| #200 | e781690 | Dashboard `itemProgress` evicts oldest terminal items beyond a 200-cap so a 50k-file run doesn't keep every entry in `$state` for the tab lifetime |
+| #209 | 45e0789 | Restore double-click confirm resets via `$effect` on `raw`/`targetDir` so editing the path between clicks forces a fresh confirm |
+| #211 | 4e64502 | Dashboard/Files/Logs/Restore route polling+action errors through `toast.error` per the project convention; inline `{#if err}` cards removed |
+| #202 | 141f9f7 | `Restore.loadInventory` guards on an `aborted` flag so navigating away mid-fetch doesn't write to torn-down `$state` |
+| #203 | 552799a | `request<T>` throws a typed `ApiError` with `kind: 'network' \| 'http' \| 'parse'`; HTTP errors carry `status` + first 200 chars of the body |
