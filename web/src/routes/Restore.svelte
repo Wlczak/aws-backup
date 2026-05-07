@@ -8,6 +8,7 @@
     type InventoryStatus,
   } from '../lib/api';
   import { bytes } from '../lib/format';
+  import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
@@ -19,7 +20,6 @@
     skipped?: string[];
     errors?: string[];
   } | null>(null);
-  let err = $state('');
   let info = $state('');
   let loading = $state(false);
   let confirmTrigger = $state(false);
@@ -78,14 +78,13 @@
 
   async function doScanFull() {
     scanBusy = true;
-    err = '';
     info = '';
     scanResult = null;
     try {
       scanResult = await api.restoreScanFull();
       info = `Full scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated, ${scanResult.errors} error(s).`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       scanBusy = false;
     }
@@ -93,7 +92,6 @@
 
   async function doScanPending() {
     scanBusy = true;
-    err = '';
     info = '';
     scanResult = null;
     try {
@@ -103,7 +101,7 @@
           ? 'No files in restore-pending state.'
           : `Pending scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated.`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       scanBusy = false;
     }
@@ -111,13 +109,12 @@
 
   async function doInventoryEnable() {
     inventoryBusy = true;
-    err = '';
     info = '';
     try {
       inventory = await api.inventoryPut(inventoryFreq);
       info = `Inventory enabled (${inventory.frequency}).`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       inventoryBusy = false;
     }
@@ -125,14 +122,13 @@
 
   async function doInventoryDisable() {
     inventoryBusy = true;
-    err = '';
     info = '';
     try {
       await api.inventoryDelete();
       inventory = { enabled: false };
       info = 'Inventory disabled.';
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       inventoryBusy = false;
     }
@@ -140,14 +136,13 @@
 
   async function doInventorySync() {
     inventoryBusy = true;
-    err = '';
     info = '';
     scanResult = null;
     try {
       scanResult = await api.inventorySync();
       info = `Inventory sync: ${scanResult.scanned} keys HEADed, ${scanResult.updated} updated.`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       inventoryBusy = false;
     }
@@ -163,17 +158,16 @@
   async function doEstimate() {
     const p = paths();
     if (p.length === 0) {
-      err = 'enter at least one path';
+      toast.error('enter at least one path');
       return;
     }
     loading = true;
-    err = '';
     info = '';
     estimate = null;
     try {
       estimate = await api.restoreEstimate(p);
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       loading = false;
     }
@@ -181,7 +175,6 @@
 
   async function doSyncStatus() {
     syncing = true;
-    err = '';
     info = '';
     try {
       const r = await api.restoreSyncStatus();
@@ -190,7 +183,7 @@
           ? 'No new restore events on the queue.'
           : `Synced ${r.processed} restore event(s).`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       syncing = false;
     }
@@ -199,7 +192,7 @@
   async function doTrigger() {
     const p = paths();
     if (!targetDir.trim()) {
-      err = 'target directory is required';
+      toast.error('target directory is required');
       confirmTrigger = false;
       return;
     }
@@ -208,14 +201,13 @@
       return;
     }
     loading = true;
-    err = '';
     info = '';
     triggerResult = null;
     try {
       triggerResult = await api.restoreTrigger(p, targetDir.trim());
       info = `Restored ${triggerResult.files_written.toLocaleString()} file(s) (${bytes(triggerResult.bytes_written)}).`;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       loading = false;
       confirmTrigger = false;
@@ -344,7 +336,6 @@
   </div>
 {/if}
 
-{#if err}<div class="card err">{err}</div>{/if}
 {#if info}<div class="card info">{info}</div>{/if}
 
 {#if estimate}

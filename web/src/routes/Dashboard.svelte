@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { api, subscribeEvents, type Status, type FileStats } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
+  import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
 
@@ -17,7 +18,6 @@
   // reconnect can't double-count them. (#199)
   let uploadsTotal = $state(0);
   let triggering = $state(false);
-  let err = $state('');
 
   type ItemProgress = {
     key: string;
@@ -122,9 +122,8 @@
     try {
       status = await api.status();
       stats = await api.fileStats();
-      err = '';
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     }
   }
 
@@ -283,7 +282,6 @@
 
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
     triggering = true;
-    err = '';
     try {
       await api.triggerRun({ mode });
       // Don't reset state here — the `run_start` SSE handler is the source
@@ -291,7 +289,7 @@
       // the engine actually starts. Resetting after the await races with
       // events that may already have arrived. (#198)
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       triggering = false;
     }
@@ -302,7 +300,7 @@
     try {
       await api.cancelRun(status.current.id);
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     }
   }
 
@@ -316,7 +314,7 @@
       // next 3s status poll, so the button label flips on click.
       if (status) status.stop_requested = true;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       stopping = false;
     }
@@ -329,7 +327,7 @@
       await api.continueRun(status.current.id);
       if (status) status.stop_requested = false;
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       stopping = false;
     }
@@ -353,7 +351,6 @@
   async function syncRestore() {
     syncingRestore = true;
     restoreSyncInfo = '';
-    err = '';
     try {
       const r = await api.restoreSyncStatus();
       restoreSyncInfo = r.processed === 0
@@ -361,7 +358,7 @@
         : `Processed ${r.processed} restore event(s).`;
       await refresh();
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       syncingRestore = false;
     }
@@ -369,13 +366,12 @@
   async function fullScanRestore() {
     scanningRestore = true;
     restoreSyncInfo = '';
-    err = '';
     try {
       const r = await api.restoreScanFull();
       restoreSyncInfo = `Full scan: ${r.scanned} HEADed, ${r.updated} updated, ${r.errors} error(s).`;
       await refresh();
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       scanningRestore = false;
     }
@@ -450,7 +446,6 @@
     syncing = true;
     syncInfo = '';
     fullSyncResult = null;
-    err = '';
     try {
       const r = await api.sync();
       const total = r.missing_zips + r.missing_individual;
@@ -462,7 +457,7 @@
       }
       await refresh();
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       syncing = false;
     }
@@ -472,7 +467,6 @@
     syncing = true;
     syncInfo = '';
     fullSyncResult = null;
-    err = '';
     resetFixState();
     try {
       const r = await api.syncFull();
@@ -486,7 +480,7 @@
       syncInfo = `Full sync: ${parts.join(' · ')}.`;
       await refresh();
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     } finally {
       syncing = false;
     }
@@ -494,8 +488,6 @@
 </script>
 
 <h1>Dashboard</h1>
-
-{#if err}<div class="card err">{err}</div>{/if}
 
 <div class="grid">
   <div class="card">

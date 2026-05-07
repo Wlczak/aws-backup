@@ -4,6 +4,7 @@
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import { selection, toggle, clear, ids, paths } from '../lib/selection';
   import { go } from '../lib/router';
+  import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
   import FileTreeNode from '../components/FileTreeNode.svelte';
   import { buildTree, collectFiles, type TreeNode } from '../lib/tree';
@@ -19,7 +20,6 @@
   let status = $state('');
   let search = $state('');
   let data = $state<FilesPage | null>(null);
-  let err = $state('');
   let detail = $state<FileRow | null>(null);
   let busy = $state(false);
   let expanded = $state<Set<string>>(new Set(['']));
@@ -56,10 +56,9 @@
       }
       if (aborted) return;
       data = next;
-      err = '';
     } catch (e) {
       if (aborted) return;
-      err = String(e);
+      toast.error(String(e));
     }
   }
 
@@ -144,7 +143,7 @@
     try {
       await api.retryFile(f.id);
       await load();
-    } catch (e) { err = String(e); }
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -156,7 +155,7 @@
       await api.retryFiles(sel);
       clear();
       await load();
-    } catch (e) { err = String(e); }
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -165,9 +164,8 @@
     try {
       const res = await api.retryAllFailed();
       await load();
-      err = '';
-      if (res.affected === 0) err = 'No failed files to retry.';
-    } catch (e) { err = String(e); }
+      if (res.affected === 0) toast.info('No failed files to retry.');
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -179,7 +177,7 @@
       if (detail?.id === f.id) detail = null;
       if (selectedIDs.has(f.id)) toggle({ id: f.id, path: f.path });
       await load();
-    } catch (e) { err = String(e); }
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -192,7 +190,7 @@
       await api.deleteFiles(sel);
       clear();
       await load();
-    } catch (e) { err = String(e); }
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -207,8 +205,7 @@
     busy = true;
     try {
       await api.triggerRun({ mode: 'scan', paths: sel });
-      err = '';
-    } catch (e) { err = String(e); }
+    } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
 
@@ -218,7 +215,6 @@
 </script>
 
 <h1>Files</h1>
-{#if err}<div class="card err">{err}</div>{/if}
 
 <div class="toolbar card">
   <div class="viewswitch" role="tablist" aria-label="View mode">
@@ -422,7 +418,6 @@
   .pager { display: flex; gap: 1rem; align-items: center; justify-content: center; }
   .row { display: grid; grid-template-columns: 120px 1fr; gap: 0.5rem; padding: 0.25rem 0; }
   .label { color: var(--muted); font-size: 0.85rem; }
-  .err { color: var(--err); border-color: var(--err); }
   .selectionbar { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
   .row-action {
     padding: 0.2rem 0.5rem;

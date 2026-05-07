@@ -2,10 +2,10 @@
   import { onMount } from 'svelte';
   import { api, type Run, type RunDetail } from '../lib/api';
   import { formatDate, bytes } from '../lib/format';
+  import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
 
   let runs = $state<Run[]>([]);
-  let err = $state('');
   let selectedID = $state<number | null>(null);
   let detail = $state<RunDetail | null>(null);
 
@@ -13,9 +13,8 @@
     try {
       const page = await api.runs(1, 50);
       runs = page.runs;
-      err = '';
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     }
   }
 
@@ -24,9 +23,8 @@
     detail = null;
     try {
       detail = await api.run(id);
-      err = '';
     } catch (e) {
-      err = String(e);
+      toast.error(String(e));
     }
   }
 
@@ -34,7 +32,6 @@
 </script>
 
 <h1>Run logs</h1>
-{#if err}<div class="card err">{err}</div>{/if}
 
 <div class="grid">
   <div class="card nopad runs">
@@ -94,7 +91,6 @@
   .row { display: grid; grid-template-columns: 110px 1fr; gap: 0.5rem; padding: 0.25rem 0; }
   .label { color: var(--muted); font-size: 0.85rem; }
   .err { color: var(--err); }
-  .card.err { border-color: var(--err); }
   .log {
     background: var(--bg);
     border: 1px solid var(--border);
