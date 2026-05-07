@@ -146,6 +146,13 @@ func (e *Engine) Run(ctx context.Context) (int64, error) {
 	start := e.opts.Now()
 	runID, err := e.opts.DB.CreateRun(ctx, start)
 	if err != nil {
+		// GORM's transaction-rollback errors stringify ctx.Canceled in a
+		// way that doesn't unwrap, so a caller's
+		// errors.Is(err, context.Canceled) check would miss the cancel
+		// signal. Surface ctx.Err() directly when it's the actual cause.
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, cerr
+		}
 		return 0, fmt.Errorf("create run: %w", err)
 	}
 	return e.runWithID(ctx, runID, start)
@@ -1281,6 +1288,24 @@ func (e *Engine) log(ctx context.Context, runID int64, level, msg string) {
 	_ = e.opts.DB.AppendLog(ctx, runID, level, msg, e.opts.Now())
 }
 
+// ctxReader wraps an io.Reader and returns ctx.Err() from Read after
+// cancellation. Without this, an io.Copy off a *os.File / SMB session
+// keeps reading even when the run ctx is cancelled — a multi-GB source
+// file would block /api/cancel for the full read time. The granularity
+// is one io.Copy buffer (32 KiB by default), which is fast enough that
+// cancel is observed within milliseconds of fire on any real disk.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
 // copyAndHash copies a source entry to disk, computing both md5 and
 // sha256 on the way. md5 is what we persist in the DB for legacy
 // reasons; sha256 is used transiently by the dedup check that skips
@@ -1313,6 +1338,9 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap f
 	if wrap != nil {
 		reader = wrap(rc)
 	}
+	// Make the copy ctx-aware so /api/cancel exits the read loop within
+	// one buffer instead of waiting for the source file to drain.
+	reader = &ctxReader{ctx: ctx, r: reader}
 
 	hMD5 := md5.New()
 	hSHA := sha256.New()

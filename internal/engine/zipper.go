@@ -433,6 +433,10 @@ func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f Pen
 	if wrap != nil {
 		reader = wrap(rc)
 	}
+	// Same ctx-aware shim as copyAndHash so /api/cancel exits a multi-GB
+	// zip-entry read within one io.Copy buffer instead of waiting for
+	// the file to fully drain into the zip writer.
+	reader = &ctxReader{ctx: ctx, r: reader}
 	_, err = io.Copy(w, reader)
 	return err
 }

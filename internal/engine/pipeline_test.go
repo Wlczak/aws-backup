@@ -343,12 +343,17 @@ func TestPipeline_ContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	_, runErr := eng.Run(runCtx)
+	runID, runErr := eng.Run(runCtx)
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		t.Errorf("unexpected error: %v", runErr)
 	}
-
-	run, _ := d.GetRun(ctx, 1)
+	// Cancel that fires before CreateRun returns: no run row was ever
+	// written, so there's nothing to assert about its status. The
+	// cancel-error check above is enough.
+	if runID == 0 {
+		return
+	}
+	run, _ := d.GetRun(ctx, runID)
 	if run.Status != db.RunCancelled && run.Status != db.RunCompleted {
 		t.Errorf("status=%q want cancelled or completed", run.Status)
 	}
