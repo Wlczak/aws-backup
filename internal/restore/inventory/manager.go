@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -537,10 +538,20 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 		if keyCol >= len(row) {
 			continue
 		}
-		if len(row[keyCol]) > inventoryCSVFieldMax {
+		raw := row[keyCol]
+		if len(raw) > inventoryCSVFieldMax {
 			return nil, fmt.Errorf("inventory key field exceeds %d bytes in %s", inventoryCSVFieldMax, key)
 		}
-		keys = append(keys, row[keyCol])
+		// S3 Inventory CSV reports keys URL-encoded (spaces → %20, etc).
+		// Use PathUnescape so a literal '+' in a real key isn't decoded
+		// to a space (the bug fixed for SQS in #249). Fall back to the
+		// raw value if decoding fails so we don't silently drop rows.
+		// (#264)
+		k, derr := url.PathUnescape(raw)
+		if derr != nil {
+			k = raw
+		}
+		keys = append(keys, k)
 	}
 	if limited.N <= 0 {
 		return nil, fmt.Errorf("inventory data file %s exceeds %d uncompressed bytes — refusing to parse", key, int64(inventoryDecompressMax))

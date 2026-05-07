@@ -578,7 +578,11 @@ func (a *appState) close() {
 }
 
 func runBackup(cfgPath string) {
-	ctx := context.Background()
+	// Honour SIGINT/SIGTERM so Ctrl-C cancels the engine cleanly and lets
+	// it write a 'cancelled' run row + clean up staged tmp zips, instead
+	// of being killed mid-syscall with the run stuck in 'running'. (#260)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	app, err := loadAppState(ctx, cfgPath, false)
 	if err != nil {
 		fatalf("%v", err)
