@@ -209,6 +209,14 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 
 	resp := deleteCloudPathsResponse{}
 
+	// Track which source-paths actually had their backing object deleted
+	// so we can flip the matching DB rows to `missing` afterwards. Without
+	// this the next existence check observes the absence and re-queues
+	// the file for upload (#132). Per the project index-semantics rule we
+	// mark missing rather than delete, so the row continues to track
+	// bucket state.
+	var markMissing []string
+
 	// Delete standalone objects.
 	for _, p := range req.Paths {
 		cf, ok := idx.Files[p]
@@ -219,6 +227,7 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 			resp.Errors = append(resp.Errors, fmt.Sprintf("delete %s: %v", cf.S3Key, err))
 		} else {
 			resp.DeletedStandalone++
+			markMissing = append(markMissing, p)
 		}
 	}
 
@@ -253,6 +262,15 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		_ = st.Delete(ctx, zipS3Key+engine.ZipIndexSuffix) // best-effort
 		deletedZips[cf.ZipKey] = struct{}{}
 		resp.DeletedZips++
+		// Every path inside a successfully-deleted whole-zip is now
+		// missing from the bucket; flip them in one batch below. (#132)
+		markMissing = append(markMissing, zipContents[cf.ZipKey]...)
+	}
+
+	if len(markMissing) > 0 {
+		if _, err := s.deps.DB.MarkMissingByPaths(ctx, markMissing); err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("mark missing: %v", err))
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

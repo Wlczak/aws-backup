@@ -190,6 +190,38 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 	return res, err
 }
 
+// MarkMissingByPaths flips rows with the given source-relative paths to
+// status=missing. Used after operator-driven cloud deletes so the next
+// existence check doesn't observe the absence and re-queue the file
+// for upload. Per the project index-semantics rule the row stays
+// (missing rows track bucket state, not source state). (#132)
+func (db *DB) MarkMissingByPaths(ctx context.Context, paths []string) (int64, error) {
+	if len(paths) == 0 {
+		return 0, nil
+	}
+	var total int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(paths) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := paths
+			if len(chunk) > sqlChunkSize {
+				chunk = paths[:sqlChunkSize]
+			}
+			paths = paths[len(chunk):]
+			res := tx.Model(&File{}).Where("path IN ?", chunk).
+				Update("status", StatusMissing)
+			if res.Error != nil {
+				return res.Error
+			}
+			total += res.RowsAffected
+		}
+		return nil
+	})
+	return total, err
+}
+
 // MarkMissing flips any non-missing row whose last_seen_at is older than
 // scanStart to status=missing. Returns the affected row count.
 // Includes pending/failed so a file that was queued but deleted before
