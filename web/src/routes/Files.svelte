@@ -346,7 +346,14 @@
                   aria-label={`Select ${f.path}`}
                 />
               </td>
-              <td class="mono path" onclick={() => (detail = f)}>{f.path}</td>
+              <td
+                class="mono path"
+                role="button"
+                tabindex="0"
+                aria-label={`Open details for ${f.path}`}
+                onclick={() => (detail = f)}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); detail = f; } }}
+              >{f.path}</td>
               <td class="mono" onclick={() => (detail = f)}>{bytes(f.size)}</td>
               <td onclick={() => (detail = f)}>{formatDate(f.mtime)}</td>
               <td onclick={() => (detail = f)}><StatusBadge status={f.status} /></td>

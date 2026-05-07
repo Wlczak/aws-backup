@@ -47,7 +47,13 @@
       </thead>
       <tbody>
         {#each runs as r (r.id)}
-          <tr class:selected={selectedID === r.id} onclick={() => selectRun(r.id)}>
+          <tr
+            class:selected={selectedID === r.id}
+            role="button"
+            tabindex="0"
+            onclick={() => selectRun(r.id)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectRun(r.id); } }}
+          >
             <td>{r.id}</td>
             <td>{formatDate(r.started_at)}</td>
             <td><StatusBadge status={r.status} /></td>
