@@ -20,7 +20,6 @@
     skipped?: string[];
     errors?: string[];
   } | null>(null);
-  let info = $state('');
   let loading = $state(false);
   let confirmTrigger = $state(false);
   let syncing = $state(false);
@@ -53,7 +52,7 @@
     const pre = selectionPaths();
     if (pre.length > 0) {
       raw = pre.join('\n');
-      info = `Pre-filled ${pre.length} path(s) from Files selection.`;
+      toast.info(`Pre-filled ${pre.length} path(s) from Files selection.`);
       clearSelection();
     }
     // Best-effort load of inventory status; absence is normal.
@@ -86,11 +85,10 @@
 
   async function doScanFull() {
     scanBusy = true;
-    info = '';
     scanResult = null;
     try {
       scanResult = await api.restoreScanFull();
-      info = `Full scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated, ${scanResult.errors} error(s).`;
+      toast.success(`Full scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated, ${scanResult.errors} error(s).`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -100,14 +98,14 @@
 
   async function doScanPending() {
     scanBusy = true;
-    info = '';
     scanResult = null;
     try {
       scanResult = await api.restoreScanPending();
-      info =
-        scanResult.scanned === 0
-          ? 'No files in restore-pending state.'
-          : `Pending scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated.`;
+      if (scanResult.scanned === 0) {
+        toast.info('No files in restore-pending state.');
+      } else {
+        toast.success(`Pending scan: ${scanResult.scanned} HEADed, ${scanResult.updated} updated.`);
+      }
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -117,10 +115,9 @@
 
   async function doInventoryEnable() {
     inventoryBusy = true;
-    info = '';
     try {
       inventory = await api.inventoryPut(inventoryFreq);
-      info = `Inventory enabled (${inventory.frequency}).`;
+      toast.success(`Inventory enabled (${inventory.frequency}).`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -130,11 +127,10 @@
 
   async function doInventoryDisable() {
     inventoryBusy = true;
-    info = '';
     try {
       await api.inventoryDelete();
       inventory = { enabled: false };
-      info = 'Inventory disabled.';
+      toast.success('Inventory disabled.');
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -144,11 +140,10 @@
 
   async function doInventorySync() {
     inventoryBusy = true;
-    info = '';
     scanResult = null;
     try {
       scanResult = await api.inventorySync();
-      info = `Inventory sync: ${scanResult.scanned} keys HEADed, ${scanResult.updated} updated.`;
+      toast.success(`Inventory sync: ${scanResult.scanned} keys HEADed, ${scanResult.updated} updated.`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -170,7 +165,6 @@
       return;
     }
     loading = true;
-    info = '';
     estimate = null;
     try {
       estimate = await api.restoreEstimate(p);
@@ -183,13 +177,13 @@
 
   async function doSyncStatus() {
     syncing = true;
-    info = '';
     try {
       const r = await api.restoreSyncStatus();
-      info =
-        r.processed === 0
-          ? 'No new restore events on the queue.'
-          : `Synced ${r.processed} restore event(s).`;
+      if (r.processed === 0) {
+        toast.info('No new restore events on the queue.');
+      } else {
+        toast.success(`Synced ${r.processed} restore event(s).`);
+      }
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -209,11 +203,10 @@
       return;
     }
     loading = true;
-    info = '';
     triggerResult = null;
     try {
       triggerResult = await api.restoreTrigger(p, targetDir.trim());
-      info = `Restored ${triggerResult.files_written.toLocaleString()} file(s) (${bytes(triggerResult.bytes_written)}).`;
+      toast.success(`Restored ${triggerResult.files_written.toLocaleString()} file(s) (${bytes(triggerResult.bytes_written)}).`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -343,8 +336,6 @@
     {/if}
   </div>
 {/if}
-
-{#if info}<div class="card info">{info}</div>{/if}
 
 {#if estimate}
   <div class="card">
