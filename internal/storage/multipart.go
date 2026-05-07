@@ -260,10 +260,22 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 		}
 	}
 
-	totalParts := int32((size + partSize - 1) / partSize)
+	totalPartsRaw := (size + partSize - 1) / partSize
 	if size == 0 {
-		totalParts = 1
+		totalPartsRaw = 1
 	}
+	// S3 caps a single multipart upload at 10000 parts; uploading more
+	// would burn bandwidth on every part only to fail at
+	// CompleteMultipartUpload with a generic InvalidPart. Fail fast with
+	// an actionable suggestion. (#268)
+	const s3MaxParts = 10000
+	if totalPartsRaw > s3MaxParts {
+		needed := (size + s3MaxParts - 1) / s3MaxParts
+		return PutResult{}, "", fmt.Errorf(
+			"object size %d with part_size %d would require %d parts, exceeding S3's %d-part ceiling — increase s3.part_size to at least %d bytes",
+			size, partSize, totalPartsRaw, s3MaxParts, needed)
+	}
+	totalParts := int32(totalPartsRaw)
 
 	existing, err := s.ListUploadedParts(ctx, mu)
 	if err != nil {
