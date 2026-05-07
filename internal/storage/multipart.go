@@ -316,13 +316,19 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 	results := make(chan s3types.CompletedPart, totalParts)
 	errCh := make(chan error, parallel)
 
+	// uploadCtx cancels on the first worker error so the feeder stops
+	// queueing fresh parts and remaining workers drop out instead of
+	// uploading work that's about to be discarded. (#166)
+	uploadCtx, cancelUploads := context.WithCancel(ctx)
+	defer cancelUploads()
+
 	var wg sync.WaitGroup
 	for i := 0; i < parallel; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				if ctx.Err() != nil {
+				if uploadCtx.Err() != nil {
 					return
 				}
 				offset := int64(j.partNum-1) * partSize
@@ -333,13 +339,15 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 				buf := make([]byte, end-offset)
 				if _, err := body.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
 					errCh <- fmt.Errorf("read part %d: %w", j.partNum, err)
+					cancelUploads()
 					return
 				}
 				sum := sha256.Sum256(buf)
 				cs := base64.StdEncoding.EncodeToString(sum[:])
-				cp, err := s.UploadPart(ctx, mu, j.partNum, &byteSeeker{b: buf}, int64(len(buf)), cs)
+				cp, err := s.UploadPart(uploadCtx, mu, j.partNum, &byteSeeker{b: buf}, int64(len(buf)), cs)
 				if err != nil {
 					errCh <- err
+					cancelUploads()
 					return
 				}
 				results <- cp
@@ -354,7 +362,7 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 				continue
 			}
 			select {
-			case <-ctx.Done():
+			case <-uploadCtx.Done():
 				return
 			case jobs <- job{partNum: n}:
 			}
@@ -381,13 +389,28 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 			opts.OnProgress(bytesDone, size)
 		}
 	}
+	// Coalesce all worker errors with errors.Join so a partial-failure
+	// run surfaces every cause, not just the first to land. (#166)
+	var workerErrs []error
 	for err := range errCh {
 		if err != nil {
-			return PutResult{}, mu.UploadID, err
+			workerErrs = append(workerErrs, err)
 		}
+	}
+	if len(workerErrs) > 0 {
+		return PutResult{}, mu.UploadID, errors.Join(workerErrs...)
 	}
 	if err := ctx.Err(); err != nil {
 		return PutResult{}, mu.UploadID, err
+	}
+
+	// Defensive: if no error surfaced but we're still short on parts
+	// (e.g. a worker silently dropped a job), fail loudly instead of
+	// asking S3 to assemble a broken object. (#166)
+	expected := int(totalParts) - len(already)
+	gotNew := len(completed) - len(already)
+	if gotNew < expected {
+		return PutResult{}, mu.UploadID, fmt.Errorf("multipart: %d parts uploaded, expected %d", gotNew, expected)
 	}
 
 	sort.Slice(completed, func(i, j int) bool {

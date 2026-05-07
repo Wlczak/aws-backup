@@ -283,12 +283,17 @@ type UploadedRow struct {
 }
 
 // MarkUploadedMany applies per-file uploaded state in a single transaction.
+// Checks ctx between rows so a cancel doesn't keep holding the SQLite write
+// lock through every remaining UPDATE. (#171)
 func (db *DB) MarkUploadedMany(ctx context.Context, rows []UploadedRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for _, r := range rows {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := tx.Model(&File{}).Where("id = ?", r.ID).Updates(map[string]any{
 				"md5":         r.MD5,
 				"s3_key":      r.S3Key,
@@ -591,6 +596,12 @@ func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key string, now time.Time) (int64, error) {
 	var total int64
 	for len(paths) > 0 {
+		// Check ctx between chunks so a cancel doesn't keep blocking
+		// other writers behind the SQLite write lock for the remaining
+		// chunks of a huge reconcile. (#171)
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
 		chunk := paths
 		if len(chunk) > sqlChunkSize {
 			chunk = paths[:sqlChunkSize]

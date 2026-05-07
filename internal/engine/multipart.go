@@ -57,7 +57,7 @@ type resumePutOpts struct {
 //     still leaves a recoverable record.
 //  5. On success delete the row; on error keep it so the next run
 //     can resume.
-func (e *Engine) putResumable(ctx context.Context, key, tmpPath string, size int64, contentSHA256hex string, opts resumePutOpts) (storage.PutResult, error) {
+func (e *Engine) putResumable(ctx context.Context, runID int64, key, tmpPath string, size int64, contentSHA256hex string, opts resumePutOpts) (storage.PutResult, error) {
 	rs, partSize, ok := e.shouldUseResumable(size)
 	if !ok {
 		return storage.PutResult{}, errors.New("engine: putResumable called without resumable storage")
@@ -135,25 +135,35 @@ func (e *Engine) putResumable(ctx context.Context, key, tmpPath string, size int
 			}
 			return e.opts.DB.UpsertMultipartUpload(ctx, row)
 		},
-		OnProgress: func(bytes, total int64) {
-			// Mirror the existing per-byte upload_progress event so
-			// the dashboard's progress bar moves identically on the
-			// resume path.
-			percent := 0.0
-			if total > 0 {
-				percent = float64(bytes) / float64(total) * 100
+		OnProgress: func() func(bytes, total int64) {
+			// Throttle to defaultProgressInterval so a fast-network
+			// multipart doesn't flood the SSE bus with per-part events
+			// — same cadence the single-shot path gets via
+			// uploadProgressCtx. (#167)
+			var lastEmit time.Time
+			return func(bytes, total int64) {
+				now := e.opts.Now()
+				if !lastEmit.IsZero() && bytes < total && now.Sub(lastEmit) < defaultProgressInterval {
+					return
+				}
+				lastEmit = now
+				percent := 0.0
+				if total > 0 {
+					percent = float64(bytes) / float64(total) * 100
+				}
+				e.emit(Event{
+					Type:  EventUploadProgress,
+					RunID: runID,
+					At:    now,
+					Data: map[string]any{
+						"key":            key,
+						"size":           total,
+						"bytes_uploaded": bytes,
+						"percent":        percent,
+					},
+				})
 			}
-			e.emit(Event{
-				Type: EventUploadProgress,
-				At:   e.opts.Now(),
-				Data: map[string]any{
-					"key":            key,
-					"size":           total,
-					"bytes_uploaded": bytes,
-					"percent":        percent,
-				},
-			})
-		},
+		}(),
 	}
 
 	res, _, err := rs.PutResumable(ctx, key, f, size, rOpts)

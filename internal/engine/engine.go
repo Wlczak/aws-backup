@@ -985,7 +985,7 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 		// preserves the existing zip-collision retry semantics — a
 		// HEAD probe up front returns ErrAlreadyExists for the
 		// engine to advance the counter slot. (#162)
-		res, err = e.putResumable(ctx, item.zipKey, item.zipTmpPath, item.zipSize, item.zipSHA256, resumePutOpts{
+		res, err = e.putResumable(ctx, runID, item.zipKey, item.zipTmpPath, item.zipSize, item.zipSHA256, resumePutOpts{
 			ZipKey:   item.zipRel,
 			IfAbsent: true,
 		})
@@ -1089,7 +1089,7 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 	if _, _, ok := e.shouldUseResumable(ind.size); ok {
 		// Resumable path: persist UploadId across runs so a mid-upload
 		// crash doesn't waste the parts S3 already accepted. (#162)
-		res, err = e.putResumable(ctx, ind.key, ind.tmpPath, ind.size, ind.sha256hex, resumePutOpts{
+		res, err = e.putResumable(ctx, runID, ind.key, ind.tmpPath, ind.size, ind.sha256hex, resumePutOpts{
 			FileID: ind.pf.ID,
 		})
 	} else {

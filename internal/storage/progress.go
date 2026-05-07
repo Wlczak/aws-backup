@@ -36,8 +36,34 @@ type progressTransport struct {
 }
 
 func (t *progressTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if fn, _ := req.Context().Value(progressKey{}).(ProgressFunc); fn != nil && req.Body != nil {
-		req.Body = &countingReadCloser{rc: req.Body, fn: fn}
+	fn, _ := req.Context().Value(progressKey{}).(ProgressFunc)
+	if fn == nil || req.Body == nil {
+		return t.inner.RoundTrip(req)
+	}
+	wrapper := &countingReadCloser{rc: req.Body, fn: fn}
+	req.Body = wrapper
+	// Preserve retryability: the SDK rewinds a body on retry by calling
+	// req.GetBody() (sigv4 retries) or by Seek-to-0 (redirects). The
+	// previous wrapper masked both — retries either lost progress
+	// reporting entirely (GetBody returned the unwrapped body) or saw
+	// cumulative byte counts overshoot the file size on subsequent
+	// attempts. Wrap GetBody so retries stay counted, and refund the
+	// previous attempt's bytes so the consumer's running total stays
+	// honest. (#168)
+	if req.GetBody != nil {
+		orig := req.GetBody
+		req.GetBody = func() (io.ReadCloser, error) {
+			rc, err := orig()
+			if err != nil {
+				return nil, err
+			}
+			if wrapper.n > 0 {
+				fn(-wrapper.n)
+				wrapper.n = 0
+			}
+			wrapper.rc = rc
+			return wrapper, nil
+		}
 	}
 	return t.inner.RoundTrip(req)
 }
@@ -45,14 +71,34 @@ func (t *progressTransport) RoundTrip(req *http.Request) (*http.Response, error)
 type countingReadCloser struct {
 	rc io.ReadCloser
 	fn ProgressFunc
+	n  int64
 }
 
 func (c *countingReadCloser) Read(p []byte) (int, error) {
 	n, err := c.rc.Read(p)
 	if n > 0 {
+		c.n += int64(n)
 		c.fn(int64(n))
 	}
 	return n, err
+}
+
+// Seek forwards to the underlying body when it supports io.Seeker (most
+// upload bodies are *os.File or *bytes.Reader, both of which do). On a
+// rewind to offset 0 — the SDK's retry signal — refund the bytes
+// counted on the previous attempt so the consumer's running progress
+// total doesn't overshoot. (#168)
+func (c *countingReadCloser) Seek(offset int64, whence int) (int64, error) {
+	sk, ok := c.rc.(io.Seeker)
+	if !ok {
+		return 0, io.ErrUnexpectedEOF
+	}
+	pos, err := sk.Seek(offset, whence)
+	if err == nil && pos == 0 && c.n > 0 {
+		c.fn(-c.n)
+		c.n = 0
+	}
+	return pos, err
 }
 
 func (c *countingReadCloser) Close() error { return c.rc.Close() }
