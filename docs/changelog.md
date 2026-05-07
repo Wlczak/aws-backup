@@ -98,3 +98,31 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #166 | bb9a1c6 | `PutResumable` derives an `uploadCtx` cancelled on first worker error; coalesces errors via `errors.Join`; verifies `len(completed)==expected` before `CompleteMultipart` |
 | #168 | bb9a1c6 | `countingReadCloser` tracks per-roundtrip bytes, exposes `Seek` forwarding, and wraps `req.GetBody`; both refund prior bytes via `fn(-n)` so retries don't double-count |
 | #132 | 8051920 | `handleDeleteCloudPaths` calls `MarkMissingByPaths` for every successfully-deleted source path so the next existence check doesn't re-upload them |
+| #256 | 6d5bfa2 | `engine.New` honors `ZipMaxBytes < 0` as 'disable cap'; only `0` falls back to the 2 GiB default |
+| #250 | 349187b | `config.Validate` rejects `sqs.max_messages=0` so an invalid config fails at save time, not on the first ReceiveMessage |
+| #271 | 3c1d6df | `cachedAllFiles` re-emits the underlying DB error on cache hit instead of serving an empty 200 |
+| #270 | 6c1c157 | `fetchManifest` rejects manifests whose `sourceBucket` is empty or doesn't equal the read bucket — closes the empty-bypass left by #187 |
+| #232 | ad60bd7 | `fetchManifest` rejects manifests with any empty `MD5checksum` so per-data-file verification can't be silently skipped |
+| #275 | e83c614 | `fetchDataKeys` bounds compressed/uncompressed reads (8 GiB hard cap on gzip stream + manifest-Size compressed cap + 1 MiB per-field cap) — gzip-bomb hardening |
+| #274 | e438112 | `Validate` URL-parses `s3.endpoint` / `sqs.queue_url`, requires http/https + non-empty host, and rejects IMDS-class hosts to block credential exfiltration / metadata SSRF |
+| #273 | c905d34 | `originGuard` chi middleware on `/api` rejects mismatched-Origin requests so a hostile page can't read /api/events on a loopback dev server |
+| #272 | 4325aef | `securityHeaders` middleware sets nosniff, frame-ancestors 'none', no-referrer, and a self+inline CSP on every response |
+| #265 | 81bdbb2 | `MarkRestoreInProgress` predicate uses `COALESCE(restore_status,'') != 'restored'` so legacy NULL rows participate |
+| #266 | b072465 | Modified-file branch of `UpsertFile`/`UpsertFileBatch` resets `restore_status` + `restore_expires_at` so a re-uploaded file doesn't carry the prior Glacier-restore lifecycle |
+| #268 | 55c663b | `PutResumable` errors immediately when the requested object would require >10000 parts, suggesting a minimum `part_size` |
+| #267 | 671e743 | Timed-out `handleTestSource` SMB branch spawns a drain goroutine that closes any late-successful dial |
+| #269 | 41f31f9 | `runBootDownload`'s 750 ms shutdown wait now `select`s on `ctx.Done()` so SIGINT during boot tears down promptly |
+| #260 / #264 | 6c74e50 | `runBackup` honours `signal.NotifyContext`; `fetchDataKeys` PathUnescapes inventory CSV keys so spaces / `+` survive |
+| #263 | 81bb494 | Dashboard log only ingests run_log + run lifecycle events (skips per-thread copy/upload progress) |
+| #261 | 0b5d884 | `subscribeEvents` debounces onStatus to open↔error transitions only |
+| #262 | d804bdd | Logs `<tr>` and Files path `<td>` get role=button + tabindex + Enter/Space activation |
+| #259 / #257 / #252 / #249 | 8f2c7a7 | defer-Close staged file via closure on Put; `uploadProgressCtx` final emit must-emit-once via dedicated atomic; resume verify checks ctx; SQS S3 event key uses PathUnescape |
+| #258 | 403898a | `runServe` waits on the SQS consumer goroutine via a done channel before `app.close()` runs |
+| #255 / #233 | 8768f89 / d6bfae2 | `applyMu` serialises post-run `applyPendingSettings`, PUT /api/settings, and `handleTriggerRun` so neither a fresh PUT nor a fresh BuildEngine can race the swap |
+| #254 | aef5ee5 | `md5AndSHA256File` hashes a staged zip in a single pass via `io.MultiWriter` |
+| #253 | 526b99d | `LocalDir.Walk` surfaces a root-level read error so a transient I/O blip doesn't produce an empty walk + MarkMissing avalanche |
+| #245 / #244 / #243 / #242 / #241 / #240 | b5107ca | scheduler trigger panic-recovery; `LocalDir.Open` re-checks via EvalSymlinks; `cachedStats` re-emits err on hit; `Restore` maps `RestoreAlreadyInProgress` / `InvalidObjectState` to sentinels; `?page` capped at 100000; `indexWrittenThisRun` flag distinguishes wrote-vs-matched sidecar |
+| #234 / #237 / #236 | aa61e09 | bootui builds the error span via createElement + textContent (no innerHTML); pipeline cancel/stop/ctx-Done preserves ind-* tmps; `events.Bus` enforces a 256-subscriber cap and SSE responds 503 when full |
+| #235 / #239 / #238 / #251 | d6bfae2 | SMB negotiation+auth+mount under `conn.SetDeadline`; SMB.Walk aborts on session-level errors instead of silently truncating; `/api/sync*` and `/delete-cloud-paths` use `context.WithoutCancel` + server timeout; new `00003_run_logs_fk.sql` migration restores the documented FK |
+| #225 / #246 / #227 / #226 / #228 / #230 / #231 / #248 / #247 | 101cfce | `fetchDataKeys` errors on schema-short rows; `MarkRestoreCleared` clears stale in_progress/restored on no-header HEAD; ctx checks in every chunked DB write; Dashboard fix-action errors go through toast; restore preserves `zf.Mode().Perm()`; Logs.svelte uses an AbortController; `PutResumable` derives `partSize` from stored part max; `File.RestoreExpiresAt` flex-parsed in AfterFind from a NullString-backed shadow column; `db.Stats` computes the soonest restore expiry in Go after parseFlexTime |
+| #224 / #221 / #222 / #220 / #219 / #218 / #223 | a4fbbe1 | `decodeJSON` wraps the body in `http.MaxBytesReader(16 MiB)`; config dir is 0o700 + chmod-tightened; `/api/sync*` and `/delete-cloud-paths` 409 when a run is in flight; SQS `Run()` does Receive outside `receiveMu`; heartbeat tolerates 3 consecutive failures before giving up; `safeJoin` walks ancestors via EvalSymlinks; `ListLogs` paginates (default 500, max 5000) |
