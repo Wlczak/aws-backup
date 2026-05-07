@@ -125,6 +125,11 @@ type Server struct {
 	statsMu     sync.Mutex
 	statsValue  db.FileStats
 	statsExpiry time.Time
+
+	// inventorySyncBusy serialises /api/restore/inventory-sync so two
+	// concurrent clicks don't both download the (potentially huge)
+	// manifest before the scanner contention check fires. (#197)
+	inventorySyncBusy atomic.Bool
 }
 
 // cfgMutex returns the RWMutex used to serialise config reads/writes.

@@ -350,6 +350,14 @@ func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
 			errors.New("inventory manager or scanner not configured (storage missing)"))
 		return
 	}
+	// Serialise concurrent clicks so two callers don't both download a
+	// multi-million-key manifest before the scanner's `running` flag
+	// rejects the second RunKeys with 409. (#197)
+	if !s.inventorySyncBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, errors.New("inventory sync already in progress"))
+		return
+	}
+	defer s.inventorySyncBusy.Store(false)
 	keys, err := s.deps.Inventory.ListLatestKeys(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("list inventory keys: %w", err))

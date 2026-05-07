@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -247,8 +248,21 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 	defer zr.Close()
 
 	byName := map[string]*zip.File{}
+	// Build a case-folded index alongside the exact map so that DBs
+	// rebuilt from S3 listings on case-insensitive filesystems can still
+	// resolve members when the on-disk path differs only in case. We
+	// also detect ambiguous case-insensitive collisions so we don't
+	// pick the wrong file silently. (#193)
+	byFolded := map[string]*zip.File{}
+	foldCollision := map[string]bool{}
 	for _, zf := range zr.File {
 		byName[zf.Name] = zf
+		k := strings.ToLower(zf.Name)
+		if _, dup := byFolded[k]; dup {
+			foldCollision[k] = true
+		} else {
+			byFolded[k] = zf
+		}
 	}
 
 	for _, m := range members {
@@ -258,8 +272,19 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		}
 		zf, ok := byName[m.Path]
 		if !ok {
-			errs = append(errs, m.Path+": not found in zip "+zipName)
-			continue
+			fk := strings.ToLower(m.Path)
+			if foldCollision[fk] {
+				errs = append(errs, m.Path+": ambiguous case-insensitive match in zip "+zipName)
+				continue
+			}
+			if alt, found := byFolded[fk]; found {
+				slog.Info("restore: case-insensitive zip member match",
+					"requested", m.Path, "used", alt.Name, "zip", zipName)
+				zf = alt
+			} else {
+				errs = append(errs, m.Path+": not found in zip "+zipName)
+				continue
+			}
 		}
 		dst, err := safeJoin(target, m.Path)
 		if err != nil {
@@ -292,7 +317,13 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 // in-flight and compared against it; a mismatch returns an error so
 // the caller can surface it in RestoreStats.Errors. The file is left
 // in place on mismatch — the operator decides whether to keep or
-// delete it. Returns the number of bytes written. (#75)
+// delete it. (#75)
+//
+// On any *other* error (ctx cancel, io error, close error) the partial
+// file is removed so a zero-byte / truncated dst doesn't masquerade as
+// a successfully restored tiny file on retry. (#194)
+//
+// Returns the number of bytes written.
 func writeFromReader(dst string, src io.Reader, expectedMD5 string) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
@@ -314,6 +345,7 @@ func writeFromReader(dst string, src io.Reader, expectedMD5 string) (int64, erro
 		err = cerr
 	}
 	if err != nil {
+		_ = os.Remove(dst)
 		return n, err
 	}
 	if h != nil {
