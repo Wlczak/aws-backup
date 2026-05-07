@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     api,
     subscribeEvents,
@@ -44,6 +44,11 @@
   let inventoryFreq = $state<'daily' | 'weekly'>('daily');
   let inventoryBusy = $state(false);
 
+  // Guard async writes against assigning to torn-down state if the route
+  // unmounts mid-fetch — same pattern as Files.svelte. (#202)
+  let aborted = false;
+  onDestroy(() => { aborted = true; });
+
   onMount(() => {
     const pre = selectionPaths();
     if (pre.length > 0) {
@@ -68,10 +73,13 @@
 
   async function loadInventory() {
     try {
-      inventory = await api.inventoryGet();
-      if (inventory.frequency === 'Weekly') inventoryFreq = 'weekly';
+      const inv = await api.inventoryGet();
+      if (aborted) return;
+      inventory = inv;
+      if (inv.frequency === 'Weekly') inventoryFreq = 'weekly';
       else inventoryFreq = 'daily';
     } catch {
+      if (aborted) return;
       inventory = null;
     }
   }
