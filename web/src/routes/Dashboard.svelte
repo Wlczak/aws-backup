@@ -17,6 +17,14 @@
   // counters are derived from `itemProgress` so an SSE replay or
   // reconnect can't double-count them. (#199)
   let uploadsTotal = $state(0);
+  // Persisted upload count from the run row, refreshed on every status
+  // poll. After a page reload mid-run, itemProgress is empty (it only
+  // tracks events received this session) so the progress bar would
+  // otherwise reset to 0 / N. The engine writes files_uploaded to the
+  // run row on every group completion, so this seed catches up within
+  // one poll interval and the displayed count stays correct across
+  // reloads. (#remember-completed)
+  let seededFilesUploaded = $state(0);
   let triggering = $state(false);
 
   type ItemProgress = {
@@ -90,6 +98,11 @@
       else if (it.status === 'failed') { failed += n; started += n; }
       else if (it.phase === 'upload') started += n;
     }
+    // Persisted count survives page reloads; live events catch up within
+    // a poll interval. Take the max so neither source can drag the bar
+    // backward as the other one races ahead.
+    completed = Math.max(completed, seededFilesUploaded);
+    started = Math.max(started, completed);
     return { completed, failed, started, total: uploadsTotal };
   });
 
@@ -136,6 +149,10 @@
       // upward — the SSE path may have a fresher value already.
       const live = status?.current?.files_scanned ?? 0;
       if (live > scanSeen) scanSeen = live;
+      // Seed completed-uploads from the run row so a reload mid-run
+      // recovers the progress count instead of starting at 0.
+      const liveUp = status?.current?.files_uploaded ?? 0;
+      if (liveUp > seededFilesUploaded) seededFilesUploaded = liveUp;
     } catch (e) {
       toast.error(String(e));
     }
@@ -221,6 +238,10 @@
       if (type === 'run_start') {
         itemProgress = {};
         uploadsTotal = 0;
+        // run_start also fires on SSE reconnect with files_uploaded
+        // populated from the DB, so a mid-run reconnect keeps the
+        // count; a brand-new run sends 0 and resets the bar.
+        seededFilesUploaded = payload.files_uploaded ?? 0;
         // Don't toggle scanActive here — run_start fires both for live
         // run starts AND on every SSE reconnect (replay), and a
         // post-scan reconnect would otherwise stick the "Scanning…"
