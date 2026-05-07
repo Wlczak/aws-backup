@@ -7,7 +7,9 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -119,6 +121,18 @@ func (s *Scheduler) setScheduleLocked(expr string) error {
 		s.mu.Lock()
 		s.triggered++
 		s.mu.Unlock()
+		// Recover from a trigger panic so future ticks keep firing —
+		// robfig/cron/v3 doesn't wrap jobs by default, and a single
+		// bug in s.trigger would otherwise silently disable scheduled
+		// runs until process restart. Surface via slog so the operator
+		// sees it in the structured log. (#245)
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("scheduler trigger panicked",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()))
+			}
+		}()
 		// No timeout: the trigger only dispatches the run (CreateRun +
 		// goroutine handoff in handleTriggerRun) — the engine itself runs
 		// on context.Background(). A 5-minute timeout here would cancel

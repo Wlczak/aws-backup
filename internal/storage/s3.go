@@ -351,6 +351,22 @@ func (s *S3Storage) Restore(ctx context.Context, key string, days int) error {
 			},
 		},
 	})
+	if err != nil {
+		// Map S3's idempotency / not-archived signals to sentinels so
+		// callers (the restore subsystem, retry loops, the UI on a
+		// double-clicked Restore button) can treat 'already in progress'
+		// and 'doesn't need restoring' as soft-success instead of having
+		// to text-match SDK error strings. (#242)
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "RestoreAlreadyInProgress":
+				return ErrRestoreInProgress
+			case "InvalidObjectState":
+				return ErrNotArchived
+			}
+		}
+	}
 	return err
 }
 

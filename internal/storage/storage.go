@@ -26,6 +26,17 @@ var ErrGlacierThawing = errors.New("storage: object is in glacier and not restor
 // content. (#116)
 var ErrAlreadyExists = errors.New("storage: key already exists")
 
+// ErrRestoreInProgress is returned by Restore when S3 reports
+// RestoreAlreadyInProgress: the key already has an active restore.
+// Callers should treat this as a soft-success and not as a failure. (#242)
+var ErrRestoreInProgress = errors.New("storage: restore already in progress")
+
+// ErrNotArchived is returned by Restore when the object's storage class
+// doesn't need (or accept) restoration — STANDARD, or already-restored.
+// Callers should treat this as 'nothing to do, the bytes are already
+// available' rather than a failure. (#242)
+var ErrNotArchived = errors.New("storage: object not in archive tier")
+
 // PutResult reports what the destination acknowledged after an upload.
 type PutResult struct {
 	Key            string

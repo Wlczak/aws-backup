@@ -420,6 +420,12 @@ const maxPageLimit = 1000
 // backup; arbitrary millions-of-rows would OOM the server. (#64)
 const maxAllRows = 50000
 
+// maxPageNumber caps `?page=`. Without this, page=2147483647 forces an
+// unbounded SQL OFFSET that scans past the end of the table for no
+// useful response, burning CPU + page cache. Pairs with maxPageLimit
+// so (page-1)*limit cannot overflow int. (#241)
+const maxPageNumber = 100000
+
 func intParam(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)
 	if v == "" {
@@ -428,6 +434,9 @@ func intParam(r *http.Request, key string, def int) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		return def
+	}
+	if key == "page" && n > maxPageNumber {
+		return maxPageNumber
 	}
 	return n
 }

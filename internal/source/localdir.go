@@ -107,14 +107,34 @@ func (l *LocalDir) Open(_ context.Context, relPath string) (io.ReadCloser, error
 		return nil, err
 	}
 	rootTrim := strings.TrimSuffix(l.root, string(os.PathSeparator))
-	if rootTrim == "" {
-		// Filesystem root ('/' on Unix). Every absolute path is inside.
+	if rootTrim != "" {
+		if absClean != rootTrim && !strings.HasPrefix(absClean, rootTrim+string(os.PathSeparator)) {
+			return nil, errors.New("path escapes source root")
+		}
+	}
+	// The string check above only protects against ../ escapes; a symlink
+	// inside the root pointing outside still passes (filepath.Abs doesn't
+	// resolve symlinks). Re-check after EvalSymlinks against an evaluated
+	// root so a symlink whose target lives outside source is refused.
+	// ENOENT is fine — os.Open will surface it. (#244)
+	resolved, err := filepath.EvalSymlinks(absClean)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("resolve symlinks: %w", err)
+		}
 		return os.Open(absClean)
 	}
-	if absClean != rootTrim && !strings.HasPrefix(absClean, rootTrim+string(os.PathSeparator)) {
-		return nil, errors.New("path escapes source root")
+	rootResolved, err := filepath.EvalSymlinks(l.root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve root: %w", err)
 	}
-	return os.Open(absClean)
+	rootResolvedTrim := strings.TrimSuffix(rootResolved, string(os.PathSeparator))
+	if rootResolvedTrim != "" {
+		if resolved != rootResolvedTrim && !strings.HasPrefix(resolved, rootResolvedTrim+string(os.PathSeparator)) {
+			return nil, errors.New("symlink target escapes source root")
+		}
+	}
+	return os.Open(resolved)
 }
 
 // Close is a no-op for the local filesystem.

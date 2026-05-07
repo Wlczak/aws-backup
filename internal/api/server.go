@@ -135,6 +135,11 @@ type Server struct {
 	statsMu     sync.Mutex
 	statsValue  db.FileStats
 	statsExpiry time.Time
+	// statsErr, when non-nil, is replayed to cache-hit callers within the
+	// backoff window so a degraded DB surfaces an error instead of a
+	// misleadingly-healthy stale value. Cleared on next successful query.
+	// (#243)
+	statsErr error
 	// statsSF coalesces concurrent stats queries into a single DB call
 	// so a slow Stats() doesn't queue every poller serially behind the
 	// cache mutex (#179). The mutex still guards reads/writes of

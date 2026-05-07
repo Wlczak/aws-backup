@@ -932,14 +932,18 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 	// Upload the STANDARD-tier index sidecar BEFORE the zip so a crash
 	// between the two uploads is recoverable: reconcileFromS3 reads the
 	// sidecar to mark files uploaded on the next run. (#121)
-	indexUploaded := false
+	// indexWrittenThisRun marks an index sidecar that *we* uploaded this
+	// run. Cleanup on a subsequent zip-upload failure must only delete the
+	// sidecar we wrote — a pre-existing matched sidecar from an earlier
+	// failed run belongs to that prior content and shouldn't be removed
+	// from under it. (#240)
+	indexWrittenThisRun := false
 	if e.opts.EnableZipIndex {
 		indexBody := strings.Join(item.zipEntries, "\n") + "\n"
 		indexSum := sha256.Sum256([]byte(indexBody))
 		indexSHA256 := hex.EncodeToString(indexSum[:])
 		if e.skipIfMatches(ctx, item.indexKey, indexSHA256) {
 			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip index %s: SHA256 matches existing object", item.indexKey))
-			indexUploaded = true
 		} else {
 			if _, err := e.opts.Storage.PutStandard(ctx, item.indexKey, strings.NewReader(indexBody), int64(len(indexBody))); err != nil {
 				e.emit(Event{
@@ -948,7 +952,7 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 				})
 				return 0, 0, fmt.Errorf("upload zip index %s: %w", item.indexKey, err)
 			}
-			indexUploaded = true
+			indexWrittenThisRun = true
 			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("uploaded zip index %s (%d entries)", item.indexKey, len(item.zipEntries)))
 		}
 	}
@@ -1011,7 +1015,7 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 			Type: EventUploadFailed, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{"key": item.zipKey, "error": err.Error()},
 		})
-		if indexUploaded {
+		if indexWrittenThisRun {
 			if delErr := e.opts.Storage.Delete(ctx, item.indexKey); delErr != nil {
 				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("cleanup orphan index %s: %v", item.indexKey, delErr))
 			}

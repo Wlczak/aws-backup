@@ -134,8 +134,9 @@ func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 	s.statsMu.Lock()
 	if time.Now().Before(s.statsExpiry) {
 		v := s.statsValue
+		e := s.statsErr
 		s.statsMu.Unlock()
-		return v, nil
+		return v, e
 	}
 	s.statsMu.Unlock()
 
@@ -145,7 +146,11 @@ func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 		s.statsMu.Lock()
 		if time.Now().Before(s.statsExpiry) {
 			cached := s.statsValue
+			cachedErr := s.statsErr
 			s.statsMu.Unlock()
+			if cachedErr != nil {
+				return db.FileStats{}, cachedErr
+			}
 			return cached, nil
 		}
 		s.statsMu.Unlock()
@@ -153,12 +158,16 @@ func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 		s.statsMu.Lock()
 		defer s.statsMu.Unlock()
 		if err != nil {
-			// Short backoff so a failing query isn't replayed instantly
-			// on the next poll, but recovers quickly once the DB is healthy.
+			// Stash the error on the cache for the backoff window so a
+			// degraded DB doesn't replay instantly AND cache-hit callers
+			// see the failure instead of a stale healthy value. (#243)
+			s.statsValue = db.FileStats{}
+			s.statsErr = err
 			s.statsExpiry = time.Now().Add(500 * time.Millisecond)
 			return db.FileStats{}, err
 		}
 		s.statsValue = st
+		s.statsErr = nil
 		s.statsExpiry = time.Now().Add(statsCacheTTL)
 		return st, nil
 	})
