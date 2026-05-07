@@ -47,6 +47,14 @@ func (l *LocalDir) Root() string { return l.root }
 func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 	return filepath.WalkDir(l.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A read error on the walk root itself (e.g. NFS dropped, root
+			// permissions changed after NewLocalDir) must abort the walk:
+			// swallowing it returns nil with zero entries, after which a
+			// full Scan would MarkMissing every previously-uploaded row
+			// from a transient I/O blip. (#253)
+			if path == l.root {
+				return fmt.Errorf("walk root %s unreadable: %w", l.root, err)
+			}
 			slog.Warn("localdir walk: per-entry error, skipping", "path", path, "err", err)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
