@@ -56,7 +56,8 @@ type Options struct {
 	// ZipMaxBytes caps the uncompressed byte total of a single zip
 	// group. Subtrees larger than this are split along subdirectory
 	// boundaries; only loose files at one directory level that still
-	// exceed the cap get chunked into numbered parts. <= 0 disables.
+	// exceed the cap get chunked into numbered parts. 0 = use default
+	// of 2 GiB; set to a negative value to disable the cap entirely.
 	ZipMaxBytes int64
 	// MinZipDirFiles is the minimum file count a subdirectory must have
 	// to be emitted as its own group during a size-cap split. Subdirs
@@ -119,7 +120,7 @@ func New(opts Options) *Engine {
 	if opts.ZipThresh <= 0 {
 		opts.ZipThresh = 50
 	}
-	if opts.ZipMaxBytes <= 0 {
+	if opts.ZipMaxBytes == 0 {
 		opts.ZipMaxBytes = 2 << 30 // 2 GiB per zip
 	}
 	if opts.CopyThreads <= 0 {
