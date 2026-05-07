@@ -824,12 +824,7 @@ func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN i
 	}
 	e.emitCopyProgress(runID, key, groupTotalBytes, groupTotalBytes)
 
-	md5hex, err := md5File(zipPath)
-	if err != nil {
-		os.Remove(zipPath)
-		return stagedItem{}, err
-	}
-	zipSHA256, err := sha256File(zipPath)
+	md5hex, zipSHA256, err := md5AndSHA256File(zipPath)
 	if err != nil {
 		os.Remove(zipPath)
 		return stagedItem{}, err
@@ -1342,6 +1337,23 @@ func md5File(p string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// md5AndSHA256File returns hex MD5 and hex SHA256 (matching md5File /
+// sha256File) in a single pass through the file, so a multi-GiB staged
+// zip isn't read off disk twice on the hot copy→upload path. (#254)
+func md5AndSHA256File(p string) (md5hex string, sha256hex string, err error) {
+	f, ferr := os.Open(p)
+	if ferr != nil {
+		return "", "", ferr
+	}
+	defer f.Close()
+	hMD5 := md5.New()
+	hSHA := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(hMD5, hSHA), f); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), nil
 }
 
 // skipIfMatches reports whether S3 already holds an object at key whose
