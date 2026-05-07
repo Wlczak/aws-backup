@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -273,6 +275,7 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RealIP)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(originGuard)
 		r.Get("/status", s.handleStatus)
 
 		r.Get("/runs", s.handleListRuns)
@@ -320,6 +323,33 @@ func (s *Server) Router() http.Handler {
 	}
 
 	return r
+}
+
+// originGuard rejects requests whose Origin header is set and does not
+// match the request Host. Browsers always set Origin on cross-origin
+// EventSource / fetch / form-POST, so a strict equality check is enough
+// to block a malicious page from observing /api/events or invoking
+// state-changing endpoints on the loopback dev server. Missing Origin is
+// allowed so curl, the CLI, and same-origin GETs from older browsers
+// continue to work. (#273)
+func originGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, err := neturl.Parse(origin)
+		if err != nil || u.Host == "" {
+			http.Error(w, "invalid Origin", http.StatusForbidden)
+			return
+		}
+		if !strings.EqualFold(u.Host, r.Host) {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // writeJSON writes v as JSON with the given status.
