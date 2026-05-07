@@ -153,6 +153,62 @@ func (db *DB) AppendLogMany(ctx context.Context, entries []LogEntry) error {
 // log table can't OOM the process when the run-detail UI opens. (#223)
 const ListLogsMaxLimit = 5000
 
+// TrimRunLogsForRun caps run_logs.run_id == runID to maxLines rows. When
+// the run has more, deletes the lowest-severity oldest rows first
+// (info before warn before error) so a chatty info stream can't bury
+// the warns/errors useful for post-mortem. No-op for maxLines <= 0.
+// Returns the number of rows deleted.
+func (db *DB) TrimRunLogsForRun(ctx context.Context, runID int64, maxLines int) (int64, error) {
+	if maxLines <= 0 {
+		return 0, nil
+	}
+	var total int64
+	if err := db.g.WithContext(ctx).Model(&RunLog{}).
+		Where("run_id = ?", runID).
+		Count(&total).Error; err != nil {
+		return 0, err
+	}
+	excess := total - int64(maxLines)
+	if excess <= 0 {
+		return 0, nil
+	}
+	// Order by severity ASC (info first) then id ASC (oldest first within
+	// a tier). LIMIT picks exactly the excess; DELETE removes them.
+	res := db.g.WithContext(ctx).Exec(`
+		DELETE FROM run_logs
+		WHERE id IN (
+			SELECT id FROM run_logs
+			WHERE run_id = ?
+			ORDER BY
+				CASE level WHEN 'error' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END ASC,
+				id ASC
+			LIMIT ?
+		)
+	`, runID, excess)
+	return res.RowsAffected, res.Error
+}
+
+// TrimRunLogsByAge deletes every run_logs row whose owning run finished
+// before cutoff. The runs row itself is preserved so the dashboard's
+// run history (and the row's terminal error_message) is not lost.
+// Active (still-running) runs are skipped — their finished_at is the
+// zero time. Returns the number of rows deleted.
+func (db *DB) TrimRunLogsByAge(ctx context.Context, cutoff time.Time) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, nil
+	}
+	res := db.g.WithContext(ctx).Exec(`
+		DELETE FROM run_logs
+		WHERE run_id IN (
+			SELECT id FROM runs
+			WHERE finished_at IS NOT NULL
+			  AND finished_at != ''
+			  AND finished_at < ?
+		)
+	`, cutoff)
+	return res.RowsAffected, res.Error
+}
+
 // ListLogs returns up to limit log lines for a run, ordered by id, with
 // a 1-based page offset. limit <= 0 selects a 500-row default and is
 // capped at ListLogsMaxLimit. Returns the rows + the total count for

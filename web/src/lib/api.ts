@@ -153,6 +153,8 @@ export interface BackupConfig {
   copy_threads: number;
   upload_threads: number;
   pipeline_queue: number;
+  log_retention_days: number;
+  log_max_per_run: number;
 }
 export interface ServerConfig { host: string; port: number }
 export interface SQSConfig {

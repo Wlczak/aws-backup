@@ -82,6 +82,15 @@ CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE z
 
 `stopped` is a graceful-stop terminal status distinct from `cancelled` (force-cancel mid-stream): see #124.
 
+## run_logs retention
+
+`run_logs` is pruned automatically so a chatty run doesn't grow the DB unboundedly. Two passes run after every `FinishRun` (and once at process startup):
+
+- **Per-run cap** (`backup.log_max_per_run`, default 5000) — caps the just-finished run's log row count. When exceeded, the lowest-severity oldest rows are deleted first (info before warn before error) so post-mortem signal survives a chatty info stream. `db.TrimRunLogsForRun`.
+- **Age cutoff** (`backup.log_retention_days`, default 30) — drops every log row whose owning run finished more than N days ago. The runs row itself is preserved (the dashboard's history + the row's terminal `error_message` are kept); only the per-line log table is trimmed. `db.TrimRunLogsByAge`.
+
+Either knob set to `0` disables that pass.
+
 ## File status transitions
 
 ```text

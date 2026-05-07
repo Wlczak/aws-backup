@@ -157,6 +157,16 @@ type BackupConfig struct {
 	// PipelineQueue caps how many staged groups may sit in tmp waiting
 	// for upload, bounding peak tmp disk usage. 0 = auto (max(upload_threads, 1)).
 	PipelineQueue int `json:"pipeline_queue"`
+	// LogRetentionDays bounds how long per-run log lines persist in the
+	// run_logs table. After each run finishes (and once at startup),
+	// every log row whose owning run finished more than this many days
+	// ago is deleted; the runs row itself is kept so the dashboard
+	// history isn't lost. 0 disables age-based pruning.
+	LogRetentionDays int `json:"log_retention_days"`
+	// LogMaxPerRun caps the per-run log line count. When a run finishes
+	// with more rows than this, the oldest low-severity rows are
+	// deleted first (info before warn before error). 0 disables.
+	LogMaxPerRun int `json:"log_max_per_run"`
 }
 
 type ServerConfig struct {
@@ -187,17 +197,19 @@ func Default() Config {
 			KeyPrefix:       "backups/",
 		},
 		Backup: BackupConfig{
-			ChunkSize:      10,
-			TmpDir:         filepath.Join(os.TempDir(), "aws-backup"),
-			Schedule:       "",
-			ZipThreshold:   50,
-			MinZipDirFiles: 20,
-			ZipMaxBytes:    0, // engine default (2 GiB)
-			EnableZipIndex: true,
-			RetryFailed:    true,
-			CopyThreads:    1,
-			UploadThreads:  1,
-			PipelineQueue:  0, // auto
+			ChunkSize:        10,
+			TmpDir:           filepath.Join(os.TempDir(), "aws-backup"),
+			Schedule:         "",
+			ZipThreshold:     50,
+			MinZipDirFiles:   20,
+			ZipMaxBytes:      0, // engine default (2 GiB)
+			EnableZipIndex:   true,
+			RetryFailed:      true,
+			CopyThreads:      1,
+			UploadThreads:    1,
+			PipelineQueue:    0, // auto
+			LogRetentionDays: 30,
+			LogMaxPerRun:     5000,
 		},
 		Server: ServerConfig{
 			Host: "127.0.0.1",
@@ -227,9 +239,11 @@ func Load(path string) (Config, error) {
 func applyBackfills(data []byte, cfg *Config) {
 	var probe struct {
 		Backup struct {
-			EnableZipIndex *bool `json:"enable_zip_index"`
-			CopyThreads    *int  `json:"copy_threads"`
-			UploadThreads  *int  `json:"upload_threads"`
+			EnableZipIndex   *bool `json:"enable_zip_index"`
+			CopyThreads      *int  `json:"copy_threads"`
+			UploadThreads    *int  `json:"upload_threads"`
+			LogRetentionDays *int  `json:"log_retention_days"`
+			LogMaxPerRun     *int  `json:"log_max_per_run"`
 		} `json:"backup"`
 	}
 	_ = json.Unmarshal(data, &probe)
@@ -241,6 +255,12 @@ func applyBackfills(data []byte, cfg *Config) {
 	}
 	if probe.Backup.UploadThreads == nil {
 		cfg.Backup.UploadThreads = 1
+	}
+	if probe.Backup.LogRetentionDays == nil {
+		cfg.Backup.LogRetentionDays = 30
+	}
+	if probe.Backup.LogMaxPerRun == nil {
+		cfg.Backup.LogMaxPerRun = 5000
 	}
 }
 
@@ -411,6 +431,12 @@ func (c Config) Validate() error {
 	}
 	if c.Backup.PipelineQueue < 0 {
 		errs = append(errs, fmt.Errorf("backup.pipeline_queue must be >= 0 (got %d)", c.Backup.PipelineQueue))
+	}
+	if c.Backup.LogRetentionDays < 0 {
+		errs = append(errs, fmt.Errorf("backup.log_retention_days must be >= 0 (got %d)", c.Backup.LogRetentionDays))
+	}
+	if c.Backup.LogMaxPerRun < 0 {
+		errs = append(errs, fmt.Errorf("backup.log_max_per_run must be >= 0 (got %d)", c.Backup.LogMaxPerRun))
 	}
 	if c.Backup.TmpDir == "" {
 		errs = append(errs, errors.New("backup.tmp_dir is required"))

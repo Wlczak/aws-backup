@@ -179,6 +179,20 @@ func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appSta
 		return nil, fmt.Errorf("open db %s: %w", dbPath, err)
 	}
 
+	// One-shot run_logs trim at startup so an existing oversized DB
+	// (from before this knob existed, or from a long stretch with the
+	// feature disabled) gets immediate disk relief without waiting for
+	// the next backup run's cleanup pass. Best-effort; a failure here
+	// shouldn't block startup. (#log-trim)
+	if days := cfg.Backup.LogRetentionDays; days > 0 {
+		cutoff := time.Now().UTC().AddDate(0, 0, -days)
+		if n, err := d.TrimRunLogsByAge(ctx, cutoff); err != nil {
+			slog.Warn("startup run_logs trim (age) failed", "err", err)
+		} else if n > 0 {
+			slog.Info("startup run_logs trim", "deleted", n, "cutoff", cutoff)
+		}
+	}
+
 	src, err := source.FromConfig(cfg.Source)
 	if err != nil {
 		d.Close()
@@ -449,24 +463,26 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return engine.New(engine.Options{
-		DB:             a.db,
-		Source:         a.src,
-		Storage:        a.store,
-		TmpDir:         a.cfg.Backup.TmpDir,
-		KeyPrefix:      a.cfg.S3.KeyPrefix,
-		ChunkSize:      a.cfg.Backup.ChunkSize,
-		ZipThresh:      a.cfg.Backup.ZipThreshold,
-		MinZipDirFiles: a.cfg.Backup.MinZipDirFiles,
-		ZipMaxBytes:    a.cfg.Backup.ZipMaxBytes,
-		EnableZipIndex: a.cfg.Backup.EnableZipIndex,
-		RetryFailed:    a.cfg.Backup.RetryFailed,
-		CopyThreads:    a.cfg.Backup.CopyThreads,
-		UploadThreads:  a.cfg.Backup.UploadThreads,
-		PipelineQueue:  a.cfg.Backup.PipelineQueue,
-		Mode:           mode,
-		ScanPaths:      scanPaths,
-		Emit:           a.bus.Publish,
-		StopRequested:  a.stopRequested,
+		DB:               a.db,
+		Source:           a.src,
+		Storage:          a.store,
+		TmpDir:           a.cfg.Backup.TmpDir,
+		KeyPrefix:        a.cfg.S3.KeyPrefix,
+		ChunkSize:        a.cfg.Backup.ChunkSize,
+		ZipThresh:        a.cfg.Backup.ZipThreshold,
+		MinZipDirFiles:   a.cfg.Backup.MinZipDirFiles,
+		ZipMaxBytes:      a.cfg.Backup.ZipMaxBytes,
+		EnableZipIndex:   a.cfg.Backup.EnableZipIndex,
+		RetryFailed:      a.cfg.Backup.RetryFailed,
+		CopyThreads:      a.cfg.Backup.CopyThreads,
+		UploadThreads:    a.cfg.Backup.UploadThreads,
+		PipelineQueue:    a.cfg.Backup.PipelineQueue,
+		LogRetentionDays: a.cfg.Backup.LogRetentionDays,
+		LogMaxPerRun:     a.cfg.Backup.LogMaxPerRun,
+		Mode:             mode,
+		ScanPaths:        scanPaths,
+		Emit:             a.bus.Publish,
+		StopRequested:    a.stopRequested,
 	}), nil
 }
 
