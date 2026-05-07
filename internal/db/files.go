@@ -694,8 +694,11 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	if s3Key == "" {
 		return 0, nil
 	}
+	// COALESCE so legacy rows with NULL restore_status (DBs pre-goose, or
+	// inserts outside GORM) still flip to in_progress — `NULL != 'restored'`
+	// evaluates to NULL in SQLite and would silently exclude them. (#265)
 	result := db.g.WithContext(ctx).Model(&File{}).
-		Where("s3_key = ? AND restore_status != ?", s3Key, RestoreStatusRestored).
+		Where("s3_key = ? AND COALESCE(restore_status,'') != ?", s3Key, RestoreStatusRestored).
 		Update("restore_status", RestoreStatusInProgress)
 	return result.RowsAffected, result.Error
 }
