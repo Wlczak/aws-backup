@@ -254,11 +254,12 @@ func Save(path string, cfg Config) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// Tighten any pre-existing (potentially 0755) parent dir so the file's
-	// 0o600 isn't undermined by directory listing on the same host. (#221)
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
+	// Best-effort tighten of an already-existing parent so the file's
+	// 0o600 isn't undermined by dir listing. Ignore the error: when the
+	// config lives under a system path the user doesn't own (e.g. /tmp
+	// in CI smoke tests) chmod will fail with EPERM, and that's not a
+	// reason to fail the whole save. (#221)
+	_ = os.Chmod(dir, 0o700)
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
