@@ -277,7 +277,7 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 
 	var keys []string
 	for _, f := range mf.Files {
-		dataKeys, err := fetchDataKeys(ctx, client, bucket, f.Key, keyCol, f.MD5Checksum)
+		dataKeys, err := fetchDataKeys(ctx, client, bucket, f.Key, keyCol, f.MD5Checksum, f.Size)
 		if err != nil {
 			return nil, fmt.Errorf("fetch data %s: %w", f.Key, err)
 		}
@@ -373,8 +373,20 @@ type manifest struct {
 
 type manifestFile struct {
 	Key         string `json:"key"`
+	Size        int64  `json:"size"`
 	MD5Checksum string `json:"MD5checksum"`
 }
+
+// inventoryDecompressMax bounds the uncompressed bytes we will read out of
+// a single inventory data file. AWS S3 inventory data files top out at
+// well under a GiB compressed in normal usage; an attacker with PutObject
+// on _inventory/ could otherwise plant a gzip bomb that decompresses to
+// many GiB and OOMs the process. (#275)
+const inventoryDecompressMax = 8 << 30 // 8 GiB
+
+// inventoryCSVFieldMax caps a single CSV field. AWS inventory key fields
+// max out at S3's 1024-byte key limit; 1 MiB is a forgiving headroom.
+const inventoryCSVFieldMax = 1 << 20 // 1 MiB
 
 // fetchManifest downloads manifest.json and verifies it against the
 // sibling manifest.checksum (MD5 of the JSON bytes). It also asserts
@@ -462,7 +474,7 @@ func parseSchema(s string) map[string]int {
 // the value at keyCol from each row. When wantMD5 is non-empty, the
 // downloaded bytes are MD5-verified before parsing so a tampered or
 // truncated data file cannot inject extra HEADs. (#187)
-func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol int, wantMD5 string) ([]string, error) {
+func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol int, wantMD5 string, wantSize int64) ([]string, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -472,17 +484,31 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 	}
 	defer out.Body.Close()
 
+	// Bound the compressed read: trust the manifest Size when available
+	// (with a small overshoot allowance), otherwise fall back to a 2 GiB
+	// hard cap. Pairs with the decompressed cap below. (#275)
+	const compressedFallbackMax = 2 << 30
+	compMax := int64(compressedFallbackMax)
+	if wantSize > 0 {
+		compMax = wantSize + 1024
+	}
+
 	var src io.Reader = out.Body
 	if wantMD5 != "" {
-		raw, rerr := io.ReadAll(out.Body)
+		raw, rerr := io.ReadAll(io.LimitReader(out.Body, compMax+1))
 		if rerr != nil {
 			return nil, fmt.Errorf("read data file: %w", rerr)
+		}
+		if int64(len(raw)) > compMax {
+			return nil, fmt.Errorf("inventory data file %s exceeds %d compressed bytes — refusing to parse", key, compMax)
 		}
 		got := hex.EncodeToString(md5sum(raw))
 		if !strings.EqualFold(got, wantMD5) {
 			return nil, fmt.Errorf("data file checksum mismatch (%s): got %s, want %s", key, got, wantMD5)
 		}
 		src = strings.NewReader(string(raw))
+	} else {
+		src = io.LimitReader(out.Body, compMax)
 	}
 
 	gz, err := gzip.NewReader(src)
@@ -490,7 +516,11 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 		return nil, fmt.Errorf("gzip: %w", err)
 	}
 	defer gz.Close()
-	r := csv.NewReader(gz)
+	// Bound uncompressed bytes so a gzip bomb in _inventory/ can't OOM the
+	// process. We read inventoryDecompressMax+1 to detect the overshoot.
+	// (#275)
+	limited := &io.LimitedReader{R: gz, N: inventoryDecompressMax + 1}
+	r := csv.NewReader(limited)
 	r.FieldsPerRecord = -1 // some inventory rows are jagged across schema versions
 	var keys []string
 	for {
@@ -499,12 +529,21 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 			break
 		}
 		if err != nil {
+			if limited.N <= 0 {
+				return nil, fmt.Errorf("inventory data file %s exceeds %d uncompressed bytes — refusing to parse", key, int64(inventoryDecompressMax))
+			}
 			return nil, fmt.Errorf("csv: %w", err)
 		}
 		if keyCol >= len(row) {
 			continue
 		}
+		if len(row[keyCol]) > inventoryCSVFieldMax {
+			return nil, fmt.Errorf("inventory key field exceeds %d bytes in %s", inventoryCSVFieldMax, key)
+		}
 		keys = append(keys, row[keyCol])
+	}
+	if limited.N <= 0 {
+		return nil, fmt.Errorf("inventory data file %s exceeds %d uncompressed bytes — refusing to parse", key, int64(inventoryDecompressMax))
 	}
 	return keys, nil
 }
