@@ -130,58 +130,130 @@ type BatchEntry struct {
 
 // UpsertFileBatch processes many entries in a single transaction.
 // Returns one UpsertResult per entry in the same order.
+//
+// Implementation: a re-scan over a stable tree is dominated by unchanged
+// rows, so we partition entries via one bulk SELECT, then issue bulk
+// INSERT (new) + bulk UPDATE last_seen_at (unchanged) + per-row UPDATE
+// (changed). The previous version did SELECT-then-INSERT/UPDATE per
+// entry which made a 100k-file scan take minutes of GORM round-trips.
+// (#scan-batch)
 func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt time.Time) ([]UpsertResult, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 	results := make([]UpsertResult, len(entries))
+
+	paths := make([]string, len(entries))
+	indexByPath := make(map[string]int, len(entries))
+	for i, e := range entries {
+		paths[i] = e.Path
+		indexByPath[e.Path] = i
+	}
+
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for i, e := range entries {
-			// Cancel-aware: a long batch under a stop / shutdown should
-			// release the SQLite write lock at the next iteration so the
-			// run-finalize / log-appender writers don't queue behind us. (#227)
+		// Bulk-fetch every existing row in chunks to keep IN-list size
+		// under SQLite's variable cap.
+		existing := make(map[string]File, len(entries))
+		for s := 0; s < len(paths); s += sqlChunkSize {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			var existing File
-			err := tx.Select("id, size, mtime").Where("path = ?", e.Path).First(&existing).Error
-			if err != nil && err != gorm.ErrRecordNotFound {
+			end := s + sqlChunkSize
+			if end > len(paths) {
+				end = len(paths)
+			}
+			var rows []File
+			if err := tx.Select("id, path, size, mtime").
+				Where("path IN ?", paths[s:end]).Find(&rows).Error; err != nil {
 				return err
 			}
-			if err == gorm.ErrRecordNotFound {
-				f := File{Path: e.Path, Size: e.Size, MTime: e.ModTime, Status: StatusPending, LastSeenAt: seenAt}
-				if err := tx.Omit("UploadedAt").Create(&f).Error; err != nil {
-					return err
-				}
-				results[i] = UpsertResult{ID: f.ID, Created: true, Changed: true}
+			for _, r := range rows {
+				existing[r.Path] = r
+			}
+		}
+
+		// Partition entries into create / changed / unchanged buckets.
+		var toCreate []File
+		var toCreateIdx []int
+		var unchangedIDs []int64
+		type changeOp struct {
+			id    int64
+			size  int64
+			mtime time.Time
+		}
+		var changes []changeOp
+
+		for i, e := range entries {
+			ex, ok := existing[e.Path]
+			if !ok {
+				toCreate = append(toCreate, File{
+					Path: e.Path, Size: e.Size, MTime: e.ModTime,
+					Status: StatusPending, LastSeenAt: seenAt,
+				})
+				toCreateIdx = append(toCreateIdx, i)
 				continue
 			}
-			results[i].ID = existing.ID
-			if e.Size != existing.Size || !e.ModTime.Equal(existing.MTime) {
+			results[i].ID = ex.ID
+			if e.Size != ex.Size || !e.ModTime.Equal(ex.MTime) {
 				results[i].Changed = true
-				// Preserve md5/zip_name/s3_key/uploaded_at as the historical
-				// record of the *previous* uploaded version. status=pending
-				// drives the new upload; the stale columns let
-				// reconcileFromS3 distinguish "fresh row never uploaded"
-				// (uploaded_at IS NULL → safe to bind to S3 zip) from
-				// "modified-after-upload" (uploaded_at set → must NOT be
-				// rebound to the old zip, or the new bytes are lost). See
-				// #103.
-				if err := tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
-					"size":                e.Size,
-					"mtime":               e.ModTime,
-					"status":              StatusPending,
-					"last_seen_at":        seenAt,
-					"restore_status":      "",
-					"restore_expires_at":  nil,
-				}).Error; err != nil {
-					return err
-				}
+				changes = append(changes, changeOp{id: ex.ID, size: e.Size, mtime: e.ModTime})
 			} else {
-				if err := tx.Model(&File{}).Where("id = ?", existing.ID).
-					Update("last_seen_at", seenAt).Error; err != nil {
-					return err
-				}
+				unchangedIDs = append(unchangedIDs, ex.ID)
+			}
+		}
+
+		// Bulk INSERT new rows. CreateInBatches mutates the slice with
+		// the assigned auto-increment IDs as each batch commits.
+		if len(toCreate) > 0 {
+			if err := tx.Omit("UploadedAt").CreateInBatches(toCreate, sqlChunkSize).Error; err != nil {
+				return err
+			}
+			for j, f := range toCreate {
+				idx := toCreateIdx[j]
+				results[idx] = UpsertResult{ID: f.ID, Created: true, Changed: true}
+			}
+		}
+
+		// Bulk UPDATE last_seen_at on unchanged rows — one statement per
+		// chunk instead of one per row.
+		for s := 0; s < len(unchangedIDs); s += sqlChunkSize {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			end := s + sqlChunkSize
+			if end > len(unchangedIDs) {
+				end = len(unchangedIDs)
+			}
+			if err := tx.Model(&File{}).
+				Where("id IN ?", unchangedIDs[s:end]).
+				Update("last_seen_at", seenAt).Error; err != nil {
+				return err
+			}
+		}
+
+		// Changed rows still go one-by-one because each carries a
+		// different (size, mtime) pair. Re-scans of stable trees rarely
+		// touch this path, so the per-row cost is fine.
+		// Preserve md5/zip_name/s3_key/uploaded_at as the historical
+		// record of the *previous* uploaded version. status=pending
+		// drives the new upload; the stale columns let reconcileFromS3
+		// distinguish "fresh row never uploaded" (uploaded_at IS NULL →
+		// safe to bind to S3 zip) from "modified-after-upload"
+		// (uploaded_at set → must NOT be rebound to the old zip, or the
+		// new bytes are lost). See #103.
+		for _, c := range changes {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := tx.Model(&File{}).Where("id = ?", c.id).Updates(map[string]any{
+				"size":               c.size,
+				"mtime":              c.mtime,
+				"status":             StatusPending,
+				"last_seen_at":       seenAt,
+				"restore_status":     "",
+				"restore_expires_at": nil,
+			}).Error; err != nil {
+				return err
 			}
 		}
 		return nil

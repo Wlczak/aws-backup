@@ -120,6 +120,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | dashboard-zip-count | — | dashboard `uploads` derivation weights each item by `files` from `upload_start`/`upload_complete` so a zip group of N files counts as N completed, not 1 |
 | files-lazy-tree | — | new `/api/files/tree` + `/api/files/subtree-ids`; Files page tree view fetches one folder per expand instead of `all=true` dumping the whole index up front |
 | restore-batch | — | `RequestRestore` flips covered rows via one bulk `MarkRestoreInProgressMany` (chunked, deduped) instead of one UPDATE per file — a 2000-file zip restore now takes ms, not minutes |
+| scan-batch | — | `UpsertFileBatch` partitions via one bulk SELECT then bulk-inserts new rows + bulk-updates `last_seen_at` for unchanged ones, instead of SELECT+INSERT-or-UPDATE per file. Plus `PRAGMA synchronous=NORMAL` paired with WAL to drop the per-commit fsync. Big scans are several × faster |
 | #259 / #257 / #252 / #249 | 8f2c7a7 | defer-Close staged file via closure on Put; `uploadProgressCtx` final emit must-emit-once via dedicated atomic; resume verify checks ctx; SQS S3 event key uses PathUnescape |
 | #258 | 403898a | `runServe` waits on the SQS consumer goroutine via a done channel before `app.close()` runs |
 | #255 / #233 | 8768f89 / d6bfae2 | `applyMu` serialises post-run `applyPendingSettings`, PUT /api/settings, and `handleTriggerRun` so neither a fresh PUT nor a fresh BuildEngine can race the swap |

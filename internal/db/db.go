@@ -43,6 +43,18 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			sqlDB.Close()
 			return nil, fmt.Errorf("enable WAL: %w", err)
 		}
+		// synchronous=NORMAL is the documented safe pairing with WAL: a
+		// power loss can drop the most recent commits but cannot corrupt
+		// the database, and we trade fsync-per-commit for one fsync per
+		// checkpoint. Big scans (UpsertFileBatch flushes every 3 s) are
+		// 2–3× faster at this setting because each commit no longer
+		// stalls on the kernel write barrier. The index is a derived
+		// view of the bucket and is rebuilt from the cloud on demand
+		// anyway, so the durability trade is acceptable. (#scan-batch)
+		if err := gdb.WithContext(ctx).Exec("PRAGMA synchronous=NORMAL").Error; err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("set synchronous=NORMAL: %w", err)
+		}
 	}
 	if err := gdb.WithContext(ctx).Exec("PRAGMA busy_timeout=5000").Error; err != nil {
 		sqlDB.Close()
