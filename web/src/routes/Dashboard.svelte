@@ -392,28 +392,25 @@
   // --- fix-action state ---
   let backingUp = $state(false);
   let backupStarted = $state(false);
-  let backupErr = $state('');
 
   let showRestoreForm = $state(false);
   let restoreTargetDir = $state('');
   let restoring = $state(false);
   let restoreResult = $state<{ files_written: number; bytes_written: number; skipped?: string[]; errors?: string[] } | null>(null);
-  let restoreErr = $state('');
 
   let showDeleteConfirm = $state(false);
   let deleting = $state(false);
   let deleteResult = $state<{ deleted_standalone: number; deleted_zips: number; skipped_partial_zip: number; errors?: string[] } | null>(null);
-  let deleteErr = $state('');
 
   function resetFixState() {
-    backupStarted = false; backupErr = '';
-    showRestoreForm = false; restoreResult = null; restoreErr = '';
-    showDeleteConfirm = false; deleteResult = null; deleteErr = '';
+    backupStarted = false;
+    showRestoreForm = false; restoreResult = null;
+    showDeleteConfirm = false; deleteResult = null;
   }
 
   async function backUpMissing() {
     if (!fullSyncResult?.local_missing_from_cloud?.length) return;
-    backingUp = true; backupStarted = false; backupErr = '';
+    backingUp = true; backupStarted = false;
     try {
       // Force-reset these paths to pending regardless of their current DB
       // status — files may be marked uploaded/zipped even though they're
@@ -423,7 +420,8 @@
       backupStarted = true;
       await refresh();
     } catch (e) {
-      backupErr = String(e);
+      // Toast over inline `err small` per CLAUDE.md feedback convention. (#226)
+      toast.error(String(e));
     } finally {
       backingUp = false;
     }
@@ -431,11 +429,11 @@
 
   async function restoreMissing() {
     if (!restoreTargetDir || !fullSyncResult?.cloud_missing_from_local?.length) return;
-    restoring = true; restoreResult = null; restoreErr = '';
+    restoring = true; restoreResult = null;
     try {
       restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreTargetDir);
     } catch (e) {
-      restoreErr = String(e);
+      toast.error(String(e)); // (#226)
     } finally {
       restoring = false;
     }
@@ -443,11 +441,11 @@
 
   async function deleteCloudMissing() {
     if (!fullSyncResult?.cloud_missing_from_local?.length) return;
-    deleting = true; deleteResult = null; deleteErr = '';
+    deleting = true; deleteResult = null;
     try {
       deleteResult = await api.deleteCloudPaths(fullSyncResult.cloud_missing_from_local);
     } catch (e) {
-      deleteErr = String(e);
+      toast.error(String(e)); // (#226)
     } finally {
       deleting = false;
       showDeleteConfirm = false;
@@ -659,7 +657,6 @@
               </button>
               {#if status?.current}<span class="muted small">run in progress</span>{/if}
             {/if}
-            {#if backupErr}<span class="err small">{backupErr}</span>{/if}
           </div>
         {/if}
       </details>
@@ -709,7 +706,6 @@
                 </button>
                 <button onclick={() => showRestoreForm = false} type="button">Cancel</button>
               </div>
-              {#if restoreErr}<span class="err small">{restoreErr}</span>{/if}
             {:else if showDeleteConfirm}
               <div class="fix-form">
                 <span class="warn-text small">
@@ -726,7 +722,6 @@
                 </button>
                 <button onclick={() => showDeleteConfirm = false} type="button">Cancel</button>
               </div>
-              {#if deleteErr}<span class="err small">{deleteErr}</span>{/if}
             {:else}
               <button class="fix-btn" onclick={() => showRestoreForm = true} type="button">
                 Restore to directory…

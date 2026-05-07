@@ -69,16 +69,19 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// by the queued apply. (#255)
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
-	s.runMu.Lock()
-	defer s.runMu.Unlock()
 
-	// Successive PUTs during one run compose against the most recent
-	// pending config (if any), so a redacted-secret echo doesn't blank
-	// out credentials the user just saved.
+	// Read currentRun + pendingConfig under runMu briefly, then release
+	// runMu so the slow ApplySettings (DNS, TCP handshake, HeadBucket)
+	// and config.Save (fsync) don't block /status, /cancel, /stop. Since
+	// handleTriggerRun also acquires applyMu before runMu (#233), no new
+	// run can start while we're applying. (#229)
+	s.runMu.Lock()
+	currentRun := s.currentRun
 	prev := live
 	if s.pendingConfig != nil {
 		prev = *s.pendingConfig
 	}
+	s.runMu.Unlock()
 
 	var next config.Config
 	if err := decodeJSON(r, &next); err != nil {
@@ -91,7 +94,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.currentRun != 0 {
+	if currentRun != 0 {
 		// Defer the apply until the run finishes. Persist to disk now so
 		// the change survives restart, but leave live state alone.
 		if s.deps.ConfigPath != "" {
@@ -101,7 +104,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		queued := merged
+		s.runMu.Lock()
 		s.pendingConfig = &queued
+		s.runMu.Unlock()
 		writeJSON(w, http.StatusOK, settingsResponse{
 			Config:       merged.Redacted(),
 			PendingApply: true,
@@ -145,7 +150,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	s.updateConfig(merged)
 	// No run in flight, so a pending config (if any was somehow set) is
 	// stale — clear it so the UI doesn't keep flagging pending_apply.
+	s.runMu.Lock()
 	s.pendingConfig = nil
+	s.runMu.Unlock()
 	writeJSON(w, http.StatusOK, settingsResponse{
 		Config:       merged.Redacted(),
 		PendingApply: false,

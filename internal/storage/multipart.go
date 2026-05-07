@@ -281,6 +281,36 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 	if err != nil {
 		return PutResult{}, mu.UploadID, err
 	}
+	// On resume the prior run may have used a different PartSize. The
+	// stored part sizes are the source of truth — derive partSize from
+	// the largest existing part. A config / default change between runs
+	// would otherwise false-fail every existing part on the SHA256
+	// verify pass AND make the final CompleteMultipartUpload reject the
+	// part-numbering with InvalidPart. (#231)
+	verifyPartSize := partSize
+	if len(existing) > 0 {
+		maxStored := int64(0)
+		for _, p := range existing {
+			if sz := aws.ToInt64(p.Size); sz > maxStored {
+				maxStored = sz
+			}
+		}
+		if maxStored > 0 {
+			verifyPartSize = maxStored
+			partSize = maxStored
+			mu.PartSize = maxStored
+			totalPartsRaw = (size + partSize - 1) / partSize
+			if size == 0 {
+				totalPartsRaw = 1
+			}
+			if totalPartsRaw > s3MaxParts {
+				return PutResult{}, mu.UploadID, fmt.Errorf(
+					"resumed upload's stored part_size %d would require %d parts (>%d) for size %d",
+					partSize, totalPartsRaw, s3MaxParts, size)
+			}
+			totalParts = int32(totalPartsRaw)
+		}
+	}
 	completed := make([]s3types.CompletedPart, 0, totalParts)
 	already := map[int32]struct{}{}
 	var bytesDone int64
@@ -303,8 +333,8 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 		if num < 1 || num > totalParts {
 			continue
 		}
-		offset := int64(num-1) * partSize
-		end := offset + partSize
+		offset := int64(num-1) * verifyPartSize
+		end := offset + verifyPartSize
 		if end > size {
 			end = size
 		}

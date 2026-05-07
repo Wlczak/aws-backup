@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { api, type Run, type RunDetail } from '../lib/api';
+  import { onMount, onDestroy } from 'svelte';
+  import { api, ApiError, type Run, type RunDetail } from '../lib/api';
   import { formatDate, bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -9,26 +9,49 @@
   let selectedID = $state<number | null>(null);
   let detail = $state<RunDetail | null>(null);
 
+  // Mirrors the AbortController pattern in Files.svelte (#204): cancel
+  // the previous in-flight detail load on rapid row clicks AND on
+  // unmount so a late response can't write to torn-down state. (#230)
+  let detailCtrl: AbortController | null = null;
+  let listCtrl: AbortController | null = null;
+  let aborted = false;
+
   async function loadRuns() {
+    listCtrl?.abort();
+    const ctl = new AbortController();
+    listCtrl = ctl;
     try {
-      const page = await api.runs(1, 50);
+      const page = await api.runs(1, 50, ctl.signal);
+      if (aborted || ctl.signal.aborted) return;
       runs = page.runs;
     } catch (e) {
-      toast.error(String(e));
+      if (e instanceof ApiError && e.kind === 'abort') return;
+      if (!aborted) toast.error(String(e));
     }
   }
 
   async function selectRun(id: number) {
+    detailCtrl?.abort();
+    const ctl = new AbortController();
+    detailCtrl = ctl;
     selectedID = id;
     detail = null;
     try {
-      detail = await api.run(id);
+      const d = await api.run(id, ctl.signal);
+      if (aborted || ctl.signal.aborted) return;
+      detail = d;
     } catch (e) {
-      toast.error(String(e));
+      if (e instanceof ApiError && e.kind === 'abort') return;
+      if (!aborted) toast.error(String(e));
     }
   }
 
   onMount(loadRuns);
+  onDestroy(() => {
+    aborted = true;
+    detailCtrl?.abort();
+    listCtrl?.abort();
+  });
 </script>
 
 <h1>Run logs</h1>

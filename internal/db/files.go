@@ -74,18 +74,44 @@ const (
 
 // File is the GORM model for the `files` table.
 type File struct {
-	ID               int64      `gorm:"column:id;primaryKey;autoIncrement"`
-	Path             string     `gorm:"column:path;uniqueIndex;not null"`
-	Size             int64      `gorm:"column:size;not null"`
-	MTime            time.Time  `gorm:"column:mtime;not null"`
-	MD5              string     `gorm:"column:md5"`
-	Status           string     `gorm:"column:status;not null;default:'pending';index"`
-	ZipName          string     `gorm:"column:zip_name;index"`
-	S3Key            string     `gorm:"column:s3_key"`
-	UploadedAt       time.Time  `gorm:"column:uploaded_at"`
-	LastSeenAt       time.Time  `gorm:"column:last_seen_at;not null;index"`
-	RestoreStatus    string     `gorm:"column:restore_status;index"`
-	RestoreExpiresAt *time.Time `gorm:"column:restore_expires_at"`
+	ID            int64     `gorm:"column:id;primaryKey;autoIncrement"`
+	Path          string    `gorm:"column:path;uniqueIndex;not null"`
+	Size          int64     `gorm:"column:size;not null"`
+	MTime         time.Time `gorm:"column:mtime;not null"`
+	MD5           string    `gorm:"column:md5"`
+	Status        string    `gorm:"column:status;not null;default:'pending';index"`
+	ZipName       string    `gorm:"column:zip_name;index"`
+	S3Key         string    `gorm:"column:s3_key"`
+	UploadedAt    time.Time `gorm:"column:uploaded_at"`
+	LastSeenAt    time.Time `gorm:"column:last_seen_at;not null;index"`
+	RestoreStatus string    `gorm:"column:restore_status;index"`
+	// restoreExpiresAtRaw is the untyped TEXT we read out of SQLite —
+	// the column has documented format drift (RFC3339 vs. Go-default vs.
+	// SQLite-default) that breaks glebarez/sqlite's single-layout Scan
+	// and used to 500 every Files page that included a legacy row.
+	// AfterFind below flex-parses it into RestoreExpiresAt so a single
+	// corrupted timestamp produces a nil pointer + log, not a fatal
+	// row Scan error. (#248)
+	RestoreExpiresAtRaw sql.NullString `gorm:"column:restore_expires_at" json:"-"`
+	// RestoreExpiresAt is parsed from the raw column in AfterFind;
+	// callers continue to read it as the typed *time.Time they always did.
+	RestoreExpiresAt *time.Time `gorm:"-" json:"restore_expires_at,omitempty"`
+}
+
+// AfterFind parses restore_expires_at via parseFlexTime so legacy /
+// non-canonical layouts don't poison the whole page. (#248)
+func (f *File) AfterFind(_ *gorm.DB) error {
+	if !f.RestoreExpiresAtRaw.Valid || strings.TrimSpace(f.RestoreExpiresAtRaw.String) == "" {
+		f.RestoreExpiresAt = nil
+		return nil
+	}
+	if t, ok := parseFlexTime(f.RestoreExpiresAtRaw.String); ok {
+		t = t.UTC()
+		f.RestoreExpiresAt = &t
+	} else {
+		f.RestoreExpiresAt = nil
+	}
+	return nil
 }
 
 // UpsertResult captures what changed during UpsertFile.
@@ -111,6 +137,12 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 	results := make([]UpsertResult, len(entries))
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for i, e := range entries {
+			// Cancel-aware: a long batch under a stop / shutdown should
+			// release the SQLite write lock at the next iteration so the
+			// run-finalize / log-appender writers don't queue behind us. (#227)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			var existing File
 			err := tx.Select("id, size, mtime").Where("path = ?", e.Path).First(&existing).Error
 			if err != nil && err != gorm.ErrRecordNotFound {
@@ -264,6 +296,9 @@ func (db *DB) MarkZipUploadedBatch(ctx context.Context, ids []int64, zipName, md
 	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := ids
 			if len(chunk) > sqlChunkSize {
 				chunk = ids[:sqlChunkSize]
@@ -292,6 +327,9 @@ func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key str
 	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := ids
 			if len(chunk) > sqlChunkSize {
 				chunk = ids[:sqlChunkSize]
@@ -358,6 +396,9 @@ func (db *DB) SetZipName(ctx context.Context, ids []int64, zipName string) error
 	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := ids
 			if len(chunk) > sqlChunkSize {
 				chunk = ids[:sqlChunkSize]
@@ -473,20 +514,39 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	// older code paths, so we scan defensively and parse with a list
 	// of known layouts. If no layout matches we log and skip — a
 	// single bad row shouldn't 500 the dashboard.
-	var soonest sql.NullString
+	// Compute MIN in Go: SQLite stores DATETIME as TEXT and the column
+	// has documented mixed layouts. SQL `>` and MIN() over those rows
+	// would compare lexically (e.g. "T" > " " in RFC3339 vs Go-default),
+	// so the dashboard's "soonest expiring" could pick an already-expired
+	// row or skip the actual soonest. Pull every restored row's raw
+	// timestamp, flex-parse, filter > now, take MIN. (#247)
+	var rawExpiries []sql.NullString
 	if err := db.g.WithContext(ctx).Model(&File{}).
-		Select("MIN(restore_expires_at)").
-		Where("restore_status = ? AND restore_expires_at IS NOT NULL AND restore_expires_at > ?", RestoreStatusRestored, time.Now()).
-		Scan(&soonest).Error; err != nil {
+		Select("restore_expires_at").
+		Where("restore_status = ? AND restore_expires_at IS NOT NULL AND restore_expires_at != ''", RestoreStatusRestored).
+		Pluck("restore_expires_at", &rawExpiries).Error; err != nil {
 		return s, err
 	}
-	if soonest.Valid && soonest.String != "" {
-		if t, ok := parseFlexTime(soonest.String); ok {
-			s.RestoreSoonestExp = &t
-		} else {
-			slog.Warn("Stats: unparseable MIN(restore_expires_at)", "value", soonest.String)
+	now := time.Now().UTC()
+	var soonestT *time.Time
+	for _, raw := range rawExpiries {
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		t, ok := parseFlexTime(raw.String)
+		if !ok {
+			slog.Warn("Stats: unparseable restore_expires_at", "value", raw.String)
+			continue
+		}
+		if !t.After(now) {
+			continue
+		}
+		if soonestT == nil || t.Before(*soonestT) {
+			tt := t
+			soonestT = &tt
 		}
 	}
+	s.RestoreSoonestExp = soonestT
 
 	if err := db.g.WithContext(ctx).Model(&File{}).
 		Select("COALESCE(SUM(size), 0)").
@@ -506,6 +566,9 @@ func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) 
 	var total int64
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := ids
 			if len(chunk) > sqlChunkSize {
 				chunk = ids[:sqlChunkSize]
@@ -550,6 +613,9 @@ func (db *DB) DeleteFiles(ctx context.Context, ids []int64) (int64, error) {
 	var total int64
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := ids
 			if len(chunk) > sqlChunkSize {
 				chunk = ids[:sqlChunkSize]
@@ -707,6 +773,26 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	return result.RowsAffected, result.Error
 }
 
+// MarkRestoreCleared resets restore_status / restore_expires_at on every
+// row whose s3_key matches and is currently 'in_progress' or 'restored'.
+// Used when the restore scanner observes a HEAD with no x-amz-restore
+// header — i.e. the temporary restored copy has expired or the object
+// was never actually being restored — so the UI doesn't keep showing
+// "thawing forever" for an in_progress row whose Completed event was
+// missed and whose expiry has since elapsed. (#246)
+func (db *DB) MarkRestoreCleared(ctx context.Context, s3Key string) (int64, error) {
+	if s3Key == "" {
+		return 0, nil
+	}
+	result := db.g.WithContext(ctx).Model(&File{}).
+		Where("s3_key = ? AND restore_status IN ?", s3Key, []string{RestoreStatusInProgress, RestoreStatusRestored}).
+		Updates(map[string]any{
+			"restore_status":     "",
+			"restore_expires_at": nil,
+		})
+	return result.RowsAffected, result.Error
+}
+
 // MarkRestored flips every row whose s3_key matches to
 // restore_status='restored' and records the temporary copy's expiry time.
 func (db *DB) MarkRestored(ctx context.Context, s3Key string, expiresAt time.Time) (int64, error) {
@@ -733,6 +819,9 @@ func markPendingByColumn(ctx context.Context, g *gorm.DB, column string, values 
 	var total int64
 	err := g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(values) > 0 {
+			if err := ctx.Err(); err != nil { // cancel-aware (#227)
+				return err
+			}
 			chunk := values
 			if len(chunk) > sqlChunkSize {
 				chunk = values[:sqlChunkSize]

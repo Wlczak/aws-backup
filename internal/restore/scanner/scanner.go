@@ -59,6 +59,7 @@ type DB interface {
 	ListFilesByRestoreStatus(ctx context.Context, status string) ([]string, error)
 	MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, error)
 	MarkRestored(ctx context.Context, s3Key string, expiresAt time.Time) (int64, error)
+	MarkRestoreCleared(ctx context.Context, s3Key string) (int64, error)
 }
 
 // Mode labels a scan run.
@@ -304,7 +305,16 @@ func (s *Scanner) applyKey(ctx context.Context, st storage.Storage, key string) 
 		}
 		return int(n), false
 	}
-	return 0, false
+	// No x-amz-restore header — the temporary copy has expired or the
+	// object was never being restored. Clear any in_progress / restored
+	// row so a missed ObjectRestore:Completed event followed by an
+	// expiry doesn't leave the UI showing "thawing forever". (#246)
+	n, err := s.db.MarkRestoreCleared(ctx, key)
+	if err != nil {
+		s.logger.Warn("restore scan mark cleared failed", "key", key, "err", err)
+		return 0, true
+	}
+	return int(n), false
 }
 
 func (s *Scanner) publish(ev engine.Event) {

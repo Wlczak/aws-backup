@@ -524,6 +524,7 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 	r := csv.NewReader(limited)
 	r.FieldsPerRecord = -1 // some inventory rows are jagged across schema versions
 	var keys []string
+	skipped := 0
 	for {
 		row, err := r.Read()
 		if err == io.EOF {
@@ -536,6 +537,12 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 			return nil, fmt.Errorf("csv: %w", err)
 		}
 		if keyCol >= len(row) {
+			// Schema/data mismatch (manifest fileSchema declares a wider
+			// row than the data file actually has, or a literal newline
+			// inside a key field split the record). Silently dropping
+			// these rows is exactly the silent-coverage-loss the
+			// inventory path was meant to avoid. (#225)
+			skipped++
 			continue
 		}
 		raw := row[keyCol]
@@ -555,6 +562,9 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 	}
 	if limited.N <= 0 {
 		return nil, fmt.Errorf("inventory data file %s exceeds %d uncompressed bytes — refusing to parse", key, int64(inventoryDecompressMax))
+	}
+	if skipped > 0 {
+		return nil, fmt.Errorf("inventory data file %s: %d rows shorter than declared keyCol=%d — refusing partial coverage", key, skipped, keyCol)
 	}
 	return keys, nil
 }

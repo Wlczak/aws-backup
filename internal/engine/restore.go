@@ -306,6 +306,14 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 			errs = append(errs, m.Path+": write: "+err.Error())
 			continue
 		}
+		// Preserve the zip entry's file mode (executable bit, restrictive
+		// perms, etc.) — os.Create defaults to 0666 & umask, which silently
+		// drops the executable bit on every restored binary. (#228)
+		if mode := zf.Mode().Perm(); mode != 0 {
+			if cerr := os.Chmod(dst, mode); cerr != nil {
+				errs = append(errs, m.Path+": chmod: "+cerr.Error())
+			}
+		}
 		written++
 		bytes += n
 	}
