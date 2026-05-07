@@ -20,7 +20,7 @@ type testResult struct {
 // handleTestSource verifies the configured source is reachable. For
 // localdir that means the root exists and is a directory; the real SMB
 // impl plugs in its own check in feature 18.
-func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleTestSource(w http.ResponseWriter, r *http.Request) {
 	cfg, ok := s.snapshotConfig()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
@@ -40,13 +40,33 @@ func (s *Server) handleTestSource(w http.ResponseWriter, _ *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "localdir root reachable"})
 	case config.SourceSMB:
-		smb, err := source.FromConfig(cfg.Source)
-		if err != nil {
-			writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
-			return
+		// Bound the dial: source.FromConfig takes no ctx and the OS
+		// default TCP-connect timeout (~75–120 s) would otherwise pin a
+		// goroutine + FD per request against a black-holed host. (#177)
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		type result struct {
+			smb source.Source
+			err error
 		}
-		_ = smb.Close()
-		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "smb share reachable"})
+		ch := make(chan result, 1)
+		go func() {
+			smb, err := source.FromConfig(cfg.Source)
+			ch <- result{smb, err}
+		}()
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				writeJSON(w, http.StatusOK, testResult{OK: false, Message: res.err.Error()})
+				return
+			}
+			_ = res.smb.Close()
+			writeJSON(w, http.StatusOK, testResult{OK: true, Message: "smb share reachable"})
+		case <-ctx.Done():
+			writeJSON(w, http.StatusOK, testResult{OK: false, Message: "smb dial timed out after 10s"})
+			// Don't leak the goroutine: it'll write to the buffered channel
+			// when the OS dial finally fails; the receive is dropped on GC.
+		}
 	default:
 		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "unknown source type"})
 	}

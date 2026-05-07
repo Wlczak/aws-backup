@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/Wlczak/aws-backup/internal/config"
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -125,11 +126,29 @@ type Server struct {
 	statsMu     sync.Mutex
 	statsValue  db.FileStats
 	statsExpiry time.Time
+	// statsSF coalesces concurrent stats queries into a single DB call
+	// so a slow Stats() doesn't queue every poller serially behind the
+	// cache mutex (#179). The mutex still guards reads/writes of
+	// statsValue/statsExpiry; singleflight only de-dupes the DB call.
+	statsSF singleflight.Group
+
+	// allFilesCache coalesces /api/files?all=true responses across the
+	// poll-heavy tree view so the same 10-30 MB JSON isn't re-serialised
+	// per request. Keyed on (status, search). (#178)
+	allFilesMu    sync.Mutex
+	allFilesCache map[string]allFilesCacheEntry
+	allFilesSF    singleflight.Group
 
 	// inventorySyncBusy serialises /api/restore/inventory-sync so two
 	// concurrent clicks don't both download the (potentially huge)
 	// manifest before the scanner contention check fires. (#197)
 	inventorySyncBusy atomic.Bool
+}
+
+type allFilesCacheEntry struct {
+	files  []db.File
+	total  int64
+	expiry time.Time
 }
 
 // cfgMutex returns the RWMutex used to serialise config reads/writes.
@@ -239,7 +258,11 @@ func NewServer(d Deps) *Server {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	return &Server{deps: d, shutdownCh: make(chan struct{})}
+	return &Server{
+		deps:          d,
+		shutdownCh:    make(chan struct{}),
+		allFilesCache: map[string]allFilesCacheEntry{},
+	}
 }
 
 // Router builds the chi router with all /api/* routes mounted.

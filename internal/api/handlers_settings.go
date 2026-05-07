@@ -158,6 +158,22 @@ func (s *Server) applyPendingSettings(pending *config.Config, logger *slog.Logge
 	if pending == nil {
 		return
 	}
+	// Skip the apply when shutdown has already started: ApplySettings
+	// builds new *S3Storage / *SMB clients with context.Background(),
+	// which can hang on the SDK's default dial timeout while pointing
+	// at the new (potentially unreachable) endpoint — and runServe is
+	// about to tear those clients right back down via app.close().
+	// The persisted config is reapplied on next start. (#180)
+	if s.shutdownCh != nil {
+		select {
+		case <-s.shutdownCh:
+			if logger != nil {
+				logger.Info("pending settings deferred — shutdown in progress; will apply on next start")
+			}
+			return
+		default:
+		}
+	}
 	live, ok := s.snapshotConfig()
 	if !ok {
 		return

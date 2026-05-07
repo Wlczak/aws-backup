@@ -59,7 +59,14 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		filter.Page = 1
 		filter.Limit = maxAllRows + 1
 	}
-	files, total, err := s.deps.DB.ListFiles(r.Context(), filter)
+	var files []db.File
+	var total int64
+	var err error
+	if all {
+		files, total, err = s.cachedAllFiles(r.Context(), filter)
+	} else {
+		files, total, err = s.deps.DB.ListFiles(r.Context(), filter)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -118,21 +125,91 @@ func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
 
 // cachedStats serves /api/files/stats from a short TTL cache so tight
 // dashboard polls don't rescan the whole files table per request.
-// The mutex is held for the duration of the DB call to prevent a stampede
-// where many goroutines all observe a stale expiry and fire concurrent queries.
+//
+// The hot read path (cache hit) only takes the mutex briefly; on miss
+// we use singleflight so concurrent pollers share one DB call instead
+// of queueing serially behind a held mutex (#179). On query error we
+// set a short backoff expiry so a degraded DB isn't hammered.
 func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
 	s.statsMu.Lock()
-	defer s.statsMu.Unlock()
 	if time.Now().Before(s.statsExpiry) {
-		return s.statsValue, nil
+		v := s.statsValue
+		s.statsMu.Unlock()
+		return v, nil
 	}
-	st, err := s.deps.DB.Stats(ctx)
+	s.statsMu.Unlock()
+
+	v, err, _ := s.statsSF.Do("stats", func() (any, error) {
+		// Re-check the cache inside the singleflight winner: a concurrent
+		// caller may have populated it while we were queueing.
+		s.statsMu.Lock()
+		if time.Now().Before(s.statsExpiry) {
+			cached := s.statsValue
+			s.statsMu.Unlock()
+			return cached, nil
+		}
+		s.statsMu.Unlock()
+		st, err := s.deps.DB.Stats(ctx)
+		s.statsMu.Lock()
+		defer s.statsMu.Unlock()
+		if err != nil {
+			// Short backoff so a failing query isn't replayed instantly
+			// on the next poll, but recovers quickly once the DB is healthy.
+			s.statsExpiry = time.Now().Add(500 * time.Millisecond)
+			return db.FileStats{}, err
+		}
+		s.statsValue = st
+		s.statsExpiry = time.Now().Add(statsCacheTTL)
+		return st, nil
+	})
 	if err != nil {
 		return db.FileStats{}, err
 	}
-	s.statsValue = st
-	s.statsExpiry = time.Now().Add(statsCacheTTL)
-	return st, nil
+	return v.(db.FileStats), nil
+}
+
+// allFilesCacheTTL bounds staleness of the cached /api/files?all=true
+// response. Mirrors statsCacheTTL — short enough that the tree view
+// still reflects fresh state, long enough to absorb a 10–30 MB JSON
+// hit on every poller. (#178)
+const allFilesCacheTTL = 2 * time.Second
+
+// cachedAllFiles serves the all=true path from a short TTL cache so a
+// poll loop doesn't re-scan + re-serialise the full files table per
+// request. Singleflight collapses concurrent misses into one query.
+func (s *Server) cachedAllFiles(ctx context.Context, filter db.FilesFilter) ([]db.File, int64, error) {
+	key := filter.Status + "|" + filter.Search
+	now := time.Now()
+	s.allFilesMu.Lock()
+	if e, ok := s.allFilesCache[key]; ok && now.Before(e.expiry) {
+		s.allFilesMu.Unlock()
+		return e.files, e.total, nil
+	}
+	s.allFilesMu.Unlock()
+
+	v, err, _ := s.allFilesSF.Do("all|"+key, func() (any, error) {
+		s.allFilesMu.Lock()
+		if e, ok := s.allFilesCache[key]; ok && time.Now().Before(e.expiry) {
+			s.allFilesMu.Unlock()
+			return e, nil
+		}
+		s.allFilesMu.Unlock()
+		files, total, qerr := s.deps.DB.ListFiles(ctx, filter)
+		s.allFilesMu.Lock()
+		defer s.allFilesMu.Unlock()
+		if qerr != nil {
+			s.allFilesCache[key] = allFilesCacheEntry{expiry: time.Now().Add(500 * time.Millisecond)}
+			return allFilesCacheEntry{}, qerr
+		}
+		entry := allFilesCacheEntry{files: files, total: total, expiry: time.Now().Add(allFilesCacheTTL)}
+		s.allFilesCache[key] = entry
+		return entry, nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	e := v.(allFilesCacheEntry)
+	return e.files, e.total, nil
 }
 
 type idsRequest struct {
