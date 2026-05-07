@@ -149,6 +149,7 @@ type allFilesCacheEntry struct {
 	files  []db.File
 	total  int64
 	expiry time.Time
+	err    error
 }
 
 // cfgMutex returns the RWMutex used to serialise config reads/writes.

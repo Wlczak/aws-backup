@@ -183,7 +183,7 @@ func (s *Server) cachedAllFiles(ctx context.Context, filter db.FilesFilter) ([]d
 	s.allFilesMu.Lock()
 	if e, ok := s.allFilesCache[key]; ok && now.Before(e.expiry) {
 		s.allFilesMu.Unlock()
-		return e.files, e.total, nil
+		return e.files, e.total, e.err
 	}
 	s.allFilesMu.Unlock()
 
@@ -198,8 +198,12 @@ func (s *Server) cachedAllFiles(ctx context.Context, filter db.FilesFilter) ([]d
 		s.allFilesMu.Lock()
 		defer s.allFilesMu.Unlock()
 		if qerr != nil {
-			s.allFilesCache[key] = allFilesCacheEntry{expiry: time.Now().Add(500 * time.Millisecond)}
-			return allFilesCacheEntry{}, qerr
+			// Cache the error itself for a short backoff window so a
+			// degraded DB isn't replayed per poll, but cache-hit callers
+			// keep seeing the failure instead of an empty 200. (#271)
+			entry := allFilesCacheEntry{expiry: time.Now().Add(500 * time.Millisecond), err: qerr}
+			s.allFilesCache[key] = entry
+			return entry, qerr
 		}
 		entry := allFilesCacheEntry{files: files, total: total, expiry: time.Now().Add(allFilesCacheTTL)}
 		s.allFilesCache[key] = entry
@@ -209,7 +213,7 @@ func (s *Server) cachedAllFiles(ctx context.Context, filter db.FilesFilter) ([]d
 		return nil, 0, err
 	}
 	e := v.(allFilesCacheEntry)
-	return e.files, e.total, nil
+	return e.files, e.total, e.err
 }
 
 type idsRequest struct {
