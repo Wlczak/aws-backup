@@ -23,6 +23,7 @@ When fixing a GitHub issue:
 - Tests for any concurrency-touching change run `go test -race`
 - Don't create planning, decision, or analysis docs unless asked; the `docs/` directory plus `docs-guide.md` is the single doc of record
 - Keep the index in sync with the bucket: never purge `missing` rows on source-side absence alone (`CLAUDE.md`)
+- After finishing a task that produces a working-tree change, commit it and `git push` to `origin/main` in the same turn — don't leave dirty state for the user to clean up. Skip only if the user has said the change is exploratory / not to commit, or if the build/tests are failing (in which case fix or revert first)
 
 ## Updating these instructions
 
