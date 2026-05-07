@@ -273,6 +273,7 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(securityHeaders)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(originGuard)
@@ -323,6 +324,29 @@ func (s *Server) Router() http.Handler {
 	}
 
 	return r
+}
+
+// securityHeaders sets defensive HTTP headers on every response so a
+// hostile page can't frame the SPA, MIME-sniff responses, or leak the
+// referrer origin. CSP is a simple self+inline policy that fits the
+// embedded Svelte build; tighten if the SPA stops needing inline. (#272)
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"frame-ancestors 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // originGuard rejects requests whose Origin header is set and does not
