@@ -397,8 +397,18 @@ export function subscribeEvents(
     handler(ev);
   };
   if (onStatus) {
-    es.addEventListener('open', () => onStatus('open'));
-    es.addEventListener('error', () => onStatus('error'));
+    // EventSource fires 'error' on every reconnect attempt while the
+    // connection is down (every ~3s). Debounce to transitions only so
+    // consumers like a "live updates disconnected" banner don't flicker.
+    // (#261)
+    let lastStatus: 'open' | 'error' | undefined;
+    const emit = (s: 'open' | 'error') => {
+      if (s === lastStatus) return;
+      lastStatus = s;
+      onStatus(s);
+    };
+    es.addEventListener('open', () => emit('open'));
+    es.addEventListener('error', () => emit('error'));
   }
   return { close: () => es.close() };
 }
