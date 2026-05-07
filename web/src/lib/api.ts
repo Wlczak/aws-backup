@@ -349,6 +349,15 @@ export function subscribeEvents(
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
+  // Fallback for default-typed (`event: message`) frames: forward them so
+  // new server event types aren't silently dropped while the typed list
+  // catches up. In dev, surface them so missing entries are easy to spot. (#201)
+  es.onmessage = (ev) => {
+    if ((import.meta as any).env?.DEV) {
+      console.warn('[subscribeEvents] untyped SSE message — add to types list:', ev.data);
+    }
+    handler(ev);
+  };
   if (onStatus) {
     es.addEventListener('open', () => onStatus('open'));
     es.addEventListener('error', () => onStatus('error'));
