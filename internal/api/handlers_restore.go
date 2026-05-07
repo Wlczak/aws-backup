@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
-	"github.com/Wlczak/aws-backup/internal/pathutil"
 	"github.com/Wlczak/aws-backup/internal/restore/inventory"
 	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 )
@@ -55,66 +53,35 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 
 	// "/" (or "") is a special sentinel meaning "all files".
 	allFiles := false
+	pathsForFilter := make([]string, 0, len(req.Paths))
+	seen := make(map[string]struct{}, len(req.Paths))
 	for _, p := range req.Paths {
 		if p == "/" || p == "" {
 			allFiles = true
-			break
+			continue
 		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		pathsForFilter = append(pathsForFilter, p)
 	}
 
-	want := make(map[string]struct{}, len(req.Paths))
-	for _, p := range req.Paths {
-		want[p] = struct{}{}
+	count, bytes, matched, err := s.deps.DB.RestoreEstimateStats(r.Context(), pathsForFilter, allFiles)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 
-	var (
-		count   int64
-		bytes   int64
-		unknown []string
-	)
-
-	// List files in pages; match by path prefix (so a "photos" entry
-	// catches "photos/*").
-	const pageSize = 1000
-	matched := map[string]bool{}
-	for p := 1; ; p++ {
-		rows, _, err := s.deps.DB.ListFiles(r.Context(), db.FilesFilter{Page: p, Limit: pageSize})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if len(rows) == 0 {
-			break
-		}
-		for _, f := range rows {
-			// Only files actually in S3 are restorable. pending/failed/missing
-			// rows aren't backed up yet (or any more), so counting them inflates
-			// the dollar estimate. Mirrors the skip in engine.RestoreToDir.
-			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
-				continue
-			}
-			if allFiles {
-				count++
-				bytes += f.Size
-			} else {
-				for wantPath := range want {
-					if pathutil.HasPrefixPath(f.Path, wantPath) {
-						count++
-						bytes += f.Size
-						matched[wantPath] = true
-						break
-					}
-				}
-			}
-		}
-		if len(rows) < pageSize {
-			break
-		}
-	}
+	var unknown []string
 	if !allFiles {
-		for wantPath := range want {
-			if !matched[wantPath] {
-				unknown = append(unknown, wantPath)
+		matchedSet := make(map[string]struct{}, len(matched))
+		for _, p := range matched {
+			matchedSet[p] = struct{}{}
+		}
+		for _, p := range pathsForFilter {
+			if _, ok := matchedSet[p]; !ok {
+				unknown = append(unknown, p)
 			}
 		}
 	}

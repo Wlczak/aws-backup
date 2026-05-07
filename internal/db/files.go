@@ -955,6 +955,68 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	return result.RowsAffected, result.Error
 }
 
+// RestoreEstimateStats aggregates file_count + total_bytes for a
+// restore-cost estimate in one SQL query instead of paging the whole
+// index into Go and matching prefixes per row. The previous handler
+// scanned every file row + ran AfterFind on every restore_expires_at
+// just to tally a count and a sum, which made a "select all" estimate
+// take many seconds on large indexes. (#estimate-batch)
+//
+// `paths` are matched component-wise: a path equals the request OR
+// starts with it followed by a separator (so "foo" matches "foo" and
+// "foo/bar" but not "foobar"). Forward slash is the canonical
+// separator the rest of the system stores.
+//
+// Pass allFiles=true to skip the path filter entirely (the "/" or ""
+// sentinel from the API). Returns count, total bytes, and the subset
+// of `paths` that actually matched at least one row (the rest are the
+// caller's "unknown_paths").
+func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles bool) (int64, int64, []string, error) {
+	statuses := []string{StatusUploaded, StatusZipped}
+
+	q := db.g.WithContext(ctx).Model(&File{}).Where("status IN ?", statuses)
+	if !allFiles && len(paths) > 0 {
+		var conds []string
+		var args []any
+		for _, p := range paths {
+			conds = append(conds, "path = ? OR path LIKE ? ESCAPE '\\'")
+			args = append(args, p, likeEscape.Replace(p)+"/%")
+		}
+		q = q.Where("("+strings.Join(conds, ") OR (")+")", args...)
+	}
+
+	var row struct {
+		Count int64
+		Bytes int64
+	}
+	if err := q.Select("COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes").
+		Scan(&row).Error; err != nil {
+		return 0, 0, nil, err
+	}
+
+	if allFiles || len(paths) == 0 {
+		return row.Count, row.Bytes, nil, nil
+	}
+
+	// Per-path EXISTS check so the caller can flag unmatched paths.
+	// Each query uses the unique path index for the equality probe and
+	// a range scan for the LIKE — both sub-ms in practice.
+	matched := make([]string, 0, len(paths))
+	for _, p := range paths {
+		var probe []int64
+		if err := db.g.WithContext(ctx).Model(&File{}).
+			Where("status IN ? AND (path = ? OR path LIKE ? ESCAPE '\\')",
+				statuses, p, likeEscape.Replace(p)+"/%").
+			Select("id").Limit(1).Pluck("id", &probe).Error; err != nil {
+			return 0, 0, nil, err
+		}
+		if len(probe) > 0 {
+			matched = append(matched, p)
+		}
+	}
+	return row.Count, row.Bytes, matched, nil
+}
+
 // MarkRestoreInProgressMany is the bulk variant of MarkRestoreInProgress.
 // Runs one UPDATE per chunk of s3_keys so a "restore folder" click that
 // covers thousands of rows doesn't serialise into a thousand SQLite
