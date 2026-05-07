@@ -252,6 +252,10 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 						"changed": p.Changed,
 					},
 				})
+				// Mirror the running count to the run row so a poller that
+				// missed an SSE frame (or reconnected mid-scan) still sees
+				// accurate files_scanned via /api/status.
+				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, 0, 0)
 			},
 		)
 		if err != nil {

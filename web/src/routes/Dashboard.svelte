@@ -122,6 +122,13 @@
     try {
       status = await api.status();
       stats = await api.fileStats();
+      // Seed scanSeen from the run row so a missed scan_progress SSE
+      // frame (or a reconnect mid-run) doesn't strand the counter at
+      // 0. The engine writes files_scanned on every scan flush so this
+      // tracks within ~3 s of the live count. We only bump scanSeen
+      // upward — the SSE path may have a fresher value already.
+      const live = status?.current?.files_scanned ?? 0;
+      if (live > scanSeen) scanSeen = live;
     } catch (e) {
       toast.error(String(e));
     }
@@ -133,9 +140,11 @@
       const d = data as any;
       const payload = d?.data ?? {};
       if (type === 'scan_start') {
-        // Reset counters and flip the indicator on so a fresh scan
-        // doesn't carry counters from a prior run. (#)
-        scanSeen = 0;
+        // Flip the indicator on. Don't reset scanSeen here — run_start
+        // already reset it for a fresh run (live: undefined → 0; replay:
+        // seeded from files_scanned), and resetting here just flashes
+        // 0 even when the SSE event arrived microseconds after a
+        // refresh() that already populated it from the run row.
         scanNew = 0;
         scanChanged = 0;
         scanActive = true;
