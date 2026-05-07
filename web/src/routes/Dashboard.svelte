@@ -42,6 +42,11 @@
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
 
+  // Cap retained terminal (done/failed) items so a 50k-file run doesn't
+  // keep every row in $state for the tab lifetime — itemList re-sorts the
+  // whole map on every event. Active items are never evicted. (#200)
+  const TERMINAL_ITEM_CAP = 200;
+
   function upsertItem(key: string, patch: Partial<ItemProgress>) {
     const prev = itemProgress[key];
     itemProgress[key] = {
@@ -55,6 +60,18 @@
       updatedAt: Date.now(),
       ...patch,
     };
+    const next = itemProgress[key];
+    if (next.status === 'done' || next.status === 'failed') {
+      const terminal: ItemProgress[] = [];
+      for (const it of Object.values(itemProgress)) {
+        if (it.status === 'done' || it.status === 'failed') terminal.push(it);
+      }
+      if (terminal.length > TERMINAL_ITEM_CAP) {
+        terminal.sort((a, b) => a.updatedAt - b.updatedAt);
+        const drop = terminal.length - TERMINAL_ITEM_CAP;
+        for (let i = 0; i < drop; i++) delete itemProgress[terminal[i].key];
+      }
+    }
   }
 
   // Derive counters from `itemProgress` so they're idempotent under SSE
