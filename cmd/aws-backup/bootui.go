@@ -212,7 +212,12 @@ func runBootDownload(ctx context.Context, listener net.Listener, store storage.S
 	// Give the page one polling interval (~250ms) plus a small margin to
 	// fetch the final state before tearing the server down. Without this
 	// the user sees an indeterminate "loading" forever instead of "done".
-	time.Sleep(750 * time.Millisecond)
+	// Bail early on ctx cancel (e.g. SIGINT) so a Ctrl-C during boot
+	// doesn't add 750 ms of dead wait. (#269)
+	select {
+	case <-time.After(750 * time.Millisecond):
+	case <-ctx.Done():
+	}
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutCancel()
