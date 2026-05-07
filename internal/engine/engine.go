@@ -234,6 +234,13 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 
 	// Phase 1: scan (skipped for upload-only runs).
 	if mode == RunModeFull || mode == RunModeScan {
+		// Emit scan_start so a UI that reconnects mid-run can drive its
+		// "scanning" indicator off scan_start / scan_complete instead of
+		// the replayed run_start, which fires regardless of phase and
+		// otherwise leaves the indicator stuck on after scan finishes.
+		e.emit(Event{
+			Type: EventScanStart, RunID: runID, At: e.opts.Now(),
+		})
 		scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths,
 			func(msg string) { e.log(ctx, runID, db.LogInfo, msg) },
 			func(p source.ScanProgress) {

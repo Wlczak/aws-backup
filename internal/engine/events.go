@@ -14,6 +14,7 @@ type Event struct {
 
 // Event type constants — keep in sync with plan.md and the SSE layer.
 const (
+	EventScanStart       = "scan_start"
 	EventScanProgress    = "scan_progress"
 	EventScanComplete    = "scan_complete"
 	EventUploadPlan      = "upload_plan"

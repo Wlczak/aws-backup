@@ -132,6 +132,14 @@
     es = subscribeEvents((type, data) => {
       const d = data as any;
       const payload = d?.data ?? {};
+      if (type === 'scan_start') {
+        // Reset counters and flip the indicator on so a fresh scan
+        // doesn't carry counters from a prior run. (#)
+        scanSeen = 0;
+        scanNew = 0;
+        scanChanged = 0;
+        scanActive = true;
+      }
       if (type === 'scan_progress') {
         scanSeen = payload.seen ?? scanSeen;
         scanNew = payload.new ?? scanNew;
@@ -195,10 +203,17 @@
       if (type === 'run_start') {
         itemProgress = {};
         uploadsTotal = 0;
-        scanSeen = 0;
+        // Don't toggle scanActive here — run_start fires both for live
+        // run starts AND on every SSE reconnect (replay), and a
+        // post-scan reconnect would otherwise stick the "Scanning…"
+        // indicator on with no follow-up scan_complete to clear it.
+        // The dedicated scan_start event drives that toggle now.
+        // Seed scanSeen from the run row (replayed run_start carries
+        // files_scanned from the DB so a mid-run reconnect doesn't show
+        // 0 until the next scan_progress tick).
+        scanSeen = payload.files_scanned ?? 0;
         scanNew = 0;
         scanChanged = 0;
-        scanActive = true;
         logLines = [];
         // Clear any leftover DB-sync card from the previous run so it
         // doesn't linger across a new triggerRun.

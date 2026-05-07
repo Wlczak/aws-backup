@@ -390,7 +390,7 @@ export function subscribeEvents(
     }
   };
   const types = [
-    'scan_progress', 'scan_complete',
+    'scan_start', 'scan_progress', 'scan_complete',
     'upload_plan',
     'copy_progress',
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
