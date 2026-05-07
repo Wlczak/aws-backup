@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/pathutil"
@@ -74,7 +75,18 @@ type RestoreRequestOptions struct {
 	// accepts 1..N where N depends on the retrieval tier. Validated by
 	// the caller (the API handler clamps to [1, 30]).
 	Days int
+	// Emit is an optional progress sink. When set, RequestRestore publishes
+	// restore_request_start / _progress / _complete / _failed events so the
+	// UI can render a live progress bar — issuing one s3:RestoreObject per
+	// archive key takes wall-clock seconds at scale, and without progress
+	// the operator has no way to tell if anything is happening.
+	Emit EventEmitter
 }
+
+// restoreRequestEmitEvery throttles the cadence of restore_request_progress
+// events. We still emit on the first key and the last key regardless, so a
+// small restore (≤ progressEvery keys) still gets a visible signal.
+const restoreRequestEmitEvery = 10
 
 // RestoreRequestStats summarizes the outcome of RequestRestore.
 type RestoreRequestStats struct {
@@ -209,8 +221,24 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 	}
 	sort.Strings(keys)
 
-	for _, key := range keys {
+	emit := opts.Emit
+	if emit == nil {
+		emit = DiscardEvents
+	}
+	total := len(keys)
+	emit(Event{
+		Type: EventRestoreRequestStart,
+		At:   time.Now(),
+		Data: map[string]any{"total": total},
+	})
+
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
+			emit(Event{
+				Type: EventRestoreRequestFailed,
+				At:   time.Now(),
+				Data: map[string]any{"error": err.Error(), "processed": i, "total": total},
+			})
 			return stats, err
 		}
 		g := byKey[key]
@@ -236,7 +264,36 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 		default:
 			stats.Errors = append(stats.Errors, key+": "+err.Error())
 		}
+
+		processed := i + 1
+		if processed == total || processed%restoreRequestEmitEvery == 0 {
+			emit(Event{
+				Type: EventRestoreRequestProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"processed":           processed,
+					"total":               total,
+					"keys_requested":      stats.KeysRequested,
+					"keys_already_thawed": stats.KeysAlreadyInProgress + stats.KeysAlreadyAvailable,
+					"errors":              len(stats.Errors),
+				},
+			})
+		}
 	}
+
+	emit(Event{
+		Type: EventRestoreRequestComplete,
+		At:   time.Now(),
+		Data: map[string]any{
+			"total":                    total,
+			"keys_requested":           stats.KeysRequested,
+			"keys_already_in_progress": stats.KeysAlreadyInProgress,
+			"keys_already_available":   stats.KeysAlreadyAvailable,
+			"files_affected":           stats.FilesAffected,
+			"bytes_affected":           stats.BytesAffected,
+			"errors":                   len(stats.Errors),
+		},
+	})
 	return stats, nil
 }
 

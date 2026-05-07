@@ -435,6 +435,7 @@ export function subscribeEvents(
     'run_start', 'run_log', 'run_complete',
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
+    'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so

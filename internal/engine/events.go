@@ -46,6 +46,14 @@ const (
 	EventRestoreScanProgress = "restore_scan_progress"
 	EventRestoreScanComplete = "restore_scan_complete"
 	EventRestoreScanFailed   = "restore_scan_failed"
+	// Restore-request events accompany RequestRestore — one s3:RestoreObject
+	// call per archive key, batched across many files. A 5000-file restore
+	// can issue hundreds of API calls so the UI shows a progress bar
+	// driven off these events.
+	EventRestoreRequestStart    = "restore_request_start"
+	EventRestoreRequestProgress = "restore_request_progress"
+	EventRestoreRequestComplete = "restore_request_complete"
+	EventRestoreRequestFailed   = "restore_request_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

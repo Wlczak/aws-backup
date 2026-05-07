@@ -41,6 +41,12 @@
   let scanResult = $state<RestoreScanResult | null>(null);
   let scanProgress = $state<{ scanned: number; total: number; mode: string } | null>(null);
 
+  // Live progress while a "Request retrieval" is in flight — driven by
+  // restore_request_* SSE events from RequestRestore. A 5000-file restore
+  // issues hundreds of S3 RestoreObject calls, so without this the button
+  // just sat in "Requesting…" with no signal anything was happening.
+  let triggerProgress = $state<{ processed: number; total: number } | null>(null);
+
   // Inventory state.
   let inventory = $state<InventoryStatus | null>(null);
   let inventoryFreq = $state<'daily' | 'weekly'>('daily');
@@ -68,6 +74,14 @@
         scanProgress = null;
       } else if (type === 'restore_scan_failed') {
         scanProgress = null;
+      } else if (type === 'restore_request_start') {
+        const d = data as { total: number };
+        triggerProgress = { processed: 0, total: d.total };
+      } else if (type === 'restore_request_progress') {
+        const d = data as { processed: number; total: number };
+        triggerProgress = { processed: d.processed, total: d.total };
+      } else if (type === 'restore_request_complete' || type === 'restore_request_failed') {
+        triggerProgress = null;
       }
     });
     return () => sub.close();
@@ -322,12 +336,31 @@
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
     <button onclick={doTrigger} disabled={loading || !estimate} type="button">
-      {confirmTrigger ? 'Click again to confirm' : 'Request retrieval'}
+      {#if loading && triggerProgress}
+        Requesting… {triggerProgress.processed.toLocaleString()} / {triggerProgress.total.toLocaleString()}
+      {:else if loading}
+        Requesting…
+      {:else if confirmTrigger}
+        Click again to confirm
+      {:else}
+        Request retrieval
+      {/if}
     </button>
     <button type="button" onclick={() => { raw = '/'; estimate = null; }} title="Select all files">
       Select all
     </button>
   </div>
+  {#if triggerProgress}
+    {@const pct = triggerProgress.total > 0
+      ? Math.min(100, Math.round((triggerProgress.processed / triggerProgress.total) * 100))
+      : 0}
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct} style="margin-top: 0.75rem">
+      <div class="fill" style="width: {pct}%"></div>
+    </div>
+    <p class="muted small" style="margin-top: 0.25rem">
+      Issuing S3 RestoreObject calls — {pct}% of {triggerProgress.total.toLocaleString()} key(s).
+    </p>
+  {/if}
 </div>
 
 {#if triggerResult}
@@ -432,4 +465,6 @@
     gap: 1rem;
   }
   .big { font-size: 1.3rem; font-weight: 500; }
+  .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
 </style>

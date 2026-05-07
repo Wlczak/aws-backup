@@ -167,12 +167,17 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var emit engine.EventEmitter
+	if s.deps.Bus != nil {
+		emit = s.deps.Bus.Publish
+	}
 	stats, err := engine.RequestRestore(r.Context(), engine.RestoreRequestOptions{
 		DB:        s.deps.DB,
 		Storage:   st,
 		KeyPrefix: s.storagePrefix(),
 		Paths:     req.Paths,
 		Days:      req.Days,
+		Emit:      emit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

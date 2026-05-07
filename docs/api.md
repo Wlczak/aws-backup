@@ -70,3 +70,11 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `db_sync_progress` | bytes_synced, total_bytes |
 | `db_sync_complete` | — |
 | `db_sync_failed` | error |
+| `restore_scan_start` | mode, total |
+| `restore_scan_progress` | mode, scanned, updated, errors, total |
+| `restore_scan_complete` | mode, scanned, updated, errors |
+| `restore_scan_failed` | mode, error |
+| `restore_request_start` | total |
+| `restore_request_progress` | processed, total, keys_requested, keys_already_thawed, errors |
+| `restore_request_complete` | total, keys_requested, keys_already_in_progress, keys_already_available, files_affected, bytes_affected, errors |
+| `restore_request_failed` | error, processed, total |
