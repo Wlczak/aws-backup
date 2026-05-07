@@ -974,28 +974,53 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles bool) (int64, int64, []string, error) {
 	statuses := []string{StatusUploaded, StatusZipped}
 
-	q := db.g.WithContext(ctx).Model(&File{}).Where("status IN ?", statuses)
-	if !allFiles && len(paths) > 0 {
-		var conds []string
-		var args []any
-		for _, p := range paths {
+	var totalCount, totalBytes int64
+	if allFiles || len(paths) == 0 {
+		var row struct {
+			Count int64
+			Bytes int64
+		}
+		if err := db.g.WithContext(ctx).Model(&File{}).
+			Where("status IN ?", statuses).
+			Select("COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes").
+			Scan(&row).Error; err != nil {
+			return 0, 0, nil, err
+		}
+		return row.Count, row.Bytes, nil, nil
+	}
+
+	// Chunk the path filter so the OR-chain stays under SQLite's
+	// SQLITE_MAX_EXPR_DEPTH (default 1000). Each path contributes one
+	// OR'd subexpression; with thousands of paths a single query blows
+	// the limit. (#estimate-depth)
+	for s := 0; s < len(paths); s += sqlChunkSize {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, nil, err
+		}
+		end := s + sqlChunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[s:end]
+		conds := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, p := range chunk {
 			conds = append(conds, "path = ? OR path LIKE ? ESCAPE '\\'")
 			args = append(args, p, likeEscape.Replace(p)+"/%")
 		}
-		q = q.Where("("+strings.Join(conds, ") OR (")+")", args...)
-	}
-
-	var row struct {
-		Count int64
-		Bytes int64
-	}
-	if err := q.Select("COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes").
-		Scan(&row).Error; err != nil {
-		return 0, 0, nil, err
-	}
-
-	if allFiles || len(paths) == 0 {
-		return row.Count, row.Bytes, nil, nil
+		var row struct {
+			Count int64
+			Bytes int64
+		}
+		if err := db.g.WithContext(ctx).Model(&File{}).
+			Where("status IN ?", statuses).
+			Where("("+strings.Join(conds, ") OR (")+")", args...).
+			Select("COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes").
+			Scan(&row).Error; err != nil {
+			return 0, 0, nil, err
+		}
+		totalCount += row.Count
+		totalBytes += row.Bytes
 	}
 
 	// Per-path EXISTS check so the caller can flag unmatched paths.
@@ -1014,7 +1039,7 @@ func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles
 			matched = append(matched, p)
 		}
 	}
-	return row.Count, row.Bytes, matched, nil
+	return totalCount, totalBytes, matched, nil
 }
 
 // MarkRestoreInProgressMany is the bulk variant of MarkRestoreInProgress.
