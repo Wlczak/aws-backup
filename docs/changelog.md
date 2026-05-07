@@ -116,6 +116,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #263 | 81bb494 | Dashboard log only ingests run_log + run lifecycle events (skips per-thread copy/upload progress) |
 | #261 | 0b5d884 | `subscribeEvents` debounces onStatus to open↔error transitions only |
 | #262 | d804bdd | Logs `<tr>` and Files path `<td>` get role=button + tabindex + Enter/Space activation |
+| dashboard-replay | — | persist `files_planned`/`bytes_planned` on `runs`; `sseReplay` synthesises `upload_plan` so a mid-run page reload sees the progress denominator |
 | #259 / #257 / #252 / #249 | 8f2c7a7 | defer-Close staged file via closure on Put; `uploadProgressCtx` final emit must-emit-once via dedicated atomic; resume verify checks ctx; SQS S3 event key uses PathUnescape |
 | #258 | 403898a | `runServe` waits on the SQS consumer goroutine via a done channel before `app.close()` runs |
 | #255 / #233 | 8768f89 / d6bfae2 | `applyMu` serialises post-run `applyPendingSettings`, PUT /api/settings, and `handleTriggerRun` so neither a fresh PUT nor a fresh BuildEngine can race the swap |

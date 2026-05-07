@@ -358,6 +358,12 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			"total_bytes":  totalBytes,
 		},
 	})
+	// Persist the planned totals so a mid-run page reload can rebuild
+	// the progress denominator via sseReplay — upload_plan only fires
+	// once at plan time and is otherwise unreplayable.
+	if err := e.opts.DB.SetRunPlan(ctx, runID, int64(len(pending)), totalBytes); err != nil {
+		e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+	}
 
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
 		return classify("mkdir tmp", err)

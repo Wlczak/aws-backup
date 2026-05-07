@@ -439,6 +439,20 @@ func (s *Server) sseReplay(ctx context.Context) ([]engine.Event, time.Time) {
 			},
 		},
 	}
+	// Replay the upload_plan totals once we've moved past the planning
+	// phase. Without this, a page reload mid-upload shows "n / 0" in
+	// the progress bar because upload_plan is a one-shot SSE event.
+	if run.FilesPlanned > 0 {
+		evts = append(evts, engine.Event{
+			Type:  engine.EventUploadPlan,
+			RunID: run.ID,
+			At:    run.StartedAt,
+			Data: map[string]any{
+				"total_files": run.FilesPlanned,
+				"total_bytes": run.BytesPlanned,
+			},
+		})
+	}
 
 	// Capture the cutoff *before* ListLogs so anything written to the DB
 	// after this point is "newer than the replay" — those rows arrive

@@ -34,6 +34,8 @@ type Run struct {
 	FilesScanned  int64     `gorm:"column:files_scanned;not null;default:0"`
 	FilesUploaded int64     `gorm:"column:files_uploaded;not null;default:0"`
 	BytesUploaded int64     `gorm:"column:bytes_uploaded;not null;default:0"`
+	FilesPlanned  int64     `gorm:"column:files_planned;not null;default:0"`
+	BytesPlanned  int64     `gorm:"column:bytes_planned;not null;default:0"`
 	ErrorMessage  string    `gorm:"column:error_message"`
 }
 
@@ -70,6 +72,16 @@ func (db *DB) UpdateUploadStats(ctx context.Context, runID, uploaded, bytes int6
 	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
 		"files_uploaded": uploaded,
 		"bytes_uploaded": bytes,
+	}).Error
+}
+
+// SetRunPlan records the planned upload total (file count and byte
+// total) for a run. Written once at upload-plan time so a mid-run
+// reload can recover the progress denominator. (#dashboard-replay)
+func (db *DB) SetRunPlan(ctx context.Context, runID, files, bytes int64) error {
+	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
+		"files_planned": files,
+		"bytes_planned": bytes,
 	}).Error
 }
 

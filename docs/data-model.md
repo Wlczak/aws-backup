@@ -44,6 +44,8 @@ CREATE TABLE runs (
     files_scanned   INTEGER DEFAULT 0,
     files_uploaded  INTEGER DEFAULT 0,
     bytes_uploaded  INTEGER DEFAULT 0,
+    files_planned   INTEGER DEFAULT 0,         -- planned upload count, written once at upload_plan time
+    bytes_planned   INTEGER DEFAULT 0,         -- planned upload byte total, paired with files_planned
     error_message   TEXT
 );
 
