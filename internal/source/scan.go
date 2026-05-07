@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -35,7 +36,17 @@ type ScanProgress struct {
 // batch upsert. nil is fine.
 type ProgressFn func(ScanProgress)
 
-const flushInterval = 3 * time.Second
+const (
+	flushInterval = 3 * time.Second
+	// walkProgressInterval throttles scan_progress emissions driven by
+	// the walker so a fast Walk on a million-file tree doesn't fan
+	// out a million events to the SSE bus. The walker reports "files
+	// seen" — the user-facing intuition — independently of whether
+	// UpsertFileBatch has committed them yet, so the indicator
+	// updates within ~250 ms of every batch of ~500 walked entries.
+	walkProgressInterval = 250 * time.Millisecond
+	walkProgressEvery    = 500
+)
 
 // Scan walks src, accumulates discovered files in RAM, and flushes them to the
 // DB in batches every few seconds. This avoids hammering SQLite with one
@@ -52,6 +63,43 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 		mu  sync.Mutex
 		buf []db.BatchEntry
 	)
+
+	// walkSeen / atomicNew / atomicChanged are written by walker and
+	// flusher concurrently and read by emitWalkProgress under no lock.
+	// stats (the function-return aggregate) is hydrated from these at
+	// return time. The user-facing "Scanning… X seen" indicator drives
+	// off walkSeen so a slow UpsertFileBatch can't strand the count at
+	// 0 for minutes during a multi-million-file scan; the flusher's
+	// new/changed counters update on a slower cadence and feed the
+	// secondary "X new · Y changed" sub-line.
+	var walkSeen, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
+	var (
+		lastEmitMu  sync.Mutex
+		lastEmitAt  time.Time
+		lastEmitVal int64
+	)
+	emitWalkProgress := func(force bool) {
+		if onProgress == nil {
+			return
+		}
+		seen := walkSeen.Load()
+		lastEmitMu.Lock()
+		now := time.Now()
+		if !force {
+			if seen-lastEmitVal < walkProgressEvery && now.Sub(lastEmitAt) < walkProgressInterval {
+				lastEmitMu.Unlock()
+				return
+			}
+		}
+		lastEmitAt = now
+		lastEmitVal = seen
+		lastEmitMu.Unlock()
+		onProgress(ScanProgress{
+			Seen:    seen,
+			New:     atomicNew.Load(),
+			Changed: atomicChanged.Load(),
+		})
+	}
 
 	// flush drains the buffer and upserts into DB. Called only from the
 	// flusher goroutine so stats are updated without a lock.
@@ -71,25 +119,24 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 			return err
 		}
 		for i, r := range results {
-			stats.Seen++
 			switch {
 			case r.Created:
-				stats.New++
+				atomicNew.Add(1)
 				if log != nil {
 					log("new: " + entries[i].Path)
 				}
 			case r.Changed:
-				stats.Changed++
+				atomicChanged.Add(1)
 				if log != nil {
 					log("changed: " + entries[i].Path)
 				}
 			default:
-				stats.Unchanged++
+				atomicUnchanged.Add(1)
 			}
 		}
-		if onProgress != nil {
-			onProgress(ScanProgress{Seen: stats.Seen, New: stats.New, Changed: stats.Changed})
-		}
+		// Force an emit after the flush so new/changed counts catch up
+		// even when the walker-side throttle would otherwise gate it.
+		emitWalkProgress(true)
 		return nil
 	}
 
@@ -137,11 +184,21 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 		mu.Lock()
 		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
 		mu.Unlock()
+		walkSeen.Add(1)
+		// Throttled emit so a fast walker over a million-file tree
+		// doesn't fan out a million events to the SSE bus.
+		emitWalkProgress(false)
 		return nil
 	})
 
 	close(done)
 	flushErr := <-flushErrCh
+	// Hydrate the return aggregate from the atomic counters now that
+	// both walker and flusher are done writing them.
+	stats.New = atomicNew.Load()
+	stats.Changed = atomicChanged.Load()
+	stats.Unchanged = atomicUnchanged.Load()
+	stats.Seen = stats.New + stats.Changed + stats.Unchanged
 	// Prefer flushErr over walkErr: when the flusher cancels the walker,
 	// the walker returns scanCtx.Err() (context.Canceled) which masks the
 	// real cause (disk full, busy DB, schema mismatch, …). Surfacing the
