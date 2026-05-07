@@ -4,6 +4,7 @@
     api,
     subscribeEvents,
     type RestoreEstimate,
+    type RestoreTier,
     type RestoreScanResult,
     type InventoryStatus,
   } from '../lib/api';
@@ -12,6 +13,7 @@
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
+  let tier = $state<RestoreTier>('bulk');
   let days = $state(7);
   let estimate = $state<RestoreEstimate | null>(null);
   let triggerResult = $state<{
@@ -38,6 +40,13 @@
     void raw;
     void days;
     confirmTrigger = false;
+  });
+
+  $effect(() => {
+    void tier;
+    confirmTrigger = false;
+    estimate = null;
+    triggerResult = null;
   });
 
   // Restore-status sync state.
@@ -188,7 +197,7 @@
     loading = true;
     estimate = null;
     try {
-      estimate = await api.restoreEstimate(p);
+      estimate = await api.restoreEstimate(p, tier);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -226,7 +235,7 @@
     loading = true;
     triggerResult = null;
     try {
-      triggerResult = await api.restoreTrigger(p, days);
+      triggerResult = await api.restoreTrigger(p, days, tier);
       const r = triggerResult;
       const parts: string[] = [];
       if (r.keys_requested > 0) parts.push(`${r.keys_requested} requested`);
@@ -335,7 +344,13 @@
     <code class="mono">restored</code> — track via "Drain SQS now" or
     "Scan pending only" above.
   </p>
-  <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
+  <div class="restore-controls">
+    <select bind:value={tier} class="mono" aria-label="Restore tier">
+      <option value="bulk">Bulk - lowest cost, up to 48h</option>
+      <option value="standard">Standard - faster, up to 12h</option>
+    </select>
+    <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
+  </div>
 
   <div class="actions">
     <button class="primary" onclick={doEstimate} disabled={loading} type="button">
@@ -374,8 +389,8 @@
     <div class="label">Retrieval request result</div>
     <p class="muted">
       AWS has accepted the restore request. Glacier objects typically thaw
-      within 12–48 h (Standard tier). The matching files are now marked
-      <code class="mono">in_progress</code>; status flips to
+      within about {tier === 'bulk' ? '48 h' : '12 h'} for the selected tier.
+      The matching files are now marked <code class="mono">in_progress</code>; status flips to
       <code class="mono">restored</code> once SQS notifies us or a HEAD scan
       observes <code class="mono">x-amz-restore</code>.
     </p>
@@ -417,7 +432,7 @@
     <div class="label">Estimate</div>
     <div class="stats">
       <div>
-        <div class="muted">Files</div>
+        <div class="muted">S3 objects</div>
         <div class="big">{estimate.file_count.toLocaleString()}</div>
       </div>
       <div>
@@ -426,7 +441,13 @@
       </div>
       <div>
         <div class="muted">Wait</div>
-        <div class="big">{estimate.wait_hours_min}–{estimate.wait_hours_max}h</div>
+        <div class="big">
+          {#if estimate.wait_hours_min === estimate.wait_hours_max}
+            {estimate.wait_hours_min}h
+          {:else}
+            {estimate.wait_hours_min}–{estimate.wait_hours_max}h
+          {/if}
+        </div>
       </div>
       <div>
         <div class="muted">Total (USD)</div>
@@ -439,8 +460,14 @@
         <tr><th>Fee</th><th>USD</th></tr>
       </thead>
       <tbody>
-        <tr><td>Request fees ({estimate.file_count.toLocaleString()} files × $0.10 / 1000)</td><td class="mono">${estimate.request_fee_usd.toFixed(2)}</td></tr>
-        <tr><td>Retrieval ({bytes(estimate.total_bytes)} × $0.02 / GB)</td><td class="mono">${estimate.retrieval_fee_usd.toFixed(2)}</td></tr>
+        <tr>
+          <td>Request fees ({estimate.file_count.toLocaleString()} object(s) × {tier === 'bulk' ? '$0.025 / 1000' : '$0.11 / 1000'})</td>
+          <td class="mono">${estimate.request_fee_usd.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td>Retrieval ({bytes(estimate.total_bytes)} × {tier === 'bulk' ? '$0.003 / GB' : '$0.02 / GB'})</td>
+          <td class="mono">${estimate.retrieval_fee_usd.toFixed(2)}</td>
+        </tr>
         <tr><td>Egress (first 100 GB free, then $0.09 / GB)</td><td class="mono">${estimate.egress_fee_usd.toFixed(2)}</td></tr>
         <tr><td><strong>Total</strong></td><td class="mono"><strong>${estimate.total_fee_usd.toFixed(2)}</strong></td></tr>
       </tbody>
@@ -485,6 +512,17 @@
   }
   .daysinput {
     width: 6rem;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.9rem;
+  }
+  .restore-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .restore-controls select {
+    min-width: 16rem;
     padding: 0.4rem 0.5rem;
     font-size: 0.9rem;
   }

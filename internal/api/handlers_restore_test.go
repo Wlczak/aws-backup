@@ -6,11 +6,12 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,7 +27,22 @@ func md5hex(s string) string {
 }
 
 func TestRestoreTriggerValidatesRequest(t *testing.T) {
-	ts, _, _ := newSyncTestServer(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	cfg := config.Default()
+	srv := &Server{deps: Deps{
+		DB:     d,
+		Bus:    events.NewBus(16),
+		Config: &cfg,
+		Storage: func() storage.Storage {
+			return storage.NewMemStorage()
+		},
+	}}
 
 	cases := []struct {
 		name   string
@@ -34,6 +50,8 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 		status int
 	}{
 		{name: "missing paths", body: `{"paths":[],"days":7}`, status: http.StatusBadRequest},
+		{name: "missing tier", body: `{"paths":["a"],"days":7}`, status: http.StatusBadRequest},
+		{name: "invalid tier", body: `{"paths":["a"],"days":7,"tier":"fast"}`, status: http.StatusBadRequest},
 		{name: "missing days", body: `{"paths":["a"]}`, status: http.StatusBadRequest},
 		{name: "days zero", body: `{"paths":["a"],"days":0}`, status: http.StatusBadRequest},
 		{name: "days too high", body: `{"paths":["a"],"days":31}`, status: http.StatusBadRequest},
@@ -41,14 +59,12 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger",
-				"application/json", bytes.NewReader([]byte(tc.body)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != tc.status {
-				t.Errorf("status: got %d want %d", resp.StatusCode, tc.status)
+			req := httptest.NewRequest(http.MethodPost, "/api/restore/trigger", bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.handleRestoreTrigger(rr, req)
+			if rr.Code != tc.status {
+				t.Errorf("status: got %d want %d", rr.Code, tc.status)
 			}
 		})
 	}
@@ -59,8 +75,22 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 // flips matching DB rows to restore_status='in_progress'. It does NOT
 // download anything.
 func TestRestoreTriggerRequestsRestore(t *testing.T) {
-	ts, d, store := newSyncTestServer(t)
 	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	store := storage.NewMemStorage()
+	cfg := config.Default()
+	srv := &Server{deps: Deps{
+		DB:            d,
+		Bus:           events.NewBus(16),
+		Config:        &cfg,
+		Storage:       func() storage.Storage { return store },
+		StoragePrefix: "backups/",
+	}}
 	now := time.Now()
 
 	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
@@ -78,19 +108,18 @@ func TestRestoreTriggerRequestsRestore(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"paths": []string{"/"},
 		"days":  7,
+		"tier":  "standard",
 	})
-	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger",
-		"application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/trigger", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreTrigger(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: %d", rr.Code)
 	}
 
 	var out restoreTriggerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	// MemStorage's Restore returns ErrUnsupported for non-archive
@@ -99,8 +128,279 @@ func TestRestoreTriggerRequestsRestore(t *testing.T) {
 	if out.FilesAffected != 1 {
 		t.Errorf("FilesAffected: got %d (%+v)", out.FilesAffected, out)
 	}
-	_ = os.TempDir // keep os referenced for filepath usage above
-	_ = filepath.Separator
+}
+
+type tierSpyStorage struct {
+	*storage.MemStorage
+	mu    sync.Mutex
+	calls []storage.RestoreTier
+	keys  []string
+}
+
+func newTierSpyStorage() *tierSpyStorage {
+	return &tierSpyStorage{MemStorage: storage.NewMemStorage()}
+}
+
+func (s *tierSpyStorage) Restore(_ context.Context, key string, _ int, tier storage.RestoreTier) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, tier)
+	s.keys = append(s.keys, key)
+	return nil
+}
+
+func TestRestoreEstimateValidatesTier(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	cfg := config.Default()
+	srv := &Server{deps: Deps{DB: d, Bus: events.NewBus(16), Config: &cfg}}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "missing tier", body: `{"paths":["/"]}`},
+		{name: "invalid tier", body: `{"paths":["/"],"tier":"fast"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.handleRestoreEstimate(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400", rr.Code)
+			}
+		})
+	}
+}
+
+func TestRestoreEstimateTierChangesPreview(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	now := time.Now()
+
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 1024 * 1024 * 1024, ModTime: now}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(tier string) restoreEstimateResponse {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"paths": []string{"/"},
+			"tier":  tier,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv := &Server{deps: Deps{DB: d, Bus: events.NewBus(16), Config: &config.Config{}}}
+		srv.handleRestoreEstimate(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d", rr.Code)
+		}
+		var out restoreEstimateResponse
+		if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out
+	}
+
+	bulk := post("bulk")
+	std := post("standard")
+
+	if bulk.WaitHoursMin != 48 || bulk.WaitHoursMax != 48 {
+		t.Fatalf("bulk wait = %d-%d, want 48-48", bulk.WaitHoursMin, bulk.WaitHoursMax)
+	}
+	if std.WaitHoursMin != 12 || std.WaitHoursMax != 12 {
+		t.Fatalf("standard wait = %d-%d, want 12-12", std.WaitHoursMin, std.WaitHoursMax)
+	}
+	if bulk.TotalFeeUSD >= std.TotalFeeUSD {
+		t.Fatalf("bulk should cost less than standard: bulk=%v std=%v", bulk.TotalFeeUSD, std.TotalFeeUSD)
+	}
+}
+
+func TestRestoreEstimateCountsZipAsOneObject(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	now := time.Now()
+
+	seed := []db.BatchEntry{
+		{Path: "photos/a.jpg", Size: 3, ModTime: now},
+		{Path: "photos/b.jpg", Size: 4, ModTime: now},
+		{Path: "notes.txt", Size: 5, ModTime: now},
+	}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetZipName(ctx, []int64{res[0].ID, res[1].ID}, "photos/photos_1.zip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("aaa"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[1].ID}, md5hex("bbbb"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[2].ID}, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	srv := &Server{deps: Deps{DB: d, Bus: events.NewBus(16), Config: &cfg}}
+	body, _ := json.Marshal(map[string]any{
+		"paths": []string{"/"},
+		"tier":  "bulk",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreEstimate(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var out restoreEstimateResponse
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.FileCount != 2 {
+		t.Fatalf("file_count=%d want 2 (zip + standalone)", out.FileCount)
+	}
+}
+
+func TestRestoreEstimateUsesObjectCountForRequestFee(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	now := time.Now()
+
+	seed := make([]db.BatchEntry, 100)
+	for i := range seed {
+		seed[i] = db.BatchEntry{Path: fmt.Sprintf("photos/file-%03d.jpg", i), Size: 1, ModTime: now}
+	}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 0, len(res))
+	for _, r := range res {
+		ids = append(ids, r.ID)
+	}
+	if err := d.SetZipName(ctx, ids, "photos/photos_1.zip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, ids, md5hex("zip-bytes"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	srv := &Server{deps: Deps{DB: d, Bus: events.NewBus(16), Config: &cfg}}
+	body, _ := json.Marshal(map[string]any{
+		"paths": []string{"/"},
+		"tier":  "standard",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreEstimate(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var out restoreEstimateResponse
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.FileCount != 1 {
+		t.Fatalf("file_count=%d want 1", out.FileCount)
+	}
+	if out.RequestFeeUSD != 0 {
+		t.Fatalf("request_fee_usd=%v want 0.00 at this scale after rounding", out.RequestFeeUSD)
+	}
+}
+
+func TestRestoreTriggerForwardsTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tier string
+		want storage.RestoreTier
+	}{
+		{name: "bulk", tier: "bulk", want: storage.RestoreTierBulk},
+		{name: "standard", tier: "standard", want: storage.RestoreTierStandard},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { d.Close() })
+
+			now := time.Now()
+			res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("hello"), "backups/notes.txt", now); err != nil {
+				t.Fatal(err)
+			}
+
+			spy := newTierSpyStorage()
+			cfg := config.Default()
+			srv := NewServer(Deps{
+				DB:            d,
+				Bus:           events.NewBus(16),
+				Config:        &cfg,
+				Storage:       func() storage.Storage { return spy },
+				StoragePrefix: "backups/",
+			})
+
+			body, _ := json.Marshal(map[string]any{
+				"paths": []string{"/"},
+				"days":  7,
+				"tier":  tc.tier,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/restore/trigger", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.handleRestoreTrigger(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d want 200", rr.Code)
+			}
+
+			spy.mu.Lock()
+			defer spy.mu.Unlock()
+			if len(spy.calls) != 1 {
+				t.Fatalf("Restore calls = %d want 1", len(spy.calls))
+			}
+			if spy.calls[0] != tc.want {
+				t.Fatalf("tier = %v want %v", spy.calls[0], tc.want)
+			}
+		})
+	}
 }
 
 func TestRestoreTriggerStorageNotConfigured(t *testing.T) {

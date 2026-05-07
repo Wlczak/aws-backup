@@ -499,7 +499,7 @@
     }
     restoring = true; restoreResult = null;
     try {
-      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays);
+      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays, 'standard');
     } catch (e) {
       toast.error(String(e)); // (#226)
     } finally {

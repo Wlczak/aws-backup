@@ -137,7 +137,7 @@ func (m *MemStorage) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 // Restore is a no-op for the in-memory fake.
-func (m *MemStorage) Restore(_ context.Context, key string, _ int) error {
+func (m *MemStorage) Restore(_ context.Context, key string, _ int, _ RestoreTier) error {
 	m.mu.Lock()
 	_, ok := m.objects[key]
 	m.mu.Unlock()

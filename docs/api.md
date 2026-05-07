@@ -33,8 +33,8 @@ GET    /api/smb/test                  dial source per current config
 GET    /api/s3/test                   HeadBucket round-trip
 
 # Restore (Glacier)
-POST   /api/restore/estimate          {paths: []} → cost + wait estimate
-POST   /api/restore/trigger           {paths: [], days: 1..30} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
+POST   /api/restore/estimate          {paths: [], tier: bulk|standard} → cost + wait estimate (request fee counts actual S3 objects, zip groups count once)
+POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..30} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
 
 # Sync / reconcile

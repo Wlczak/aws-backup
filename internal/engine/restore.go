@@ -66,6 +66,10 @@ type RestoreRequestOptions struct {
 	DB        *db.DB
 	Storage   storage.Storage
 	KeyPrefix string
+	// Tier selects the Glacier retrieval speed/cost tradeoff used for
+	// the restore request. Empty defaults to Standard so older callers
+	// keep their previous behavior unless they opt in explicitly.
+	Tier storage.RestoreTier
 	// Paths selects which DB rows to thaw by prefix match. "" or "/"
 	// means "every uploaded row". Unknown paths land in
 	// RestoreRequestStats.UnknownPaths.
@@ -139,6 +143,13 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 	}
 	if opts.Days < 1 {
 		return stats, fmt.Errorf("restore: Days must be >= 1 (got %d)", opts.Days)
+	}
+	switch opts.Tier {
+	case "", storage.RestoreTierStandard:
+		opts.Tier = storage.RestoreTierStandard
+	case storage.RestoreTierBulk:
+	default:
+		return stats, fmt.Errorf("restore: unknown restore tier %q", opts.Tier)
 	}
 
 	wantAll := false
@@ -268,7 +279,7 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 		stats.FilesAffected += g.fileCount
 		stats.BytesAffected += g.bytes
 
-		err := opts.Storage.Restore(ctx, key, opts.Days)
+		err := opts.Storage.Restore(ctx, key, opts.Days, opts.Tier)
 		switch {
 		case err == nil:
 			stats.KeysRequested++

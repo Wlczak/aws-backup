@@ -4,6 +4,7 @@
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
 export type RestoreStatus = '' | 'in_progress' | 'restored';
+export type RestoreTier = 'bulk' | 'standard';
 
 export interface Run {
   id: number;
@@ -92,8 +93,9 @@ export interface Status {
 }
 
 export interface RestoreEstimate {
-  // Counts of files that will actually generate fresh S3 RestoreObject
-  // calls — already_in_progress / already_restored buckets are excluded.
+  // Counts of actual S3 objects that will generate fresh
+  // RestoreObject calls — zip members collapse to one archive key and
+  // already_in_progress / already_restored buckets are excluded.
   file_count: number;
   total_bytes: number;
   request_fee_usd: number;
@@ -348,10 +350,10 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  restoreEstimate: (paths: string[]) =>
+  restoreEstimate: (paths: string[], tier: RestoreTier) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ paths, tier }),
     }),
   /**
    * Issue a Glacier restore request for every unique S3 key covering the
@@ -361,7 +363,7 @@ export const api = {
    * affected DB rows immediately move to restore_status='in_progress'
    * so the UI reflects the request.
    */
-  restoreTrigger: (paths: string[], days: number) =>
+  restoreTrigger: (paths: string[], days: number, tier: RestoreTier) =>
     request<{
       keys_requested: number;
       keys_already_in_progress: number;
@@ -376,7 +378,7 @@ export const api = {
       errors?: string[];
     }>('/api/restore/trigger', {
       method: 'POST',
-      body: JSON.stringify({ paths, days }),
+      body: JSON.stringify({ paths, days, tier }),
     }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {

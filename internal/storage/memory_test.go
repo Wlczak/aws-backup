@@ -56,7 +56,7 @@ func TestMemStorageMissing(t *testing.T) {
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
-	if err := m.Restore(ctx, "nope", 3); !errors.Is(err, ErrNotFound) {
+	if err := m.Restore(ctx, "nope", 3, RestoreTierStandard); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Restore: want ErrNotFound, got %v", err)
 	}
 }

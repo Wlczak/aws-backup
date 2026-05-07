@@ -340,14 +340,23 @@ func (s *S3Storage) HeadBucket(ctx context.Context) error {
 // Restore triggers a Glacier restore for the given key. This is the only
 // code path that will talk to real AWS in production; it remains unused
 // until the Restore feature (19) is enabled.
-func (s *S3Storage) Restore(ctx context.Context, key string, days int) error {
+func (s *S3Storage) Restore(ctx context.Context, key string, days int, tier RestoreTier) error {
+	var s3Tier s3types.Tier
+	switch tier {
+	case "", RestoreTierStandard:
+		s3Tier = s3types.TierStandard
+	case RestoreTierBulk:
+		s3Tier = s3types.TierBulk
+	default:
+		return fmt.Errorf("storage: unknown restore tier %q", tier)
+	}
 	_, err := s.client.RestoreObject(ctx, &s3.RestoreObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		RestoreRequest: &s3types.RestoreRequest{
 			Days: aws.Int32(int32(days)),
 			GlacierJobParameters: &s3types.GlacierJobParameters{
-				Tier: s3types.TierStandard,
+				Tier: s3Tier,
 			},
 		},
 	})

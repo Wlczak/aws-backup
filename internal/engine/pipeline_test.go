@@ -119,7 +119,7 @@ func TestPipeline_ZipKeyCollisionRetry(t *testing.T) {
 
 	var putCount atomic.Int32
 	store := &collidingStorage{
-		MemStorage:  storage.NewMemStorage(),
+		MemStorage:   storage.NewMemStorage(),
 		collideUntil: 1,
 		count:        &putCount,
 	}
@@ -197,7 +197,7 @@ func TestPipeline_ZipKeyCollisionExhausted(t *testing.T) {
 
 	var count atomic.Int32
 	store := &collidingStorage{
-		MemStorage:  storage.NewMemStorage(),
+		MemStorage:   storage.NewMemStorage(),
 		collideUntil: 100, // never succeeds
 		count:        &count,
 	}
@@ -504,9 +504,11 @@ func (s *alwaysFailStorage) Get(_ context.Context, _ string) (io.ReadCloser, err
 	return nil, errors.New("not found")
 }
 
-func (s *alwaysFailStorage) Restore(_ context.Context, _ string, _ int) error { return nil }
-func (s *alwaysFailStorage) Delete(_ context.Context, _ string) error          { return nil }
-func (s *alwaysFailStorage) Close() error                                       { return nil }
+func (s *alwaysFailStorage) Restore(_ context.Context, _ string, _ int, _ storage.RestoreTier) error {
+	return nil
+}
+func (s *alwaysFailStorage) Delete(_ context.Context, _ string) error { return nil }
+func (s *alwaysFailStorage) Close() error                             { return nil }
 
 // TestPipeline_ConfigOptionsDefaults verifies that 0/1 thread counts are
 // normalized correctly by New().

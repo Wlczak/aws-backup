@@ -1,35 +1,69 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
+	"github.com/Wlczak/aws-backup/internal/pathutil"
 	"github.com/Wlczak/aws-backup/internal/restore/inventory"
 	"github.com/Wlczak/aws-backup/internal/restore/scanner"
+	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
 // Deep Archive pricing the estimator uses. Kept in code (not config) so
 // the UI shows the same numbers everyone else sees; real billing still
 // comes from AWS.
 const (
-	pricePerThousandRequests = 0.10  // USD; GET requests for restored objects
-	pricePerGBRetrieval      = 0.02  // USD/GB; Deep Archive standard retrieval
-	pricePerGBEgress         = 0.09  // USD/GB; internet egress after free tier
-	egressFreeGB             = 100.0 // free tier
-	retrievalHoursMin        = 12
-	retrievalHoursMax        = 48
+	pricePerThousandRequestsStandard = 0.11  // USD; Glacier standard retrieval requests
+	pricePerGBRetrievalStandard      = 0.02  // USD/GB; Glacier standard retrieval
+	pricePerThousandRequestsBulk     = 0.025 // USD; Glacier bulk retrieval requests
+	pricePerGBRetrievalBulk          = 0.003 // USD/GB; Glacier bulk retrieval
+	pricePerGBEgress                 = 0.09  // USD/GB; internet egress after free tier
+	egressFreeGB                     = 100.0 // free tier
 )
+
+type restoreTierRequest string
+
+const (
+	restoreTierStandard restoreTierRequest = "standard"
+	restoreTierBulk     restoreTierRequest = "bulk"
+)
+
+func parseRestoreTier(raw string) (storage.RestoreTier, error) {
+	switch raw {
+	case string(restoreTierStandard):
+		return storage.RestoreTierStandard, nil
+	case string(restoreTierBulk):
+		return storage.RestoreTierBulk, nil
+	default:
+		return "", fmt.Errorf("tier must be either %q or %q", restoreTierBulk, restoreTierStandard)
+	}
+}
+
+func restoreTierPricing(tier storage.RestoreTier) (requestPerThousand, retrievalPerGB float64, waitHoursMin, waitHoursMax int) {
+	switch tier {
+	case storage.RestoreTierBulk:
+		return pricePerThousandRequestsBulk, pricePerGBRetrievalBulk, 48, 48
+	default:
+		return pricePerThousandRequestsStandard, pricePerGBRetrievalStandard, 12, 12
+	}
+}
 
 type restoreEstimateRequest struct {
 	Paths []string `json:"paths"`
+	Tier  string   `json:"tier"`
 }
 
 type restoreEstimateResponse struct {
-	// FileCount / TotalBytes count only files that will actually be
-	// retrieved — i.e. exclude rows whose restore_status is already
-	// in_progress or restored. The cost fields are computed off these.
+	// FileCount / TotalBytes count only the actual S3 objects that will
+	// be retrieved — i.e. one zip archive per zip group, plus standalone
+	// objects. Rows already in_progress or restored are excluded. The
+	// request fee is computed off FileCount; TotalBytes remains the
+	// current DB-byte estimate for the matching rows.
 	FileCount       int64   `json:"file_count"`
 	TotalBytes      int64   `json:"total_bytes"`
 	RequestFeeUSD   float64 `json:"request_fee_usd"`
@@ -61,6 +95,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
 		return
 	}
+	tier, err := parseRestoreTier(req.Tier)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	// "/" (or "") is a special sentinel meaning "all files".
 	allFiles := false
@@ -83,6 +122,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	objectCount, err := s.restoreObjectCount(r.Context(), pathsForFilter, allFiles)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
 	var unknown []string
 	if !allFiles {
@@ -97,9 +141,10 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	requestPerThousand, retrievalPerGB, waitHoursMin, waitHoursMax := restoreTierPricing(tier)
 	gb := float64(br.RetrievableBytes) / (1024 * 1024 * 1024)
-	request := float64(br.RetrievableCount) * pricePerThousandRequests / 1000
-	retrieval := gb * pricePerGBRetrieval
+	request := float64(objectCount) * requestPerThousand / 1000
+	retrieval := gb * retrievalPerGB
 	egressGB := gb
 	if egressGB > egressFreeGB {
 		egressGB -= egressFreeGB
@@ -109,14 +154,14 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	egress := egressGB * pricePerGBEgress
 
 	writeJSON(w, http.StatusOK, restoreEstimateResponse{
-		FileCount:              br.RetrievableCount,
+		FileCount:              objectCount,
 		TotalBytes:             br.RetrievableBytes,
 		RequestFeeUSD:          round2(request),
 		RetrievalFeeUSD:        round2(retrieval),
 		EgressFeeUSD:           round2(egress),
 		TotalFeeUSD:            round2(request + retrieval + egress),
-		WaitHoursMin:           retrievalHoursMin,
-		WaitHoursMax:           retrievalHoursMax,
+		WaitHoursMin:           waitHoursMin,
+		WaitHoursMax:           waitHoursMax,
 		AlreadyInProgressCount: br.AlreadyInProgressCount,
 		AlreadyInProgressBytes: br.AlreadyInProgressBytes,
 		AlreadyRestoredCount:   br.AlreadyRestoredCount,
@@ -125,8 +170,66 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) restoreObjectCount(ctx context.Context, paths []string, allFiles bool) (int64, error) {
+	wantAll := allFiles
+	wantSet := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" || p == "/" {
+			wantAll = true
+			break
+		}
+		wantSet[p] = struct{}{}
+	}
+
+	const pageSize = 1000
+	seen := make(map[string]struct{})
+	for page := 1; ; page++ {
+		rows, _, err := s.deps.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
+		if err != nil {
+			return 0, fmt.Errorf("list files: %w", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, f := range rows {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+				continue
+			}
+			if !wantAll {
+				hit := false
+				for req := range wantSet {
+					if pathutil.HasPrefixPath(f.Path, req) {
+						hit = true
+						break
+					}
+				}
+				if !hit {
+					continue
+				}
+			}
+			switch f.RestoreStatus {
+			case db.RestoreStatusInProgress, db.RestoreStatusRestored:
+				continue
+			}
+			key := f.S3Key
+			if f.ZipName != "" {
+				key = f.ZipName
+			}
+			if key == "" {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	return int64(len(seen)), nil
+}
+
 type restoreTriggerRequest struct {
 	Paths []string `json:"paths"`
+	Tier  string   `json:"tier"`
 	// Days is how long the restored copy stays in the standard tier
 	// before reverting to the archive class. AWS S3 accepts 1..N (N
 	// depends on retrieval tier); we clamp to [1, 30] to keep the UI
@@ -184,6 +287,11 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
 		return
 	}
+	tier, err := parseRestoreTier(req.Tier)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	if req.Days < restoreDaysMin || req.Days > restoreDaysMax {
 		writeError(w, http.StatusBadRequest,
 			fmt.Errorf("days must be in [%d, %d] (got %d)", restoreDaysMin, restoreDaysMax, req.Days))
@@ -198,6 +306,7 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		DB:        s.deps.DB,
 		Storage:   st,
 		KeyPrefix: s.storagePrefix(),
+		Tier:      tier,
 		Paths:     req.Paths,
 		Days:      req.Days,
 		Emit:      emit,
