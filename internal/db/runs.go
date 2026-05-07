@@ -137,13 +137,39 @@ func (db *DB) AppendLogMany(ctx context.Context, entries []LogEntry) error {
 	return db.g.WithContext(ctx).CreateInBatches(logs, 200).Error
 }
 
-// ListLogs returns all log lines for a run in chronological order.
-func (db *DB) ListLogs(ctx context.Context, runID int64) ([]RunLog, error) {
+// ListLogsMaxLimit caps a single ListLogs page so a long, chatty run's
+// log table can't OOM the process when the run-detail UI opens. (#223)
+const ListLogsMaxLimit = 5000
+
+// ListLogs returns up to limit log lines for a run, ordered by id, with
+// a 1-based page offset. limit <= 0 selects a 500-row default and is
+// capped at ListLogsMaxLimit. Returns the rows + the total count for
+// pagination. (#223)
+func (db *DB) ListLogs(ctx context.Context, runID int64, page, limit int) ([]RunLog, int64, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > ListLogsMaxLimit {
+		limit = ListLogsMaxLimit
+	}
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+
+	var total int64
+	if err := db.g.WithContext(ctx).Model(&RunLog{}).
+		Where("run_id = ?", runID).
+		Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
 	var logs []RunLog
 	err := db.g.WithContext(ctx).
 		Where("run_id = ?", runID).
 		Order("id").
+		Limit(limit).Offset(offset).
 		Find(&logs).Error
-	return logs, err
+	return logs, total, err
 }
 

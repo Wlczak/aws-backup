@@ -136,9 +136,10 @@ func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appSta
 	}
 
 	dir := filepath.Dir(cfgPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
+	_ = os.Chmod(dir, 0o700) // tighten loose existing dirs (#221)
 
 	store, err := storage.NewS3Storage(ctx, storage.S3Config{
 		Endpoint:           cfg.S3.Endpoint,

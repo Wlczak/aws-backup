@@ -171,7 +171,13 @@ func (c *Consumer) Run(ctx context.Context) error {
 			c.logger.Info("sqs restore consumer stopped")
 			return nil
 		}
-		c.receiveMu.Lock()
+		// Don't hold receiveMu across the long-poll Receive: that would
+		// stall a concurrent DrainAll (which also takes receiveMu) for
+		// up to waitSec seconds — exactly the latency DrainAll's
+		// short-poll Receive was added to avoid. The mutex's #185 role
+		// is only to keep OnDrainComplete from racing in-flight per-
+		// record updates, which is satisfied by holding it across the
+		// processing batch below. (#220)
 		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(c.queueURL),
 			MaxNumberOfMessages: c.maxMsgs,
@@ -179,7 +185,6 @@ func (c *Consumer) Run(ctx context.Context) error {
 			VisibilityTimeout:   c.visSec,
 		})
 		if err != nil {
-			c.receiveMu.Unlock()
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
 			}
@@ -191,6 +196,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		c.receiveMu.Lock()
 		for _, msg := range out.Messages {
 			c.handleMessage(ctx, msg)
 		}
@@ -254,6 +260,12 @@ func (c *Consumer) heartbeat(ctx context.Context, receipt string) {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Tolerate a few transient ChangeMessageVisibility errors before
+	// giving up — a single throttle / network blip used to permanently
+	// disable the heartbeat for the rest of handleMessage, undoing the
+	// duplicate-apply protection #186 added. (#219)
+	const heartbeatMaxConsecutiveErrors = 3
+	consecutiveErrors := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -268,9 +280,17 @@ func (c *Consumer) heartbeat(ctx context.Context, receipt string) {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
-				c.logger.Debug("sqs visibility heartbeat failed", "err", err)
-				return
+				consecutiveErrors++
+				c.logger.Debug("sqs visibility heartbeat failed",
+					"err", err, "consecutive_errors", consecutiveErrors)
+				if consecutiveErrors >= heartbeatMaxConsecutiveErrors {
+					c.logger.Warn("sqs visibility heartbeat giving up after consecutive failures",
+						"errors", consecutiveErrors)
+					return
+				}
+				continue
 			}
+			consecutiveErrors = 0
 		}
 	}
 }

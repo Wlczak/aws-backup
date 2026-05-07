@@ -307,7 +307,7 @@ func TestRunLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	logs, err := d.ListLogs(ctx, id)
+	logs, _, err := d.ListLogs(ctx, id, 1, 500)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -446,7 +446,8 @@ func (s *Server) sseReplay(ctx context.Context) ([]engine.Event, time.Time) {
 	// that were already on the bus and also already in ListLogs share
 	// timestamps <= cutoff and the live forwarder drops them. (#176)
 	cutoff := time.Now()
-	logs, err := s.deps.DB.ListLogs(ctx, runID)
+	// Bounded replay: a chatty run can produce 100k+ log rows. (#223)
+	logs, _, err := s.deps.DB.ListLogs(ctx, runID, 1, db.ListLogsMaxLimit)
 	if err != nil {
 		return evts, cutoff
 	}

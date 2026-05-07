@@ -53,6 +53,18 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
+	// Gate on engine-idle: while a run is in flight the engine writes
+	// status / s3_key / zip_name on the same rows MarkPending* flips. A
+	// stale List page could observe a just-uploaded key as missing and
+	// reset it to pending. (#222)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — sync would race engine writes; try again when idle"))
+		return
+	}
 	// Detach the work ctx from the request: List+MarkPending* over a
 	// multi-million-key bucket can outlive a tab close, and a client
 	// disconnect that fires after List completes but mid-MarkPending
@@ -76,6 +88,15 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+		return
+	}
+	// Engine-idle gate — see handleSync. (#222)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — full sync would race engine writes; try again when idle"))
 		return
 	}
 	// Detach from request ctx — see handleSync. (#238)
@@ -186,6 +207,17 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 	}
 	if len(req.Paths) == 0 {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+
+	// Engine-idle gate — MarkMissingByPaths writes the same s3_key rows
+	// the engine touches mid-run. (#222)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — delete-cloud-paths would race engine writes; try again when idle"))
 		return
 	}
 

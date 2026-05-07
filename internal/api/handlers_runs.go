@@ -93,7 +93,9 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	logs, err := s.deps.DB.ListLogs(r.Context(), id)
+	logsPage := intParam(r, "logs_page", 1)
+	logsLimit := intParam(r, "logs_limit", 500)
+	logs, _, err := s.deps.DB.ListLogs(r.Context(), id, logsPage, logsLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -449,15 +451,30 @@ func intParam(r *http.Request, key string, def int) int {
 	return n
 }
 
+// maxJSONBody bounds the request body any decodeJSON-using handler will
+// accept. Sized to comfortably fit the largest legitimate body (a
+// path-list batch from /api/sync/delete-cloud-paths or
+// /api/restore/trigger) while preventing a multi-GB decode-bomb that
+// would OOM the process. (#224)
+const maxJSONBody = 16 << 20 // 16 MiB
+
 // decodeJSON is a small helper for PUT/POST bodies. Decoder errors can
 // embed bytes from the request body (offsets, field names, snippets),
 // so we sanitise the message before returning it: CR/LF are collapsed
 // to spaces (so a malicious body can't forge log lines / response
 // headers) and the result is capped at 256 chars. (#183)
+//
+// The request body is also bounded at maxJSONBody so an anonymous
+// caller can't stream gigabytes into json.Decode. (#224)
 func decodeJSON(r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		var mb *http.MaxBytesError
+		if errors.As(err, &mb) {
+			return fmt.Errorf("request body exceeds %d bytes", mb.Limit)
+		}
 		return errors.New(sanitizeDecodeErr(err.Error()))
 	}
 	return nil

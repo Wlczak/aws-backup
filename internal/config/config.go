@@ -251,7 +251,12 @@ func applyBackfills(data []byte, cfg *Config) {
 // writeback can't leave a zero-byte file at path. (#101)
 func Save(path string, cfg Config) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// Tighten any pre-existing (potentially 0755) parent dir so the file's
+	// 0o600 isn't undermined by directory listing on the same host. (#221)
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")

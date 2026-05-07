@@ -389,5 +389,32 @@ func safeJoin(root, relPath string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("unsafe path %q escapes target", relPath)
 	}
+	// filepath.Abs is purely lexical; resolve any symlinks present in
+	// existing ancestors and re-check the result is still under root so
+	// a symlink like `<root>/photos -> /etc` can't redirect a write
+	// outside target. ENOENT on the leaf or deeper components is fine
+	// (we're about to create them). (#218)
+	rootResolved, rerr := filepath.EvalSymlinks(root)
+	if rerr != nil {
+		return "", fmt.Errorf("resolve target root: %w", rerr)
+	}
+	probe := abs
+	for {
+		if probe == rootResolved || probe == filepath.Dir(probe) {
+			break
+		}
+		resolved, rerr := filepath.EvalSymlinks(probe)
+		if rerr == nil {
+			rel2, _ := filepath.Rel(rootResolved, resolved)
+			if rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+				return "", fmt.Errorf("unsafe path %q: ancestor symlink escapes target", relPath)
+			}
+			break
+		}
+		if !os.IsNotExist(rerr) {
+			return "", fmt.Errorf("resolve %q: %w", probe, rerr)
+		}
+		probe = filepath.Dir(probe)
+	}
 	return abs, nil
 }
