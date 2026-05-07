@@ -246,6 +246,19 @@ func (s *Server) handleRestoreScanFull(w http.ResponseWriter, r *http.Request) {
 			errors.New("restore scanner not configured (storage missing)"))
 		return
 	}
+	// Reject when a backup run is in flight: RunFull HEADs every
+	// individually-uploaded key, and the engine may be writing those
+	// same s3_key rows (status, uploaded_at). Letting the two writers
+	// race opens a corruption window where a stale HEAD response
+	// stomps a fresh engine-side state. (#191)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — full restore-scan would race engine writes; try again when idle"))
+		return
+	}
 	res, err := s.deps.RestoreScanner.RunFull(r.Context())
 	if err != nil {
 		if errors.Is(err, scanner.ErrBusy) {
@@ -348,6 +361,17 @@ func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Inventory == nil || s.deps.RestoreScanner == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			errors.New("inventory manager or scanner not configured (storage missing)"))
+		return
+	}
+	// Same engine-idle gate as handleRestoreScanFull — an inventory sync
+	// HEADs every key in the manifest, racing engine writes on the same
+	// s3_key. (#191)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — inventory sync would race engine writes; try again when idle"))
 		return
 	}
 	// Serialise concurrent clicks so two callers don't both download a

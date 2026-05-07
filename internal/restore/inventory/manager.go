@@ -20,14 +20,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
+
+// manifestSettleGrace is the minimum age a manifest must have before it
+// is considered live. Inventory writes the manifest before its data
+// files are fully visible, so reading a too-fresh manifest can hit
+// NoSuchKey on a referenced data file. (#188)
+const manifestSettleGrace = 5 * time.Minute
 
 // ConfigID is the fixed inventory configuration name we read/write.
 // Hardcoded so Get/Put/Delete always address the same record without an
@@ -229,12 +237,29 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	manifestKey, err := findLatestManifest(ctx, client, bucket)
+	manifestKey, manifestAge, err := findLatestManifest(ctx, client, bucket)
 	if err != nil {
 		return nil, err
 	}
 	if manifestKey == "" {
 		return nil, errors.New("no inventory manifest found yet — first report can take up to 48h after enabling")
+	}
+	// Warn when the chosen manifest is older than 2× the configured
+	// frequency — typically signals inventory generation is silently
+	// broken (bucket policy change, IAM denial, etc). (#189)
+	if st, gerr := m.Get(ctx); gerr == nil && st.Enabled {
+		var window time.Duration
+		switch st.Frequency {
+		case FrequencyDaily:
+			window = 24 * time.Hour
+		case FrequencyWeekly:
+			window = 7 * 24 * time.Hour
+		}
+		if window > 0 && manifestAge > 2*window {
+			slog.Warn("inventory: latest manifest is stale — generation may be broken",
+				"manifest", manifestKey, "age", manifestAge.Round(time.Hour).String(),
+				"frequency", string(st.Frequency))
+		}
 	}
 
 	mf, err := fetchManifest(ctx, client, bucket, manifestKey)
@@ -267,11 +292,19 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 }
 
 // findLatestManifest returns the most recent manifest.json under
-// `_inventory/<bucket>/<id>/`. Returns "" with no error when no
-// manifests have been generated yet.
-func findLatestManifest(ctx context.Context, client API, bucket string) (string, error) {
+// `_inventory/<bucket>/<id>/`, along with its age (now - LastModified).
+// Returns "" with no error when no manifests have been generated yet.
+//
+// Manifests younger than manifestSettleGrace are skipped: inventory
+// writes the manifest before all referenced data files are visible, so
+// a too-fresh manifest can hit NoSuchKey on a data fetch. (#188)
+func findLatestManifest(ctx context.Context, client API, bucket string) (string, time.Duration, error) {
 	prefix := DestinationPrefix + bucket + "/" + ConfigID + "/"
-	var manifests []string
+	type entry struct {
+		key      string
+		modified time.Time
+	}
+	var manifests []entry
 	var token *string
 	for {
 		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
@@ -280,13 +313,18 @@ func findLatestManifest(ctx context.Context, client API, bucket string) (string,
 			ContinuationToken: token,
 		})
 		if err != nil {
-			return "", fmt.Errorf("list inventory output: %w", err)
+			return "", 0, fmt.Errorf("list inventory output: %w", err)
 		}
 		for _, obj := range out.Contents {
 			k := aws.ToString(obj.Key)
-			if strings.HasSuffix(k, "/manifest.json") {
-				manifests = append(manifests, k)
+			if !strings.HasSuffix(k, "/manifest.json") {
+				continue
 			}
+			lm := time.Time{}
+			if obj.LastModified != nil {
+				lm = *obj.LastModified
+			}
+			manifests = append(manifests, entry{k, lm})
 		}
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			break
@@ -294,12 +332,34 @@ func findLatestManifest(ctx context.Context, client API, bucket string) (string,
 		token = out.NextContinuationToken
 	}
 	if len(manifests) == 0 {
-		return "", nil
+		return "", 0, nil
 	}
 	// Inventory writes manifests under `<prefix>/<YYYY-MM-DDTHH-MMZ>/`,
-	// so lexicographic order is chronological — last entry wins.
-	sort.Strings(manifests)
-	return manifests[len(manifests)-1], nil
+	// so lexicographic order is chronological. Walk newest-first and
+	// return the first one past the settle grace window. (#188)
+	sort.Slice(manifests, func(i, j int) bool { return manifests[i].key < manifests[j].key })
+	now := time.Now()
+	for i := len(manifests) - 1; i >= 0; i-- {
+		mf := manifests[i]
+		if !mf.modified.IsZero() && now.Sub(mf.modified) < manifestSettleGrace {
+			continue
+		}
+		age := time.Duration(0)
+		if !mf.modified.IsZero() {
+			age = now.Sub(mf.modified)
+		}
+		return mf.key, age, nil
+	}
+	// All manifests are too fresh — fall back to the newest so the
+	// caller still gets a manifest (with a synthesised age of 0); the
+	// data-fetch path will surface any NoSuchKey if data is still
+	// settling.
+	last := manifests[len(manifests)-1]
+	age := time.Duration(0)
+	if !last.modified.IsZero() {
+		age = now.Sub(last.modified)
+	}
+	return last.key, age, nil
 }
 
 type manifest struct {

@@ -28,6 +28,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/Wlczak/aws-backup/internal/events"
 	"github.com/Wlczak/aws-backup/internal/storage"
@@ -38,6 +40,13 @@ import (
 // trigger 503/SlowDown — request-rate limits on a single prefix start
 // well above this.
 const WorkerCount = 16
+
+// HeadRateLimit is the max sustained HEAD rate per scan run. S3
+// publishes a 5500 rps per-prefix HEAD/GET ceiling; we stay well below
+// it (~4000 rps with a small burst) so a backup laid out under one
+// KeyPrefix doesn't earn SlowDown 503s during a full scan. (#192)
+const HeadRateLimit = rate.Limit(4000)
+const HeadRateBurst = 200
 
 // progressEmitEvery throttles the cadence of restore_scan_progress
 // events so a 100k-file scan doesn't spam the SSE channel with 100k
@@ -172,12 +181,17 @@ func (s *Scanner) run(ctx context.Context, mode Mode, keys []string) (Result, er
 		wg      sync.WaitGroup
 	)
 
+	limiter := rate.NewLimiter(HeadRateLimit, HeadRateBurst)
+
 	for i := 0; i < WorkerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for key := range jobs {
 				if ctx.Err() != nil {
+					return
+				}
+				if err := limiter.Wait(ctx); err != nil {
 					return
 				}
 				n, hadErr := s.applyKey(ctx, st, key)
