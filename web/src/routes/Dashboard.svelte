@@ -252,12 +252,24 @@
         };
       }
       if (type === 'run_complete') scanActive = false;
-      // run_log events are replayed history; render them as readable
-      // "[level] message" lines rather than raw JSON. (#130)
-      const line = type === 'run_log'
-        ? `[${payload.level ?? 'log'}] ${payload.message ?? ''}`
-        : `[${type}] ${JSON.stringify(d.data ?? d)}`;
-      logLines = [...logLines.slice(-49), line];
+      // Skip high-frequency progress events: they fire continuously per
+      // upload thread and would otherwise allocate + re-render the log
+      // hundreds of times per second, evicting the run_log lines users
+      // actually want to read. The progress bar/items list already
+      // surfaces that data. (#263)
+      if (
+        type === 'run_log' ||
+        type === 'run_start' ||
+        type === 'run_complete' ||
+        type === 'run_failed' ||
+        type === 'run_cancelled' ||
+        type === 'run_stopped'
+      ) {
+        const line = type === 'run_log'
+          ? `[${payload.level ?? 'log'}] ${payload.message ?? ''}`
+          : `[${type}] ${JSON.stringify(d.data ?? d)}`;
+        logLines = [...logLines.slice(-49), line];
+      }
       if (type === 'run_complete' || type === 'run_start') {
         // Reset the poll cadence so an idle 30s timer doesn't keep ticking
         // after a run starts (and vice versa after it ends). (#70)
