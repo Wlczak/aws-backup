@@ -15,7 +15,9 @@ package inventory
 import (
 	"compress/gzip"
 	"context"
+	"crypto/md5"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -275,7 +277,7 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 
 	var keys []string
 	for _, f := range mf.Files {
-		dataKeys, err := fetchDataKeys(ctx, client, bucket, f.Key, keyCol)
+		dataKeys, err := fetchDataKeys(ctx, client, bucket, f.Key, keyCol, f.MD5Checksum)
 		if err != nil {
 			return nil, fmt.Errorf("fetch data %s: %w", f.Key, err)
 		}
@@ -370,9 +372,15 @@ type manifest struct {
 }
 
 type manifestFile struct {
-	Key string `json:"key"`
+	Key         string `json:"key"`
+	MD5Checksum string `json:"MD5checksum"`
 }
 
+// fetchManifest downloads manifest.json and verifies it against the
+// sibling manifest.checksum (MD5 of the JSON bytes). It also asserts
+// the manifest's `sourceBucket` matches the bucket we actually read
+// from, so an attacker with PutObject on `_inventory/` can't trick the
+// scanner into HEADing keys from a third-party bucket. (#187)
 func fetchManifest(ctx context.Context, client API, bucket, key string) (*manifest, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -386,11 +394,40 @@ func fetchManifest(ctx context.Context, client API, bucket, key string) (*manife
 	if err != nil {
 		return nil, err
 	}
+
+	checksumKey := strings.TrimSuffix(key, "manifest.json") + "manifest.checksum"
+	cks, cerr := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(checksumKey),
+	})
+	if cerr != nil {
+		return nil, fmt.Errorf("manifest checksum unavailable (%s): %w", checksumKey, cerr)
+	}
+	want, rerr := io.ReadAll(cks.Body)
+	cks.Body.Close()
+	if rerr != nil {
+		return nil, fmt.Errorf("read manifest checksum: %w", rerr)
+	}
+	wantHex := strings.ToLower(strings.TrimSpace(string(want)))
+	gotHex := hex.EncodeToString(md5sum(body))
+	if wantHex != gotHex {
+		return nil, fmt.Errorf("manifest checksum mismatch: got %s, want %s", gotHex, wantHex)
+	}
+
 	var mf manifest
 	if err := json.Unmarshal(body, &mf); err != nil {
 		return nil, fmt.Errorf("decode manifest: %w", err)
 	}
+	if mf.SourceBucket != "" && mf.SourceBucket != bucket {
+		return nil, fmt.Errorf("manifest sourceBucket %q does not match read bucket %q",
+			mf.SourceBucket, bucket)
+	}
 	return &mf, nil
+}
+
+func md5sum(b []byte) []byte {
+	h := md5.Sum(b)
+	return h[:]
 }
 
 // parseSchema turns "Bucket, Key, Size" into a column-name → index map.
@@ -409,8 +446,10 @@ func parseSchema(s string) map[string]int {
 }
 
 // fetchDataKeys downloads one inventory data file (gzip CSV) and pulls
-// the value at keyCol from each row.
-func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol int) ([]string, error) {
+// the value at keyCol from each row. When wantMD5 is non-empty, the
+// downloaded bytes are MD5-verified before parsing so a tampered or
+// truncated data file cannot inject extra HEADs. (#187)
+func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol int, wantMD5 string) ([]string, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -419,7 +458,21 @@ func fetchDataKeys(ctx context.Context, client API, bucket, key string, keyCol i
 		return nil, err
 	}
 	defer out.Body.Close()
-	gz, err := gzip.NewReader(out.Body)
+
+	var src io.Reader = out.Body
+	if wantMD5 != "" {
+		raw, rerr := io.ReadAll(out.Body)
+		if rerr != nil {
+			return nil, fmt.Errorf("read data file: %w", rerr)
+		}
+		got := hex.EncodeToString(md5sum(raw))
+		if !strings.EqualFold(got, wantMD5) {
+			return nil, fmt.Errorf("data file checksum mismatch (%s): got %s, want %s", key, got, wantMD5)
+		}
+		src = strings.NewReader(string(raw))
+	}
+
+	gz, err := gzip.NewReader(src)
 	if err != nil {
 		return nil, fmt.Errorf("gzip: %w", err)
 	}

@@ -121,6 +121,9 @@ func (f *fakeSQS) DeleteMessage(_ context.Context, in *sqs.DeleteMessageInput, _
 	}
 	return &sqs.DeleteMessageOutput{}, nil
 }
+func (f *fakeSQS) ChangeMessageVisibility(_ context.Context, _ *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
+}
 
 func newTestConsumer(db FileRestoreUpdater, sq *fakeSQS) *Consumer {
 	return &Consumer{
@@ -233,6 +236,9 @@ func (s *scriptedSQS) ReceiveMessage(_ context.Context, _ *sqs.ReceiveMessageInp
 	out := &sqs.ReceiveMessageOutput{Messages: s.pages[s.calls]}
 	s.calls++
 	return out, nil
+}
+func (s *scriptedSQS) ChangeMessageVisibility(_ context.Context, _ *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 func (s *scriptedSQS) DeleteMessage(_ context.Context, in *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 	if in.ReceiptHandle != nil {

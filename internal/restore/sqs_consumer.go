@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,6 +42,7 @@ type FileRestoreUpdater interface {
 type sqsAPI interface {
 	ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
 }
 
 // Consumer is a long-running SQS poller. Construct via New, drive via Run.
@@ -59,6 +61,12 @@ type Consumer struct {
 	// dropped or arrived before the queue was wired up) get reconciled
 	// without waiting for a manual full scan. nil disables the hook.
 	OnDrainComplete func(ctx context.Context, processed int)
+
+	// receiveMu serialises a Receive+process cycle between Run and
+	// DrainAll so the drain can't see "0 messages" while Run is holding
+	// a batch with expired visibility, then fire OnDrainComplete and
+	// race the still-in-flight per-record updates. (#185)
+	receiveMu sync.Mutex
 }
 
 // New builds a Consumer, loading AWS credentials from cfg + the parent
@@ -124,6 +132,7 @@ func (c *Consumer) DrainAll(ctx context.Context) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
+		c.receiveMu.Lock()
 		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(c.queueURL),
 			MaxNumberOfMessages: c.maxMsgs,
@@ -131,12 +140,14 @@ func (c *Consumer) DrainAll(ctx context.Context) (int, error) {
 			VisibilityTimeout:   c.visSec,
 		})
 		if err != nil {
+			c.receiveMu.Unlock()
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return total, err
 			}
 			return total, fmt.Errorf("sqs receive: %w", err)
 		}
 		if len(out.Messages) == 0 {
+			c.receiveMu.Unlock()
 			if c.OnDrainComplete != nil {
 				c.OnDrainComplete(ctx, total)
 			}
@@ -145,6 +156,7 @@ func (c *Consumer) DrainAll(ctx context.Context) (int, error) {
 		for _, msg := range out.Messages {
 			c.handleMessage(ctx, msg)
 		}
+		c.receiveMu.Unlock()
 		total += len(out.Messages)
 	}
 }
@@ -159,6 +171,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			c.logger.Info("sqs restore consumer stopped")
 			return nil
 		}
+		c.receiveMu.Lock()
 		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(c.queueURL),
 			MaxNumberOfMessages: c.maxMsgs,
@@ -166,6 +179,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			VisibilityTimeout:   c.visSec,
 		})
 		if err != nil {
+			c.receiveMu.Unlock()
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
 			}
@@ -180,10 +194,20 @@ func (c *Consumer) Run(ctx context.Context) error {
 		for _, msg := range out.Messages {
 			c.handleMessage(ctx, msg)
 		}
+		c.receiveMu.Unlock()
 	}
 }
 
 func (c *Consumer) handleMessage(ctx context.Context, msg sqstypes.Message) {
+	// Per-message heartbeat: a slow batch (busy SQLite, multi-record
+	// messages) can outlive the configured visibility timeout, so SQS
+	// redelivers the message and the same record is applied twice.
+	// Extend visibility every visSec/3 while we're still processing. (#186)
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	defer hbCancel()
+	if msg.ReceiptHandle != nil && c.visSec > 1 {
+		go c.heartbeat(hbCtx, *msg.ReceiptHandle)
+	}
 	body := ""
 	if msg.Body != nil {
 		body = *msg.Body
@@ -217,6 +241,37 @@ func (c *Consumer) handleMessage(ctx context.Context, msg sqstypes.Message) {
 		ReceiptHandle: msg.ReceiptHandle,
 	}); err != nil {
 		c.logger.Error("sqs delete failed", "err", err)
+	}
+}
+
+// heartbeat extends a single message's visibility timeout periodically
+// until the parent ctx is cancelled (which handleMessage does via defer
+// once it's done with the message). (#186)
+func (c *Consumer) heartbeat(ctx context.Context, receipt string) {
+	interval := time.Duration(c.visSec) * time.Second / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+				QueueUrl:          aws.String(c.queueURL),
+				ReceiptHandle:     aws.String(receipt),
+				VisibilityTimeout: c.visSec,
+			})
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+				c.logger.Debug("sqs visibility heartbeat failed", "err", err)
+				return
+			}
+		}
 	}
 }
 
