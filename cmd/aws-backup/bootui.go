@@ -66,7 +66,15 @@ async function poll() {
   }
   if (r.done) {
     cancelBtn.disabled = true;
-    if (r.error) stats.innerHTML = '<span class="err">Error: ' + r.error + '</span>';
+    if (r.error) {
+      // Avoid innerHTML: the error string is sourced from SDK / network
+      // error.Error() and could contain server-echoed bytes. (#234)
+      stats.textContent = '';
+      const span = document.createElement('span');
+      span.className = 'err';
+      span.textContent = 'Error: ' + r.error;
+      stats.appendChild(span);
+    }
     else if (r.cancelled) stats.textContent = 'Cancelled — starting with local index…';
     else stats.textContent = 'Done — starting…';
     return;

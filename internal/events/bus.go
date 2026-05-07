@@ -17,11 +17,22 @@ type Bus struct {
 	subscribers map[int64]*Subscription
 	nextID      int64
 	bufferSize  int
+	maxSubs     int
 
 	// dropped counts events dropped because a subscriber's buffer was full.
 	// Exposed for tests / telemetry.
 	dropped atomic.Int64
+	// rejected counts Subscribe calls refused because the bus was already
+	// at maxSubs — exposed so an SSE handler can surface 503s in metrics.
+	rejected atomic.Int64
 }
+
+// defaultMaxSubscribers caps concurrent subscriptions so a misbehaving
+// or anonymous client can't OOM the process by opening EventSource
+// connections in a loop. Each subscription holds bufferSize engine.Event
+// values + a map slot, and Publish iterates them under RLock — so the
+// cap also bounds the per-event fan-out cost. (#236)
+const defaultMaxSubscribers = 256
 
 // NewBus returns a Bus where each Subscription has a buffered channel of
 // the given capacity.
@@ -32,6 +43,7 @@ func NewBus(bufferSize int) *Bus {
 	return &Bus{
 		subscribers: map[int64]*Subscription{},
 		bufferSize:  bufferSize,
+		maxSubs:     defaultMaxSubscribers,
 	}
 }
 
@@ -52,9 +64,15 @@ func (b *Bus) Publish(ev engine.Event) {
 
 // Subscribe returns a new Subscription. Caller MUST call Subscription.Close
 // to release the channel; leaked subscriptions hold state in the bus.
+// Returns nil if the bus is already at its subscriber cap; callers
+// (e.g. sseHandler) should surface 503 in that case. (#236)
 func (b *Bus) Subscribe() *Subscription {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.maxSubs > 0 && len(b.subscribers) >= b.maxSubs {
+		b.rejected.Add(1)
+		return nil
+	}
 	b.nextID++
 	s := &Subscription{
 		id:  b.nextID,
@@ -64,6 +82,10 @@ func (b *Bus) Subscribe() *Subscription {
 	b.subscribers[s.id] = s
 	return s
 }
+
+// Rejected returns the cumulative count of Subscribe calls refused
+// because the bus was at capacity. (#236)
+func (b *Bus) Rejected() int64 { return b.rejected.Load() }
 
 // Dropped returns the cumulative count of events dropped across all slow
 // subscribers.

@@ -487,16 +487,13 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 				select {
 				case stagedCh <- staged:
 				case <-stopSending:
+					// Zips have no resume path so the staged zip can go;
+					// individual ind-* tmps are deliberately preserved so
+					// the next run's tryReuseTmp can skip the source read. (#127, #237)
 					os.Remove(staged.zipTmpPath)
-					for _, ind := range staged.individuals {
-						os.Remove(ind.tmpPath)
-					}
 					resultCh <- uploadResult{err: ErrStopRequested}
 				case <-ctx.Done():
 					os.Remove(staged.zipTmpPath)
-					for _, ind := range staged.individuals {
-						os.Remove(ind.tmpPath)
-					}
 					resultCh <- uploadResult{err: ctx.Err()}
 				}
 			}
@@ -517,11 +514,10 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 			defer uploadWg.Done()
 			for item := range stagedCh {
 				if err := ctx.Err(); err != nil {
-					// Clean up tmp and report.
+					// Drop the staged zip (no resume path) but keep the
+					// individual ind-* tmps so the next run's tryReuseTmp
+					// can skip re-reading the source. (#127, #237)
 					os.Remove(item.zipTmpPath)
-					for _, ind := range item.individuals {
-						os.Remove(ind.tmpPath)
-					}
 					resultCh <- uploadResult{err: err}
 					continue
 				}

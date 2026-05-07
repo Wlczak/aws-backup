@@ -39,17 +39,22 @@ func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) 
 			return
 		}
 
+		// Subscribe before writing headers so a 503 on subscriber-cap
+		// overflow goes out as a real error response rather than after
+		// a 200 has already been committed. (#236)
+		sub := bus.Subscribe()
+		if sub == nil {
+			http.Error(w, "too many SSE subscribers", http.StatusServiceUnavailable)
+			return
+		}
+		defer sub.Close()
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no") // for nginx if proxied
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
-
-		// Subscribe before the replay so we don't miss events that land
-		// between the DB query and the live-loop start.
-		sub := bus.Subscribe()
-		defer sub.Close()
 
 		// Initial comment line so clients know the stream is live even
 		// before the first real event arrives.
