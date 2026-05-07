@@ -100,6 +100,102 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type treeFolderEntry struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	FileCount int64  `json:"file_count"`
+	TotalSize int64  `json:"total_size"`
+}
+
+type treeListResponse struct {
+	Prefix  string            `json:"prefix"`
+	Folders []treeFolderEntry `json:"folders"`
+	Files   []fileEntry       `json:"files"`
+}
+
+// handleListTree returns the immediate children of a folder prefix
+// (subfolders + direct files), aggregated for the lazy tree view. Each
+// click in the UI fetches one prefix; we never load the whole index.
+func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	// Strip a leading slash so callers can pass `/foo/bar` or `foo/bar`
+	// interchangeably (file paths are stored without a leading slash).
+	for len(prefix) > 0 && (prefix[0] == '/' || prefix[0] == '\\') {
+		prefix = prefix[1:]
+	}
+	for len(prefix) > 0 && (prefix[len(prefix)-1] == '/' || prefix[len(prefix)-1] == '\\') {
+		prefix = prefix[:len(prefix)-1]
+	}
+	statusFilter := q.Get("status")
+
+	folders, files, err := s.deps.DB.ListTreeChildren(r.Context(), prefix, statusFilter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	resp := treeListResponse{
+		Prefix:  prefix,
+		Folders: make([]treeFolderEntry, 0, len(folders)),
+		Files:   make([]fileEntry, 0, len(files)),
+	}
+	for _, fd := range folders {
+		resp.Folders = append(resp.Folders, treeFolderEntry{
+			Name: fd.Name, Path: fd.Path,
+			FileCount: fd.FileCount, TotalSize: fd.TotalSize,
+		})
+	}
+	for _, f := range files {
+		resp.Files = append(resp.Files, fileEntry{
+			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
+			Status: f.Status, ZipName: f.ZipName, S3Key: f.S3Key,
+			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
+			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type subtreeIDsResponse struct {
+	IDs       []int64  `json:"ids"`
+	Paths     []string `json:"paths"`
+	Total     int64    `json:"total"`
+	Truncated bool     `json:"truncated"`
+}
+
+// subtreeIDsMaxRows caps a single "select-folder" expansion in the
+// lazy tree. 50k IDs is enough for typical folders without making one
+// click pull millions of rows.
+const subtreeIDsMaxRows = 50000
+
+// handleSubtreeIDs returns every file id+path under a given prefix,
+// used by the lazy tree's folder-select checkbox so toggling a folder
+// can select all its descendants without expanding them first.
+func (s *Server) handleSubtreeIDs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	for len(prefix) > 0 && (prefix[0] == '/' || prefix[0] == '\\') {
+		prefix = prefix[1:]
+	}
+	for len(prefix) > 0 && (prefix[len(prefix)-1] == '/' || prefix[len(prefix)-1] == '\\') {
+		prefix = prefix[:len(prefix)-1]
+	}
+	if prefix == "" {
+		writeError(w, http.StatusBadRequest, errors.New("prefix is required"))
+		return
+	}
+	ids, paths, total, err := s.deps.DB.ListSubtreeIDs(r.Context(), prefix, q.Get("status"), subtreeIDsMaxRows)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subtreeIDsResponse{
+		IDs: ids, Paths: paths, Total: total,
+		Truncated: total > int64(len(ids)),
+	})
+}
+
 type fileStatsResponse struct {
 	ByStatus            map[string]int64 `json:"by_status"`
 	ByRestoreStatus     map[string]int64 `json:"by_restore_status"`

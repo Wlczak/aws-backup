@@ -299,6 +299,8 @@ func (s *Server) Router() http.Handler {
 		r.Post("/runs/{id}/continue", s.handleContinueRun)
 
 		r.Get("/files", s.handleListFiles)
+		r.Get("/files/tree", s.handleListTree)
+		r.Get("/files/subtree-ids", s.handleSubtreeIDs)
 		r.Get("/files/stats", s.handleFileStats)
 		r.Post("/files/retry", s.handleRetryFiles)
 		r.Delete("/files", s.handleDeleteFiles)

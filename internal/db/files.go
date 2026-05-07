@@ -460,6 +460,116 @@ func (db *DB) ListFiles(ctx context.Context, f FilesFilter) ([]File, int64, erro
 	return files, total, nil
 }
 
+// TreeFolder is one immediate-child folder under a prefix in the lazy
+// tree view. Aggregates roll up over the entire subtree so the row can
+// render "12 files · 3.4 MB" without recursing.
+type TreeFolder struct {
+	Name      string
+	Path      string
+	FileCount int64
+	TotalSize int64
+}
+
+// ListTreeChildren returns the immediate children (files + first-level
+// subfolders) of `prefix` in the file index. Subfolders are aggregated
+// over their full subtree so the caller can render counts without
+// loading descendants. Use prefix == "" for the root level.
+//
+// The query scans the subtree under prefix once and partitions in Go,
+// which is bounded by the size of that subtree (typically much smaller
+// than the full index). Status filters narrow the scan; folder
+// aggregates only count rows that pass the filter.
+func (db *DB) ListTreeChildren(ctx context.Context, prefix, statusFilter string) ([]TreeFolder, []File, error) {
+	q := db.g.WithContext(ctx).Model(&File{})
+	if statusFilter != "" {
+		q = q.Where("status = ?", statusFilter)
+	}
+	if prefix != "" {
+		// LIKE 'prefix/%' uses the unique index on path for ASCII
+		// prefixes and falls back to a sequential scan otherwise; either
+		// way the rowset is the subtree, not the whole index.
+		q = q.Where(`path LIKE ? ESCAPE '\'`, likeEscape.Replace(prefix)+"/%")
+	}
+
+	var rows []File
+	if err := q.Order("path").Find(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+
+	cut := 0
+	if prefix != "" {
+		cut = len(prefix) + 1
+	}
+
+	folderByName := make(map[string]*TreeFolder)
+	var folders []*TreeFolder
+	var files []File
+	for _, f := range rows {
+		if cut > len(f.Path) {
+			continue
+		}
+		rest := f.Path[cut:]
+		slash := strings.IndexByte(rest, '/')
+		if slash < 0 {
+			files = append(files, f)
+			continue
+		}
+		name := rest[:slash]
+		fp := folderByName[name]
+		if fp == nil {
+			fullPath := name
+			if prefix != "" {
+				fullPath = prefix + "/" + name
+			}
+			fp = &TreeFolder{Name: name, Path: fullPath}
+			folderByName[name] = fp
+			folders = append(folders, fp)
+		}
+		fp.FileCount++
+		fp.TotalSize += f.Size
+	}
+
+	out := make([]TreeFolder, len(folders))
+	for i, p := range folders {
+		out[i] = *p
+	}
+	return out, files, nil
+}
+
+// ListSubtreeIDs returns the IDs and paths of every file under prefix
+// (recursive). Used by the lazy tree view's folder-checkbox so a
+// "select folder" click can fan out to all descendant files without
+// the client first having to expand them. Capped at maxRows; callers
+// should pass a sensible limit so a "select root" click can't OOM.
+func (db *DB) ListSubtreeIDs(ctx context.Context, prefix, statusFilter string, maxRows int) ([]int64, []string, int64, error) {
+	q := db.g.WithContext(ctx).Model(&File{})
+	if statusFilter != "" {
+		q = q.Where("status = ?", statusFilter)
+	}
+	if prefix != "" {
+		q = q.Where(`path LIKE ? ESCAPE '\'`, likeEscape.Replace(prefix)+"/%")
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, nil, 0, err
+	}
+	if maxRows <= 0 {
+		maxRows = 50000
+	}
+	q = q.Order("path").Limit(maxRows)
+	var rows []File
+	if err := q.Select("id", "path").Find(&rows).Error; err != nil {
+		return nil, nil, 0, err
+	}
+	ids := make([]int64, len(rows))
+	paths := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+		paths[i] = r.Path
+	}
+	return ids, paths, total, nil
+}
+
 // FileStats is the aggregate view for the dashboard.
 type FileStats struct {
 	ByStatus          map[string]int64

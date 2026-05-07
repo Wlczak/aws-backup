@@ -62,6 +62,88 @@ func TestStatsToleratesNonCanonicalRestoreExpiresAt(t *testing.T) {
 	}
 }
 
+// TestListTreeChildren asserts the lazy-tree partitioner: rows whose
+// path has no further '/' beyond the prefix become direct files; rows
+// with deeper paths roll up under the first segment as a folder with
+// aggregate counts.
+func TestListTreeChildren(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+
+	seed := []struct {
+		path string
+		size int64
+	}{
+		{"top.txt", 10},
+		{"alpha/a1.txt", 100},
+		{"alpha/a2.txt", 200},
+		{"alpha/sub/deep.txt", 1000},
+		{"beta/b1.txt", 50},
+	}
+	for _, s := range seed {
+		if _, err := d.UpsertFile(ctx, s.path, s.size, now, now); err != nil {
+			t.Fatalf("seed %s: %v", s.path, err)
+		}
+	}
+
+	folders, files, err := d.ListTreeChildren(ctx, "", "")
+	if err != nil {
+		t.Fatalf("root: %v", err)
+	}
+	if len(files) != 1 || files[0].Path != "top.txt" {
+		t.Errorf("root files = %v, want [top.txt]", files)
+	}
+	if len(folders) != 2 {
+		t.Fatalf("root folders = %d, want 2", len(folders))
+	}
+	for _, fd := range folders {
+		switch fd.Path {
+		case "alpha":
+			if fd.FileCount != 3 || fd.TotalSize != 1300 {
+				t.Errorf("alpha aggregate = (%d, %d), want (3, 1300)", fd.FileCount, fd.TotalSize)
+			}
+		case "beta":
+			if fd.FileCount != 1 || fd.TotalSize != 50 {
+				t.Errorf("beta aggregate = (%d, %d), want (1, 50)", fd.FileCount, fd.TotalSize)
+			}
+		default:
+			t.Errorf("unexpected folder %q", fd.Path)
+		}
+	}
+
+	folders, files, err = d.ListTreeChildren(ctx, "alpha", "")
+	if err != nil {
+		t.Fatalf("alpha: %v", err)
+	}
+	if len(folders) != 1 || folders[0].Path != "alpha/sub" || folders[0].FileCount != 1 {
+		t.Errorf("alpha folders = %+v, want [alpha/sub fc=1]", folders)
+	}
+	if len(files) != 2 {
+		t.Errorf("alpha files = %d, want 2", len(files))
+	}
+}
+
+// TestListSubtreeIDs verifies that selecting a folder reaches every
+// descendant file regardless of nesting depth.
+func TestListSubtreeIDs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+	for _, p := range []string{"x/1.txt", "x/y/2.txt", "x/y/z/3.txt", "other/4.txt"} {
+		if _, err := d.UpsertFile(ctx, p, 1, now, now); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+	ids, paths, total, err := d.ListSubtreeIDs(ctx, "x", "", 0)
+	if err != nil {
+		t.Fatalf("ListSubtreeIDs: %v", err)
+	}
+	if total != 3 || len(ids) != 3 || len(paths) != 3 {
+		t.Errorf("got (ids=%d paths=%d total=%d), want 3/3/3", len(ids), len(paths), total)
+	}
+}
+
 func TestParseFlexTime(t *testing.T) {
 	cases := []struct {
 		in     string

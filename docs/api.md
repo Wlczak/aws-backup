@@ -16,6 +16,8 @@ POST   /api/runs/{id}/continue        clear pending stop request
 
 # File index
 GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
+GET    /api/files/tree                ?prefix=&status=  immediate children of a folder (lazy tree view)
+GET    /api/files/subtree-ids         ?prefix=&status=  every file id+path under prefix (cap 50k; returns `truncated:true` past the cap)
 GET    /api/files/stats               counts by status + restore_status, total size (2s cache)
 POST   /api/files/{id}/retry          mark single file pending
 POST   /api/files/retry               batch: ids[], or all_failed:true, or paths[]

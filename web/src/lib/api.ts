@@ -45,6 +45,26 @@ export interface FilesPage {
   limit: number;
 }
 
+export interface TreeFolderInfo {
+  name: string;
+  path: string;
+  file_count: number;
+  total_size: number;
+}
+
+export interface TreePage {
+  prefix: string;
+  folders: TreeFolderInfo[];
+  files: FileRow[];
+}
+
+export interface SubtreeIDs {
+  ids: number[];
+  paths: string[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface RunsPage {
   runs: Run[];
   total: number;
@@ -230,6 +250,24 @@ export const api = {
     if (opts.search) qs.set('search', opts.search);
     if (opts.all) qs.set('all', 'true');
     return request<FilesPage>(`/api/files?${qs.toString()}`, { signal });
+  },
+  filesTree: (
+    opts: { prefix?: string; status?: string } = {},
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts.prefix) qs.set('prefix', opts.prefix);
+    if (opts.status) qs.set('status', opts.status);
+    return request<TreePage>(`/api/files/tree?${qs.toString()}`, { signal });
+  },
+  filesSubtreeIDs: (
+    opts: { prefix: string; status?: string },
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set('prefix', opts.prefix);
+    if (opts.status) qs.set('status', opts.status);
+    return request<SubtreeIDs>(`/api/files/subtree-ids?${qs.toString()}`, { signal });
   },
   fileStats: () => request<FileStats>('/api/files/stats'),
   retryFile: (id: number) =>

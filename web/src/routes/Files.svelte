@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, type FilesPage, type FileRow } from '../lib/api';
+  import { api, type FilesPage, type FileRow, type TreeFolderInfo } from '../lib/api';
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
-  import { selection, toggle, clear, ids, paths, pruneToIds } from '../lib/selection';
+  import { selection, toggle, clear, ids, paths } from '../lib/selection';
   import { go } from '../lib/router';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
-  import FileTreeNode from '../components/FileTreeNode.svelte';
-  import { buildTree, collectFiles, type TreeNode } from '../lib/tree';
+  import FileTreeNode, { type FolderChildren } from '../components/FileTreeNode.svelte';
 
   type ViewMode = 'tree' | 'flat';
   const VIEW_KEY = 'aws-backup:files-view';
@@ -22,47 +21,80 @@
   let data = $state<FilesPage | null>(null);
   let detail = $state<FileRow | null>(null);
   let busy = $state(false);
-  let expanded = $state<Set<string>>(new Set(['']));
+  let expanded = $state<Set<string>>(new Set());
+
+  // Lazy tree state. The cache is keyed by folder path; the root level
+  // lives under '' and is fetched on mount + on filter change. Each
+  // folder's children are fetched only when the user expands it. (#tree-lazy)
+  let treeCache = $state<Record<string, FolderChildren>>({});
+  // Selected folder paths whose descendant ids haven't been resolved yet
+  // (e.g. user toggled the folder before its children loaded). Tracked
+  // separately so the folder checkbox shows "all" without needing the ids.
+  let selectedFolderPaths = $state<Set<string>>(new Set());
 
   let totalPages = $derived(
     data && viewMode === 'flat' ? Math.max(1, Math.ceil(data.total / limit)) : 1,
   );
   let selectedIDs = $derived(new Set($selection.map((f) => f.id)));
-  let tree = $derived<TreeNode | null>(
-    viewMode === 'tree' && data ? buildTree(data.files) : null,
-  );
 
   let searchTimer: number | undefined;
-  // Guard async load() against assigning to torn-down state if the
-  // route unmounts mid-fetch. (#207)
   let aborted = false;
-  // Abort any in-flight load before issuing a new one so a stale earlier
-  // response (e.g. from a "a" search) can't overwrite a fresher one
-  // (e.g. "abc"). (#204)
   let inflight: AbortController | null = null;
 
-  async function load() {
+  async function loadFlat() {
     if (inflight) inflight.abort();
     const ctl = new AbortController();
     inflight = ctl;
     try {
-      const opts = viewMode === 'tree'
-        ? { all: true, status: status || undefined, search: search || undefined }
-        : { page, limit, status: status || undefined, search: search || undefined };
-      const next = await api.files(opts, ctl.signal);
+      const next = await api.files(
+        { page, limit, status: status || undefined, search: search || undefined },
+        ctl.signal,
+      );
       if (aborted || ctl.signal.aborted) return;
       data = next;
-      // Tree mode loads `all=true`, so the response is the authoritative
-      // set of known file ids. Drop any selection rows whose backing file
-      // has since been deleted/missing so cross-page selection doesn't
-      // carry dangling ids into Restore. (#212)
-      if (viewMode === 'tree') {
-        const present = new Set(next.files.map((f) => f.id));
-        pruneToIds(present);
-      }
     } catch (e) {
       if (aborted || ctl.signal.aborted) return;
       toast.error(String(e));
+    }
+  }
+
+  // Load the children at one prefix into the tree cache. Subsequent
+  // identical requests are no-ops while the first is in flight.
+  async function loadTreeNode(prefix: string) {
+    const cur = treeCache[prefix];
+    if (cur && (cur.state === 'loading' || cur.state === 'loaded')) return;
+    treeCache = { ...treeCache, [prefix]: { state: 'loading' } };
+    try {
+      const res = await api.filesTree({ prefix: prefix || undefined, status: status || undefined });
+      if (aborted) return;
+      treeCache = {
+        ...treeCache,
+        [prefix]: { state: 'loaded', folders: res.folders, files: res.files },
+      };
+      // If the user pre-selected this folder before it loaded, fan the
+      // selection out to the now-known descendants.
+      if (selectedFolderPaths.has(prefix)) {
+        await fanOutFolderSelection(prefix, true, /*alreadyTracked*/ true);
+      }
+    } catch (e) {
+      if (aborted) return;
+      treeCache = { ...treeCache, [prefix]: { state: 'error', error: String(e) } };
+    }
+  }
+
+  // Reset the lazy-tree state and reload root. Called on filter change
+  // and on initial mount.
+  async function reloadTreeRoot() {
+    treeCache = {};
+    expanded = new Set();
+    await loadTreeNode('');
+  }
+
+  async function load() {
+    if (viewMode === 'tree') {
+      await reloadTreeRoot();
+    } else {
+      await loadFlat();
     }
   }
 
@@ -87,12 +119,18 @@
   }
   function onSearch() {
     clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(() => { page = 1; load(); }, 250);
+    searchTimer = window.setTimeout(() => {
+      page = 1;
+      // Search is only wired through the flat list; flip mode if the
+      // user types into the search box while in tree view.
+      if (search && viewMode === 'tree') setView('flat');
+      else load();
+    }, 250);
   }
   function gotoPage(p: number) {
     if (p < 1 || p > totalPages) return;
     page = p;
-    load();
+    loadFlat();
   }
 
   function toggleAllVisible(e: Event) {
@@ -109,45 +147,86 @@
     }
   }
 
-  function toggleFolder(node: TreeNode, select: boolean) {
-    const files = collectFiles(node);
-    for (const f of files) {
-      const has = selectedIDs.has(f.id);
-      if (select && !has) toggle({ id: f.id, path: f.path });
-      else if (!select && has) toggle({ id: f.id, path: f.path });
+  // Resolve a folder selection toggle into per-file selection updates.
+  // The descendants of a folder may not be in the tree cache yet, so we
+  // ask the server for the full ID list. Used by the folder checkbox.
+  async function fanOutFolderSelection(prefix: string, select: boolean, alreadyTracked = false) {
+    if (!alreadyTracked) {
+      const next = new Set(selectedFolderPaths);
+      if (select) next.add(prefix);
+      else next.delete(prefix);
+      selectedFolderPaths = next;
+    }
+    try {
+      const res = await api.filesSubtreeIDs({ prefix, status: status || undefined });
+      if (res.truncated) {
+        toast.info(`Folder has ${res.total.toLocaleString()} files; selected the first ${res.ids.length.toLocaleString()}.`);
+      }
+      for (let i = 0; i < res.ids.length; i++) {
+        const id = res.ids[i];
+        const path = res.paths[i];
+        const has = selectedIDs.has(id);
+        if (select && !has) toggle({ id, path });
+        else if (!select && has) toggle({ id, path });
+      }
+      // Selection store is the source of truth from here on; clear our
+      // pending marker now that it's hydrated.
+      if (!select) {
+        const next = new Set(selectedFolderPaths);
+        next.delete(prefix);
+        selectedFolderPaths = next;
+      }
+    } catch (e) {
+      toast.error(String(e));
     }
   }
 
-  function toggleExpand(path: string) {
-    const next = new Set(expanded);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    expanded = next;
+  function onToggleFolder(folder: TreeFolderInfo, select: boolean) {
+    fanOutFolderSelection(folder.path, select);
   }
 
-  function expandAll() {
-    if (!tree) return;
-    const next = new Set<string>();
-    const stack: TreeNode[] = [tree];
+  // 0 = none selected, 1 = some, 2 = all. Computed from cached
+  // descendants; if the cache doesn't yet contain a folder we trust the
+  // pending-selection marker so the checkbox renders consistently.
+  function folderSelectionState(folderPath: string): 0 | 1 | 2 {
+    if (selectedFolderPaths.has(folderPath)) return 2;
+    const stack = [folderPath];
+    let total = 0, sel = 0;
     while (stack.length) {
-      const n = stack.pop()!;
-      if (n.isFolder) {
-        next.add(n.path);
-        for (const c of n.children) stack.push(c);
+      const p = stack.pop()!;
+      const entry = treeCache[p];
+      if (!entry || entry.state !== 'loaded') continue;
+      for (const fd of entry.folders) stack.push(fd.path);
+      for (const f of entry.files) {
+        total++;
+        if (selectedIDs.has(f.id)) sel++;
+      }
+    }
+    if (total === 0 || sel === 0) return 0;
+    if (sel === total) return 2;
+    return 1;
+  }
+
+  async function toggleExpand(path: string) {
+    const next = new Set(expanded);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+      // Lazy fetch: only fire the request the first time this folder
+      // opens. Subsequent expand toggles read from the cache.
+      if (!treeCache[path] || treeCache[path].state === 'error') {
+        loadTreeNode(path);
       }
     }
     expanded = next;
-  }
-
-  function collapseAll() {
-    expanded = new Set(['']);
   }
 
   async function retryRow(f: FileRow) {
     busy = true;
     try {
       await api.retryFile(f.id);
-      await load();
+      await invalidateRowParent(f.path);
     } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
   }
@@ -181,9 +260,25 @@
       await api.deleteFile(f.id);
       if (detail?.id === f.id) detail = null;
       if (selectedIDs.has(f.id)) toggle({ id: f.id, path: f.path });
-      await load();
+      await invalidateRowParent(f.path);
     } catch (e) { toast.error(String(e)); }
     finally { busy = false; }
+  }
+
+  // After a single-row mutation, re-fetch only the parent folder so the
+  // tree reflects the change without a full reload. Falls back to a
+  // global reload in flat mode.
+  async function invalidateRowParent(path: string) {
+    if (viewMode !== 'tree') {
+      await loadFlat();
+      return;
+    }
+    const parts = path.split(/[\\/]+/).filter((s: string) => s.length > 0);
+    parts.pop();
+    const parent = parts.join('/');
+    delete treeCache[parent];
+    treeCache = { ...treeCache };
+    await loadTreeNode(parent);
   }
 
   async function deleteSelected() {
@@ -217,6 +312,8 @@
   let allVisibleSelected = $derived(
     data !== null && data.files.length > 0 && data.files.every((f) => selectedIDs.has(f.id))
   );
+
+  let rootKids = $derived<FolderChildren>(treeCache[''] ?? { state: 'idle' });
 </script>
 
 <h1>Files</h1>
@@ -253,7 +350,12 @@
 
   <label class="grow">
     Search
-    <input type="text" placeholder="path contains…" bind:value={search} oninput={onSearch} />
+    <input
+      type="text"
+      placeholder={viewMode === 'tree' ? 'path contains… (switches to flat view)' : 'path contains…'}
+      bind:value={search}
+      oninput={onSearch}
+    />
   </label>
 
   {#if viewMode === 'flat'}
@@ -266,11 +368,6 @@
         <option value={250}>250</option>
       </select>
     </label>
-  {/if}
-
-  {#if viewMode === 'tree'}
-    <button type="button" onclick={expandAll}>Expand all</button>
-    <button type="button" onclick={collapseAll}>Collapse all</button>
   {/if}
 
   {#if status === 'failed'}
@@ -291,31 +388,50 @@
 
 {#if viewMode === 'tree'}
   <div class="card nopad">
-    {#if tree && tree.children.length > 0}
-      {#each tree.children as child (child.path)}
+    {#if rootKids.state === 'loading'}
+      <div class="muted empty">Loading…</div>
+    {:else if rootKids.state === 'error'}
+      <div class="empty err">{rootKids.error}</div>
+    {:else if rootKids.state === 'loaded'}
+      {#if rootKids.folders.length === 0 && rootKids.files.length === 0}
+        <div class="muted empty">No files</div>
+      {/if}
+      {#each rootKids.folders as fd (fd.path)}
         <FileTreeNode
-          node={child}
+          folder={fd}
           depth={0}
           {expanded}
           {selectedIDs}
+          cache={treeCache}
+          {folderSelectionState}
           onToggleExpand={toggleExpand}
           onToggleFile={(f) => toggle({ id: f.id, path: f.path })}
-          onToggleFolder={toggleFolder}
+          onToggleFolder={onToggleFolder}
           onOpenDetail={(f) => (detail = f)}
           onRetry={retryRow}
           onDelete={deleteRow}
           {busy}
         />
       {/each}
-    {:else if data}
-      <div class="muted empty">No files match</div>
+      {#each rootKids.files as f (f.id)}
+        <FileTreeNode
+          file={f}
+          depth={0}
+          {expanded}
+          {selectedIDs}
+          cache={treeCache}
+          {folderSelectionState}
+          onToggleExpand={toggleExpand}
+          onToggleFile={(ff) => toggle({ id: ff.id, path: ff.path })}
+          onToggleFolder={onToggleFolder}
+          onOpenDetail={(ff) => (detail = ff)}
+          onRetry={retryRow}
+          onDelete={deleteRow}
+          {busy}
+        />
+      {/each}
     {/if}
   </div>
-  {#if data}
-    <div class="pager">
-      <span class="muted">{data.total.toLocaleString()} files</span>
-    </div>
-  {/if}
 {:else}
   <div class="card nopad">
     <table>
@@ -461,5 +577,6 @@
   }
   .viewswitch button + button { border-left: 1px solid var(--border); }
   .empty { padding: 1.5rem; text-align: center; }
+  .empty.err { color: var(--err); }
   .small { font-size: 0.78rem; margin-left: 0.3rem; }
 </style>

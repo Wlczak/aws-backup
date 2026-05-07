@@ -1,19 +1,30 @@
 <script lang="ts">
-  import type { TreeNode } from '../lib/tree';
-  import { collectFiles } from '../lib/tree';
-  import type { FileRow } from '../lib/api';
+  import type { FileRow, TreeFolderInfo } from '../lib/api';
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import StatusBadge from './StatusBadge.svelte';
   import Self from './FileTreeNode.svelte';
 
+  // Lazy-loaded children for one folder. Each folder only fetches when
+  // the user expands it; the parent owns the cache and passes the
+  // matching slot in via `children`.
+  export type FolderChildren =
+    | { state: 'idle' }
+    | { state: 'loading' }
+    | { state: 'loaded'; folders: TreeFolderInfo[]; files: FileRow[] }
+    | { state: 'error'; error: string };
+
   type Props = {
-    node: TreeNode;
+    // Either folder OR file is set per node — never both.
+    folder?: TreeFolderInfo;
+    file?: FileRow;
     depth: number;
     expanded: Set<string>;
     selectedIDs: Set<number>;
+    cache: Record<string, FolderChildren>;
+    folderSelectionState: (path: string) => 0 | 1 | 2;
     onToggleExpand: (path: string) => void;
     onToggleFile: (f: FileRow) => void;
-    onToggleFolder: (folder: TreeNode, select: boolean) => void;
+    onToggleFolder: (folder: TreeFolderInfo, select: boolean) => void;
     onOpenDetail: (f: FileRow) => void;
     onRetry: (f: FileRow) => void;
     onDelete: (f: FileRow) => void;
@@ -21,24 +32,16 @@
   };
 
   let {
-    node, depth, expanded, selectedIDs,
+    folder, file, depth, expanded, selectedIDs, cache,
+    folderSelectionState,
     onToggleExpand, onToggleFile, onToggleFolder,
     onOpenDetail, onRetry, onDelete, busy,
   }: Props = $props();
 
-  // Folder selection state: 0 = none, 1 = partial, 2 = all.
-  let folderState = $derived.by(() => {
-    if (!node.isFolder) return 0;
-    const all = collectFiles(node);
-    if (all.length === 0) return 0;
-    let sel = 0;
-    for (const f of all) if (selectedIDs.has(f.id)) sel++;
-    if (sel === 0) return 0;
-    if (sel === all.length) return 2;
-    return 1;
-  });
-
-  let isOpen = $derived(node.isFolder && expanded.has(node.path));
+  let isFolder = $derived(folder !== undefined);
+  let isOpen = $derived(isFolder && folder !== undefined && expanded.has(folder.path));
+  let folderState = $derived(folder ? folderSelectionState(folder.path) : 0);
+  let kids = $derived<FolderChildren>(folder ? (cache[folder.path] ?? { state: 'idle' }) : { state: 'idle' });
 
   function folderCheckbox(el: HTMLInputElement | null) {
     if (!el) return;
@@ -46,12 +49,13 @@
   }
 
   function onFolderChange(e: Event) {
+    if (!folder) return;
     const check = (e.currentTarget as HTMLInputElement).checked;
-    onToggleFolder(node, check);
+    onToggleFolder(folder, check);
   }
 </script>
 
-{#if node.isFolder}
+{#if folder}
   <div class="row folder" style="padding-left: {depth * 18 + 8}px">
     <input
       type="checkbox"
@@ -59,37 +63,66 @@
       checked={folderState === 2}
       use:folderCheckbox
       onchange={onFolderChange}
-      aria-label={`Select folder ${node.path}`}
+      aria-label={`Select folder ${folder.path}`}
     />
     <button
       type="button"
       class="twisty"
-      onclick={() => onToggleExpand(node.path)}
+      onclick={() => onToggleExpand(folder!.path)}
       aria-label={isOpen ? 'Collapse' : 'Expand'}
     >{isOpen ? '▾' : '▸'}</button>
     <span class="icon" aria-hidden="true">📁</span>
-    <button type="button" class="name linkish folder-name" onclick={() => onToggleExpand(node.path)}>{node.name || '/'}</button>
-    <span class="meta muted mono">{node.fileCount} · {bytes(node.totalSize)}</span>
+    <button type="button" class="name linkish folder-name" onclick={() => onToggleExpand(folder!.path)}>{folder.name || '/'}</button>
+    <span class="meta muted mono">{folder.file_count} · {bytes(folder.total_size)}</span>
   </div>
   {#if isOpen}
-    {#each node.children as child (child.path)}
-      <Self
-        node={child}
-        depth={depth + 1}
-        {expanded}
-        {selectedIDs}
-        {onToggleExpand}
-        {onToggleFile}
-        {onToggleFolder}
-        {onOpenDetail}
-        {onRetry}
-        {onDelete}
-        {busy}
-      />
-    {/each}
+    {#if kids.state === 'loading'}
+      <div class="row child-status muted" style="padding-left: {(depth + 1) * 18 + 8}px">Loading…</div>
+    {:else if kids.state === 'error'}
+      <div class="row child-status err" style="padding-left: {(depth + 1) * 18 + 8}px">{kids.error}</div>
+    {:else if kids.state === 'loaded'}
+      {#if kids.folders.length === 0 && kids.files.length === 0}
+        <div class="row child-status muted" style="padding-left: {(depth + 1) * 18 + 8}px">empty</div>
+      {/if}
+      {#each kids.folders as sub (sub.path)}
+        <Self
+          folder={sub}
+          depth={depth + 1}
+          {expanded}
+          {selectedIDs}
+          {cache}
+          {folderSelectionState}
+          {onToggleExpand}
+          {onToggleFile}
+          {onToggleFolder}
+          {onOpenDetail}
+          {onRetry}
+          {onDelete}
+          {busy}
+        />
+      {/each}
+      {#each kids.files as f (f.id)}
+        <Self
+          file={f}
+          depth={depth + 1}
+          {expanded}
+          {selectedIDs}
+          {cache}
+          {folderSelectionState}
+          {onToggleExpand}
+          {onToggleFile}
+          {onToggleFolder}
+          {onOpenDetail}
+          {onRetry}
+          {onDelete}
+          {busy}
+        />
+      {/each}
+    {/if}
   {/if}
-{:else if node.file}
-  {@const f = node.file}
+{:else if file}
+  {@const f = file}
+  {@const fname = f.path.split(/[\\/]+/).filter((s: string) => s.length > 0).pop() ?? f.path}
   <div class="row file" class:picked={selectedIDs.has(f.id)} style="padding-left: {depth * 18 + 8}px">
     <input
       type="checkbox"
@@ -100,7 +133,7 @@
     />
     <span class="twisty-spacer"></span>
     <span class="icon" aria-hidden="true">📄</span>
-    <button type="button" class="name mono clickable linkish" onclick={() => onOpenDetail(f)}>{node.name}</button>
+    <button type="button" class="name mono clickable linkish" onclick={() => onOpenDetail(f)}>{fname}</button>
     <span class="meta mono muted">{bytes(f.size)}</span>
     <span class="meta muted">{formatDate(f.mtime)}</span>
     <StatusBadge status={f.status} />
@@ -174,4 +207,6 @@
   .row-action.danger { border-color: var(--err); color: var(--err); }
   .row-action.danger:hover:not(:disabled) { background: rgba(239, 80, 80, 0.1); }
   .small { font-size: 0.7rem; }
+  .child-status { font-style: italic; }
+  .child-status.err { color: var(--err); }
 </style>

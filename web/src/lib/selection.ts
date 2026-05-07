@@ -35,11 +35,3 @@ export function ids(): number[] {
   return get(selection).map((f) => f.id);
 }
 
-// pruneToIds drops any selected files whose id isn't in `present`. Call
-// after a load that returned the full set of currently-known file ids
-// (e.g. the tree view's `all=true` fetch) so deletions / missing-row
-// transitions on the backend don't leave dangling selections that the
-// Restore route then preloads as unknown paths. (#212)
-export function pruneToIds(present: Set<number>) {
-  selection.update((cur) => cur.filter((f) => present.has(f.id)));
-}
