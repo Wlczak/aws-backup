@@ -25,6 +25,15 @@
   let confirmTrigger = $state(false);
   let syncing = $state(false);
 
+  // Reset the double-click confirm if the user edits the inputs between
+  // the first and second click — otherwise switching path A → B fires the
+  // restore on B with no second confirm. (#209)
+  $effect(() => {
+    void raw;
+    void targetDir;
+    confirmTrigger = false;
+  });
+
   // Restore-status sync state.
   let scanBusy = $state(false);
   let scanResult = $state<RestoreScanResult | null>(null);
