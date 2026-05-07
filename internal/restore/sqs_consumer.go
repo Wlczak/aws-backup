@@ -371,7 +371,10 @@ func parseS3EventPayload(payload string) ([]restoreRecord, error) {
 	}
 	out := make([]restoreRecord, 0, len(ev.Records))
 	for _, r := range ev.Records {
-		key, err := url.QueryUnescape(r.S3.Object.Key)
+		// PathUnescape (not QueryUnescape) so a literal '+' in a real S3
+		// key isn't decoded to a space — S3 keys are URL path components,
+		// not form fields. (#249)
+		key, err := url.PathUnescape(r.S3.Object.Key)
 		if err != nil {
 			key = r.S3.Object.Key
 		}

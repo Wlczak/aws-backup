@@ -292,6 +292,13 @@ func (s *S3Storage) PutResumable(ctx context.Context, key string, body *os.File,
 	// part-level mismatch here means S3 saw bytes the local file
 	// no longer has. (#162: tightened scope at user request.)
 	for _, p := range existing {
+		// Honour ctx between part hashes so /api/cancel during a long
+		// resume verify (up to 10000 × 16 MiB SHA256 reads on a single
+		// goroutine) returns promptly instead of blocking until the
+		// full local file has been re-hashed. (#252)
+		if err := ctx.Err(); err != nil {
+			return PutResult{}, mu.UploadID, err
+		}
 		num := aws.ToInt32(p.PartNumber)
 		if num < 1 || num > totalParts {
 			continue

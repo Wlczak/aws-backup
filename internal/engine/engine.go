@@ -991,17 +991,21 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 			IfAbsent: true,
 		})
 	} else {
-		f, openErr := os.Open(item.zipTmpPath)
-		if openErr != nil {
-			return 0, 0, openErr
-		}
+		// Wrap in a closure so defer f.Close() fires even if a panic
+		// lands in uploadProgressCtx, the SDK call, or an Emit sink —
+		// the previous manual Close after the Put leaked the fd in that
+		// case. (#259)
 		// PutIfAbsent so a retry under the same key can't silently overwrite a
 		// prior DEEP_ARCHIVE object whose content may differ; the caller catches
-		// ErrAlreadyExists and advances the counter slot. uploadProgressCtx wraps
-		// the SDK's HTTP transport for byte-accurate progress including multipart
-		// part bodies. (#116)
-		res, err = e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, item.zipKey, item.zipSize), item.zipKey, f, item.zipSize)
-		f.Close()
+		// ErrAlreadyExists and advances the counter slot. (#116)
+		res, err = func() (storage.PutResult, error) {
+			f, openErr := os.Open(item.zipTmpPath)
+			if openErr != nil {
+				return storage.PutResult{}, openErr
+			}
+			defer f.Close()
+			return e.opts.Storage.PutIfAbsent(e.uploadProgressCtx(ctx, runID, item.zipKey, item.zipSize), item.zipKey, f, item.zipSize)
+		}()
 	}
 	if err != nil {
 		// Leave tmp in place — next run can reuse it instead of re-reading
@@ -1094,12 +1098,15 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 			FileID: ind.pf.ID,
 		})
 	} else {
-		f, openErr := os.Open(ind.tmpPath)
-		if openErr != nil {
-			return 0, openErr
-		}
-		res, err = e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, ind.key, ind.size), ind.key, f, ind.size)
-		f.Close()
+		// defer Close via closure so a panic mid-Put doesn't leak the fd. (#259)
+		res, err = func() (storage.PutResult, error) {
+			f, openErr := os.Open(ind.tmpPath)
+			if openErr != nil {
+				return storage.PutResult{}, openErr
+			}
+			defer f.Close()
+			return e.opts.Storage.Put(e.uploadProgressCtx(ctx, runID, ind.key, ind.size), ind.key, f, ind.size)
+		}()
 	}
 	if err != nil {
 		// Leave tmp in place — next run's stageIndividualGroup picks it up
@@ -1240,18 +1247,34 @@ func (e *Engine) uploadProgressCtx(ctx context.Context, runID int64, key string,
 	}
 	var sent atomic.Int64
 	var lastEmitNs atomic.Int64
+	var finalEmitted atomic.Bool
 	return storage.WithUploadProgress(ctx, func(n int64) {
 		total := sent.Add(n)
 		nowNs := e.opts.Now().UnixNano()
 		isFinal := size > 0 && total >= size
-		last := lastEmitNs.Load()
-		if !isFinal && last != 0 && nowNs-last < int64(defaultProgressInterval) {
+		// The final 100% sample is must-emit-once: a CAS race against
+		// another concurrent multipart callback used to drop it silently,
+		// leaving the UI stuck at the last throttled sample. Use a
+		// dedicated bool with CAS so exactly one caller wins. (#257)
+		if isFinal {
+			if finalEmitted.CompareAndSwap(false, true) {
+				lastEmitNs.Store(nowNs)
+				e.emitUploadProgress(runID, key, total, size)
+			}
 			return
 		}
-		if !lastEmitNs.CompareAndSwap(last, nowNs) {
-			return
+		for {
+			last := lastEmitNs.Load()
+			if last != 0 && nowNs-last < int64(defaultProgressInterval) {
+				return
+			}
+			if lastEmitNs.CompareAndSwap(last, nowNs) {
+				e.emitUploadProgress(runID, key, total, size)
+				return
+			}
+			// CAS lost: retry under the new last so a coarse-clock tie
+			// doesn't drop the emit and a real progress beat still fires.
 		}
-		e.emitUploadProgress(runID, key, total, size)
 	})
 }
 
