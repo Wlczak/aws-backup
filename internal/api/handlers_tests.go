@@ -64,8 +64,16 @@ func (s *Server) handleTestSource(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, testResult{OK: true, Message: "smb share reachable"})
 		case <-ctx.Done():
 			writeJSON(w, http.StatusOK, testResult{OK: false, Message: "smb dial timed out after 10s"})
-			// Don't leak the goroutine: it'll write to the buffered channel
-			// when the OS dial finally fails; the receive is dropped on GC.
+			// Don't leak the goroutine OR the SMB connection it may yet
+			// establish: drain the late result and close any successful
+			// dial so we don't pile up FDs + sessions per timed-out test
+			// against a slow share. (#267)
+			go func() {
+				res := <-ch
+				if res.err == nil && res.smb != nil {
+					_ = res.smb.Close()
+				}
+			}()
 		}
 	default:
 		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "unknown source type"})
