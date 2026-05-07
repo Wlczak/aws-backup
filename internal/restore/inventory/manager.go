@@ -418,7 +418,11 @@ func fetchManifest(ctx context.Context, client API, bucket, key string) (*manife
 	if err := json.Unmarshal(body, &mf); err != nil {
 		return nil, fmt.Errorf("decode manifest: %w", err)
 	}
-	if mf.SourceBucket != "" && mf.SourceBucket != bucket {
+	// Reject empty sourceBucket: every legitimate AWS-generated inventory
+	// manifest populates this field, and the empty-short-circuit would let
+	// an attacker with PutObject on _inventory/ bypass the cross-bucket
+	// guard added in #187 by simply omitting the field. (#270)
+	if mf.SourceBucket != bucket {
 		return nil, fmt.Errorf("manifest sourceBucket %q does not match read bucket %q",
 			mf.SourceBucket, bucket)
 	}
