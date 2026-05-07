@@ -92,6 +92,8 @@ export interface Status {
 }
 
 export interface RestoreEstimate {
+  // Counts of files that will actually generate fresh S3 RestoreObject
+  // calls — already_in_progress / already_restored buckets are excluded.
   file_count: number;
   total_bytes: number;
   request_fee_usd: number;
@@ -100,6 +102,10 @@ export interface RestoreEstimate {
   total_fee_usd: number;
   wait_hours_min: number;
   wait_hours_max: number;
+  already_in_progress_count: number;
+  already_in_progress_bytes: number;
+  already_restored_count: number;
+  already_restored_bytes: number;
   unknown_paths?: string[];
 }
 
@@ -360,6 +366,10 @@ export const api = {
       keys_already_available: number;
       files_affected: number;
       bytes_affected: number;
+      files_skipped_in_progress: number;
+      bytes_skipped_in_progress: number;
+      files_skipped_restored: number;
+      bytes_skipped_restored: number;
       unknown_paths?: string[];
       errors?: string[];
     }>('/api/restore/trigger', {

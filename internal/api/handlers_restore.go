@@ -27,15 +27,26 @@ type restoreEstimateRequest struct {
 }
 
 type restoreEstimateResponse struct {
-	FileCount       int64    `json:"file_count"`
-	TotalBytes      int64    `json:"total_bytes"`
-	RequestFeeUSD   float64  `json:"request_fee_usd"`
-	RetrievalFeeUSD float64  `json:"retrieval_fee_usd"`
-	EgressFeeUSD    float64  `json:"egress_fee_usd"`
-	TotalFeeUSD     float64  `json:"total_fee_usd"`
-	WaitHoursMin    int      `json:"wait_hours_min"`
-	WaitHoursMax    int      `json:"wait_hours_max"`
-	UnknownPaths    []string `json:"unknown_paths,omitempty"`
+	// FileCount / TotalBytes count only files that will actually be
+	// retrieved — i.e. exclude rows whose restore_status is already
+	// in_progress or restored. The cost fields are computed off these.
+	FileCount       int64   `json:"file_count"`
+	TotalBytes      int64   `json:"total_bytes"`
+	RequestFeeUSD   float64 `json:"request_fee_usd"`
+	RetrievalFeeUSD float64 `json:"retrieval_fee_usd"`
+	EgressFeeUSD    float64 `json:"egress_fee_usd"`
+	TotalFeeUSD     float64 `json:"total_fee_usd"`
+	WaitHoursMin    int     `json:"wait_hours_min"`
+	WaitHoursMax    int     `json:"wait_hours_max"`
+	// Already* fields surface files that would otherwise have been
+	// included in the trigger but are filtered out because S3 already
+	// has (or is producing) a thawed copy. Shown in the UI so the
+	// operator understands why FileCount may be smaller than expected.
+	AlreadyInProgressCount int64    `json:"already_in_progress_count"`
+	AlreadyInProgressBytes int64    `json:"already_in_progress_bytes"`
+	AlreadyRestoredCount   int64    `json:"already_restored_count"`
+	AlreadyRestoredBytes   int64    `json:"already_restored_bytes"`
+	UnknownPaths           []string `json:"unknown_paths,omitempty"`
 }
 
 // handleRestoreEstimate computes a cost breakdown from DB metadata only —
@@ -67,7 +78,7 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		pathsForFilter = append(pathsForFilter, p)
 	}
 
-	count, bytes, matched, err := s.deps.DB.RestoreEstimateStats(r.Context(), pathsForFilter, allFiles)
+	br, err := s.deps.DB.RestoreEstimateStats(r.Context(), pathsForFilter, allFiles)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -75,8 +86,8 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 
 	var unknown []string
 	if !allFiles {
-		matchedSet := make(map[string]struct{}, len(matched))
-		for _, p := range matched {
+		matchedSet := make(map[string]struct{}, len(br.MatchedPaths))
+		for _, p := range br.MatchedPaths {
 			matchedSet[p] = struct{}{}
 		}
 		for _, p := range pathsForFilter {
@@ -86,8 +97,8 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	gb := float64(bytes) / (1024 * 1024 * 1024)
-	request := float64(count) * pricePerThousandRequests / 1000
+	gb := float64(br.RetrievableBytes) / (1024 * 1024 * 1024)
+	request := float64(br.RetrievableCount) * pricePerThousandRequests / 1000
 	retrieval := gb * pricePerGBRetrieval
 	egressGB := gb
 	if egressGB > egressFreeGB {
@@ -98,15 +109,19 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	egress := egressGB * pricePerGBEgress
 
 	writeJSON(w, http.StatusOK, restoreEstimateResponse{
-		FileCount:       count,
-		TotalBytes:      bytes,
-		RequestFeeUSD:   round2(request),
-		RetrievalFeeUSD: round2(retrieval),
-		EgressFeeUSD:    round2(egress),
-		TotalFeeUSD:     round2(request + retrieval + egress),
-		WaitHoursMin:    retrievalHoursMin,
-		WaitHoursMax:    retrievalHoursMax,
-		UnknownPaths:    unknown,
+		FileCount:              br.RetrievableCount,
+		TotalBytes:             br.RetrievableBytes,
+		RequestFeeUSD:          round2(request),
+		RetrievalFeeUSD:        round2(retrieval),
+		EgressFeeUSD:           round2(egress),
+		TotalFeeUSD:            round2(request + retrieval + egress),
+		WaitHoursMin:           retrievalHoursMin,
+		WaitHoursMax:           retrievalHoursMax,
+		AlreadyInProgressCount: br.AlreadyInProgressCount,
+		AlreadyInProgressBytes: br.AlreadyInProgressBytes,
+		AlreadyRestoredCount:   br.AlreadyRestoredCount,
+		AlreadyRestoredBytes:   br.AlreadyRestoredBytes,
+		UnknownPaths:           unknown,
 	})
 }
 
@@ -120,13 +135,21 @@ type restoreTriggerRequest struct {
 }
 
 type restoreTriggerResponse struct {
-	KeysRequested         int      `json:"keys_requested"`
-	KeysAlreadyInProgress int      `json:"keys_already_in_progress"`
-	KeysAlreadyAvailable  int      `json:"keys_already_available"`
-	FilesAffected         int64    `json:"files_affected"`
-	BytesAffected         int64    `json:"bytes_affected"`
-	UnknownPaths          []string `json:"unknown_paths,omitempty"`
-	Errors                []string `json:"errors,omitempty"`
+	KeysRequested         int   `json:"keys_requested"`
+	KeysAlreadyInProgress int   `json:"keys_already_in_progress"`
+	KeysAlreadyAvailable  int   `json:"keys_already_available"`
+	FilesAffected         int64 `json:"files_affected"`
+	BytesAffected         int64 `json:"bytes_affected"`
+	// Files*Skipped* fields count rows the trigger filtered out because
+	// AWS already has (or is producing) a thawed copy. Surfaces in the
+	// UI so the operator understands why fewer keys were requested than
+	// they may have selected.
+	FilesSkippedInProgress int64    `json:"files_skipped_in_progress"`
+	BytesSkippedInProgress int64    `json:"bytes_skipped_in_progress"`
+	FilesSkippedRestored   int64    `json:"files_skipped_restored"`
+	BytesSkippedRestored   int64    `json:"bytes_skipped_restored"`
+	UnknownPaths           []string `json:"unknown_paths,omitempty"`
+	Errors                 []string `json:"errors,omitempty"`
 }
 
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
@@ -184,13 +207,17 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, restoreTriggerResponse{
-		KeysRequested:         stats.KeysRequested,
-		KeysAlreadyInProgress: stats.KeysAlreadyInProgress,
-		KeysAlreadyAvailable:  stats.KeysAlreadyAvailable,
-		FilesAffected:         stats.FilesAffected,
-		BytesAffected:         stats.BytesAffected,
-		UnknownPaths:          stats.UnknownPaths,
-		Errors:                stats.Errors,
+		KeysRequested:          stats.KeysRequested,
+		KeysAlreadyInProgress:  stats.KeysAlreadyInProgress,
+		KeysAlreadyAvailable:   stats.KeysAlreadyAvailable,
+		FilesAffected:          stats.FilesAffected,
+		BytesAffected:          stats.BytesAffected,
+		FilesSkippedInProgress: stats.FilesSkippedInProgress,
+		BytesSkippedInProgress: stats.BytesSkippedInProgress,
+		FilesSkippedRestored:   stats.FilesSkippedRestored,
+		BytesSkippedRestored:   stats.BytesSkippedRestored,
+		UnknownPaths:           stats.UnknownPaths,
+		Errors:                 stats.Errors,
 	})
 }
 

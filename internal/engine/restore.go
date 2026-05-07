@@ -106,8 +106,17 @@ type RestoreRequestStats struct {
 	FilesAffected int64
 	// BytesAffected is the cumulative size of the affected DB rows.
 	BytesAffected int64
-	UnknownPaths  []string
-	Errors        []string
+	// FilesSkippedInProgress / FilesSkippedRestored are matched rows we
+	// chose NOT to issue a fresh RestoreObject for because their local
+	// restore_status indicates AWS already has (or is producing) a
+	// thawed copy. Re-requesting would just extend the AWS expiry and
+	// re-bill retrieval, so we skip + surface a count to the operator.
+	FilesSkippedInProgress int64
+	BytesSkippedInProgress int64
+	FilesSkippedRestored   int64
+	BytesSkippedRestored   int64
+	UnknownPaths           []string
+	Errors                 []string
 }
 
 // RequestRestore issues a Glacier restore (s3:RestoreObject) for every
@@ -181,6 +190,20 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 				if !hit {
 					continue
 				}
+			}
+			// Skip rows AWS already has thawed (or is thawing) — issuing a
+			// fresh RestoreObject would just extend the standard-tier
+			// expiry and re-bill retrieval. Track the skipped totals so
+			// the UI can show "X files skipped because already thawed".
+			switch f.RestoreStatus {
+			case db.RestoreStatusInProgress:
+				stats.FilesSkippedInProgress++
+				stats.BytesSkippedInProgress += f.Size
+				continue
+			case db.RestoreStatusRestored:
+				stats.FilesSkippedRestored++
+				stats.BytesSkippedRestored += f.Size
+				continue
 			}
 			var key string
 			if f.ZipName != "" {

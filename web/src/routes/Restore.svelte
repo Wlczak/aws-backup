@@ -20,6 +20,10 @@
     keys_already_available: number;
     files_affected: number;
     bytes_affected: number;
+    files_skipped_in_progress: number;
+    bytes_skipped_in_progress: number;
+    files_skipped_restored: number;
+    bytes_skipped_restored: number;
     unknown_paths?: string[];
     errors?: string[];
   } | null>(null);
@@ -228,6 +232,8 @@
       if (r.keys_requested > 0) parts.push(`${r.keys_requested} requested`);
       if (r.keys_already_in_progress > 0) parts.push(`${r.keys_already_in_progress} already thawing`);
       if (r.keys_already_available > 0) parts.push(`${r.keys_already_available} already available`);
+      const skipped = r.files_skipped_in_progress + r.files_skipped_restored;
+      if (skipped > 0) parts.push(`${skipped.toLocaleString()} skipped (already thawed)`);
       const summary = parts.length > 0 ? parts.join(' · ') : 'no keys to restore';
       toast.success(`Retrieval ${summary} for ${r.files_affected.toLocaleString()} file(s).`);
     } catch (e) {
@@ -380,6 +386,17 @@
       <div><div class="muted">Files affected</div><div class="big">{triggerResult.files_affected.toLocaleString()}</div></div>
       <div><div class="muted">Data</div><div class="big">{bytes(triggerResult.bytes_affected)}</div></div>
     </div>
+    {#if triggerResult.files_skipped_in_progress > 0 || triggerResult.files_skipped_restored > 0}
+      <p class="muted small" style="margin-top: 0.75rem">
+        Skipped (already thawed, no fresh request issued):
+        {#if triggerResult.files_skipped_restored > 0}
+          {triggerResult.files_skipped_restored.toLocaleString()} restored ({bytes(triggerResult.bytes_skipped_restored)}){#if triggerResult.files_skipped_in_progress > 0}, {/if}
+        {/if}
+        {#if triggerResult.files_skipped_in_progress > 0}
+          {triggerResult.files_skipped_in_progress.toLocaleString()} thawing ({bytes(triggerResult.bytes_skipped_in_progress)})
+        {/if}
+      </p>
+    {/if}
     {#if triggerResult.unknown_paths?.length}
       <details style="margin-top: 0.75rem">
         <summary>{triggerResult.unknown_paths.length} unknown path(s)</summary>
@@ -428,6 +445,21 @@
         <tr><td><strong>Total</strong></td><td class="mono"><strong>${estimate.total_fee_usd.toFixed(2)}</strong></td></tr>
       </tbody>
     </table>
+
+    {#if estimate.already_in_progress_count > 0 || estimate.already_restored_count > 0}
+      <p class="muted small" style="margin-top: 0.75rem">
+        Excluded from this estimate:
+        {#if estimate.already_restored_count > 0}
+          <strong>{estimate.already_restored_count.toLocaleString()}</strong> file(s)
+          ({bytes(estimate.already_restored_bytes)}) already restored{#if estimate.already_in_progress_count > 0}, {/if}
+        {/if}
+        {#if estimate.already_in_progress_count > 0}
+          <strong>{estimate.already_in_progress_count.toLocaleString()}</strong> file(s)
+          ({bytes(estimate.already_in_progress_bytes)}) currently thawing
+        {/if}
+        — re-issuing on these would extend their AWS expiry and re-bill retrieval, so they're skipped.
+      </p>
+    {/if}
 
     {#if estimate.unknown_paths?.length}
       <div class="warn" style="margin-top: 0.75rem">
