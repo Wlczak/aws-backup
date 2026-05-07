@@ -136,10 +136,12 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				// rebound to the old zip, or the new bytes are lost). See
 				// #103.
 				if err := tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
-					"size":         e.Size,
-					"mtime":        e.ModTime,
-					"status":       StatusPending,
-					"last_seen_at": seenAt,
+					"size":                e.Size,
+					"mtime":               e.ModTime,
+					"status":              StatusPending,
+					"last_seen_at":        seenAt,
+					"restore_status":      "",
+					"restore_expires_at":  nil,
 				}).Error; err != nil {
 					return err
 				}
@@ -178,10 +180,12 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 			// See UpsertFileBatch for why md5/zip_name/s3_key/uploaded_at
 			// are preserved instead of cleared. (#103)
 			return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
-				"size":         size,
-				"mtime":        mtime,
-				"status":       StatusPending,
-				"last_seen_at": seenAt,
+				"size":               size,
+				"mtime":              mtime,
+				"status":             StatusPending,
+				"last_seen_at":       seenAt,
+				"restore_status":     "",
+				"restore_expires_at": nil,
 			}).Error
 		}
 		return tx.Model(&File{}).Where("id = ?", existing.ID).
