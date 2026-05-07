@@ -6,12 +6,49 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 )
+
+// blockedURLHosts are link-local / metadata-service hostnames an attacker
+// could point S3 / SQS endpoints at to exfiltrate signed AWS credentials.
+// (#274)
+var blockedURLHosts = map[string]struct{}{
+	"169.254.169.254":          {}, // AWS / GCP / Azure IMDS
+	"metadata.google.internal": {},
+	"metadata.azure.com":       {},
+	"metadata":                 {},
+	"100.100.100.200":          {}, // Alibaba Cloud IMDS
+}
+
+// validateEndpointURL ensures an operator-provided S3/SQS URL has a sane
+// scheme and host, and is not pointed at an IMDS-class metadata host.
+func validateEndpointURL(field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("%s scheme must be http or https (got %q)", field, u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("%s must include a host (got %q)", field, raw)
+	}
+	if _, blocked := blockedURLHosts[strings.ToLower(host)]; blocked {
+		return fmt.Errorf("%s host %q is blocked (metadata / link-local)", field, host)
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("%s host %q is link-local — refusing", field, host)
+	}
+	return nil
+}
 
 const (
 	SourceLocalDir = "localdir"
@@ -314,6 +351,9 @@ func (c Config) Validate() error {
 	// at config time so the foot-gun shows up in the Settings UI instead
 	// of the next backup run.
 	if c.S3.Endpoint != "" {
+		if err := validateEndpointURL("s3.endpoint", c.S3.Endpoint); err != nil {
+			errs = append(errs, err)
+		}
 		switch c.S3.StorageClass {
 		case StorageClassDeepArchive, StorageClassGlacier, StorageClassGlacierIR:
 			errs = append(errs, fmt.Errorf(
@@ -324,6 +364,9 @@ func (c Config) Validate() error {
 	}
 
 	if c.SQS.QueueURL != "" {
+		if err := validateEndpointURL("sqs.queue_url", c.SQS.QueueURL); err != nil {
+			errs = append(errs, err)
+		}
 		if c.SQS.Region == "" && c.S3.Region == "" {
 			errs = append(errs, errors.New("sqs.region is required when sqs.queue_url is set (or set s3.region as a fallback)"))
 		}
