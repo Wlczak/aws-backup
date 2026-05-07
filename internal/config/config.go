@@ -330,7 +330,7 @@ func (c Config) Validate() error {
 		if c.SQS.WaitTimeSeconds < 0 || c.SQS.WaitTimeSeconds > 20 {
 			errs = append(errs, fmt.Errorf("sqs.wait_time_seconds must be in [0,20] (got %d)", c.SQS.WaitTimeSeconds))
 		}
-		if c.SQS.MaxMessages < 0 || c.SQS.MaxMessages > 10 {
+		if c.SQS.MaxMessages < 1 || c.SQS.MaxMessages > 10 {
 			errs = append(errs, fmt.Errorf("sqs.max_messages must be in [1,10] (got %d)", c.SQS.MaxMessages))
 		}
 		if c.SQS.VisibilityTimeout < 0 {
