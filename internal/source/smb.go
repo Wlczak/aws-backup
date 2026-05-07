@@ -64,6 +64,15 @@ func NewSMB(cfg SMBConfig) (*SMB, error) {
 		return nil, fmt.Errorf("smb dial %s: %w", addr, err)
 	}
 
+	// Bound SMB2 negotiation + auth + mount so a peer that completes the
+	// TCP handshake but stalls during the next phases (firewall middlebox,
+	// slow DC, malicious server) can't hang the goroutine indefinitely.
+	// Cleared after success so steady-state I/O isn't subject to the
+	// connect-time deadline. (#235)
+	if derr := conn.SetDeadline(time.Now().Add(cfg.DialTimeout)); derr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("smb set deadline: %w", derr)
+	}
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     cfg.Username,
@@ -83,6 +92,7 @@ func NewSMB(cfg SMBConfig) (*SMB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("smb mount %s: %w", cfg.Share, err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 
 	return &SMB{cfg: cfg, conn: conn, sess: sess, share: share}, nil
 }
@@ -116,6 +126,14 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 	}
 	return fs.WalkDir(share.DirFS(""), start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Session-level failures mean a concurrent Open's
+			// reconnectLocked has Umounted the share we're iterating.
+			// Aborting (rather than swallowing as SkipDir) prevents a
+			// silently-truncated successful walk that would let Scan
+			// MarkMissing every undiscovered file. (#239)
+			if isSMBSessionError(err) {
+				return fmt.Errorf("smb walk: share lost mid-iteration at %q: %w", p, err)
+			}
 			slog.Warn("smb walk: per-entry error, skipping", "path", p, "err", err)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
@@ -271,6 +289,13 @@ func (s *SMB) reconnectLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
+	// Bound the SMB negotiation + auth + mount under reconnectLocked too:
+	// it runs while s.mu is held, so a hung peer would otherwise wedge
+	// every subsequent Open / Walk on the same *SMB. (#235)
+	if derr := newConn.SetDeadline(time.Now().Add(s.cfg.DialTimeout)); derr != nil {
+		newConn.Close()
+		return fmt.Errorf("set deadline: %w", derr)
+	}
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     s.cfg.Username,
@@ -289,6 +314,7 @@ func (s *SMB) reconnectLocked(ctx context.Context) error {
 		newConn.Close()
 		return fmt.Errorf("mount %s: %w", s.cfg.Share, err)
 	}
+	_ = newConn.SetDeadline(time.Time{})
 	// Swap in only after every step succeeded, so a partial failure
 	// can't leave s.share nil while s.conn/sess look healthy.
 	s.conn = newConn

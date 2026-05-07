@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -52,7 +53,13 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
-	resp, err := s.runSyncExistenceCheck(r.Context(), st)
+	// Detach the work ctx from the request: List+MarkPending* over a
+	// multi-million-key bucket can outlive a tab close, and a client
+	// disconnect that fires after List completes but mid-MarkPending
+	// would leave a partial reset. Server-controlled deadline bounds it. (#238)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
+	defer cancel()
+	resp, err := s.runSyncExistenceCheck(ctx, st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -71,7 +78,9 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
-	ctx := r.Context()
+	// Detach from request ctx — see handleSync. (#238)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+	defer cancel()
 
 	// Start from the same existence check handleSync does so callers get
 	// both views in one call; reuse helpers rather than duplicating logic.
@@ -180,7 +189,11 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx := r.Context()
+	// Detach from request ctx so a tab close mid-delete doesn't leave the
+	// DB out of sync with the bucket — the cloud-side Delete may have
+	// landed but MarkMissingByPaths needs to follow. (#238)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+	defer cancel()
 
 	indivKeys, err := s.deps.DB.ListIndividualS3Keys(ctx)
 	if err != nil {

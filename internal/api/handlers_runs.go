@@ -137,6 +137,14 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// applyMu serialises against the post-run goroutine's
+	// applyPendingSettings (and PUT /api/settings success path). Without
+	// it, BuildEngine could snapshot source/storage just as
+	// applyPendingSettings is closing them, leaving the new engine with
+	// torn-down clients. Acquired BEFORE runMu to match handlePutSettings'
+	// ordering. (#233)
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 	if s.currentRun != 0 {
