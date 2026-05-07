@@ -150,24 +150,54 @@ export interface Config {
 // once the run finishes.
 export type SettingsResponse = Config & { pending_apply: boolean };
 
+// ApiError distinguishes network, HTTP, and response-parse failures so
+// callers can branch on `e.kind` (e.g. show an "offline" UX for network).
+// `body` carries the first 200 chars of an unparseable response. (#203)
+export class ApiError extends Error {
+  kind: 'network' | 'http' | 'parse';
+  status?: number;
+  body?: string;
+  constructor(kind: 'network' | 'http' | 'parse', message: string, opts?: { status?: number; body?: string }) {
+    super(message);
+    this.name = 'ApiError';
+    this.kind = kind;
+    this.status = opts?.status;
+    this.body = opts?.body;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (e) {
+    throw new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (!resp.ok) {
     let msg = resp.statusText;
+    let body: string | undefined;
     try {
-      const body = await resp.json();
-      if (body?.error) msg = body.error;
-    } catch { /* ignore non-JSON error bodies */ }
-    throw new Error(`${resp.status}: ${msg}`);
+      const text = await resp.text();
+      body = text.slice(0, 200);
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.error) msg = parsed.error;
+      } catch { /* not JSON — keep statusText, surface body */ }
+    } catch { /* couldn't read body */ }
+    throw new ApiError('http', `${resp.status}: ${msg}`, { status: resp.status, body });
   }
   if (resp.status === 204) return undefined as T;
-  return (await resp.json()) as T;
+  try {
+    return (await resp.json()) as T;
+  } catch (e) {
+    throw new ApiError('parse', `invalid JSON response: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 export const api = {
