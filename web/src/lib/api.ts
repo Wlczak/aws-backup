@@ -111,6 +111,13 @@ export interface RestoreEstimate {
   unknown_paths?: string[];
 }
 
+export interface RestoreDownloadResponse {
+  files_written: number;
+  bytes_written: number;
+  skipped?: string[];
+  errors?: string[];
+}
+
 export interface TestResult {
   ok: boolean;
   message?: string;
@@ -380,6 +387,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths, days, tier }),
     }),
+  restoreDownload: (paths: string[], targetDir: string) =>
+    request<RestoreDownloadResponse>('/api/restore/download', {
+      method: 'POST',
+      body: JSON.stringify({ paths, target_dir: targetDir }),
+    }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {
       method: 'POST',
@@ -450,6 +462,7 @@ export function subscribeEvents(
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
+    'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so

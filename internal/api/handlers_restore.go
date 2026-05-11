@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -255,6 +256,18 @@ type restoreTriggerResponse struct {
 	Errors                 []string `json:"errors,omitempty"`
 }
 
+type restoreDownloadRequest struct {
+	Paths     []string `json:"paths"`
+	TargetDir string   `json:"target_dir"`
+}
+
+type restoreDownloadResponse struct {
+	FilesWritten int64    `json:"files_written"`
+	BytesWritten int64    `json:"bytes_written"`
+	Skipped      []string `json:"skipped,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
+}
+
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
 // AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
 // cost of a typo bounded; the operator can re-issue the restore later
@@ -327,6 +340,71 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		BytesSkippedRestored:   stats.BytesSkippedRestored,
 		UnknownPaths:           stats.UnknownPaths,
 		Errors:                 stats.Errors,
+	})
+}
+
+// handleRestoreDownload downloads matching files from S3 into a local
+// directory and verifies each written file against the MD5 stored in the
+// DB. Per-file checksum failures are returned in the response rather than
+// aborting the whole batch.
+func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
+	st := s.storage()
+	if st == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+		return
+	}
+
+	var req restoreDownloadRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+	if req.TargetDir == "" || !filepath.IsAbs(req.TargetDir) {
+		writeError(w, http.StatusBadRequest, errors.New("target_dir must be an absolute path"))
+		return
+	}
+
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — download would race engine writes; try again when idle"))
+		return
+	}
+
+	cfg, ok := s.snapshotConfig()
+	tmpDir := ""
+	if ok {
+		tmpDir = cfg.Backup.TmpDir
+	}
+
+	var emit engine.EventEmitter
+	if s.deps.Bus != nil {
+		emit = s.deps.Bus.Publish
+	}
+	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
+		DB:        s.deps.DB,
+		Storage:   st,
+		KeyPrefix: s.storagePrefix(),
+		TargetDir: req.TargetDir,
+		Paths:     req.Paths,
+		TmpDir:    tmpDir,
+		Emit:      emit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore download: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, restoreDownloadResponse{
+		FilesWritten: stats.FilesWritten,
+		BytesWritten: stats.BytesWritten,
+		Skipped:      stats.Skipped,
+		Errors:       stats.Errors,
 	})
 }
 

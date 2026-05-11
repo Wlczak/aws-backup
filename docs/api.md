@@ -35,6 +35,7 @@ GET    /api/s3/test                   HeadBucket round-trip
 # Restore (Glacier)
 POST   /api/restore/estimate          {paths: [], tier: bulk|standard} → cost + wait estimate (request fee counts actual S3 objects, zip groups count once)
 POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..30} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
+POST   /api/restore/download          {paths: [], target_dir: "/abs/path"} → downloads matching S3 objects / zip members to disk and verifies each file against files.md5
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
 
 # Sync / reconcile
@@ -78,3 +79,7 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `restore_request_progress` | processed, total, keys_requested, keys_already_thawed, errors |
 | `restore_request_complete` | total, keys_requested, keys_already_in_progress, keys_already_available, files_affected, bytes_affected, errors |
 | `restore_request_failed` | error, processed, total |
+| `restore_download_start` | total |
+| `restore_download_progress` | processed, total, path, files_written, bytes_written, errors, error |
+| `restore_download_complete` | files_written, bytes_written, errors |
+| `restore_download_failed` | files_written, bytes_written, errors, error |

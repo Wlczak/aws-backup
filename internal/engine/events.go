@@ -6,30 +6,30 @@ import "time"
 // field is a map so it serialises cleanly to JSON for SSE without
 // coupling this package to the API layer.
 type Event struct {
-	Type      string         `json:"type"`
-	RunID     int64          `json:"run_id,omitempty"`
-	At        time.Time      `json:"at"`
-	Data      map[string]any `json:"data,omitempty"`
+	Type  string         `json:"type"`
+	RunID int64          `json:"run_id,omitempty"`
+	At    time.Time      `json:"at"`
+	Data  map[string]any `json:"data,omitempty"`
 }
 
 // Event type constants — keep in sync with plan.md and the SSE layer.
 const (
-	EventScanStart       = "scan_start"
-	EventScanProgress    = "scan_progress"
-	EventScanComplete    = "scan_complete"
-	EventUploadPlan      = "upload_plan"
-	EventCopyProgress    = "copy_progress"
+	EventScanStart    = "scan_start"
+	EventScanProgress = "scan_progress"
+	EventScanComplete = "scan_complete"
+	EventUploadPlan   = "upload_plan"
+	EventCopyProgress = "copy_progress"
 	// EventRunLog is emitted as a burst on SSE connect to replay the
 	// in-flight run's persisted log lines, so clients that reconnect
 	// mid-run see the full history rather than just events from the
 	// moment of reconnection. (#130)
-	EventRunLog          = "run_log"
-	EventUploadStart     = "upload_start"
-	EventUploadProgress  = "upload_progress"
-	EventUploadComplete  = "upload_complete"
-	EventUploadFailed    = "upload_failed"
-	EventRunStart        = "run_start"
-	EventRunComplete     = "run_complete"
+	EventRunLog         = "run_log"
+	EventUploadStart    = "upload_start"
+	EventUploadProgress = "upload_progress"
+	EventUploadComplete = "upload_complete"
+	EventUploadFailed   = "upload_failed"
+	EventRunStart       = "run_start"
+	EventRunComplete    = "run_complete"
 	// DB-sync events accompany the post-run upload of the local index.db
 	// to S3 (triggered after Stop, Cancel, or normal completion). Reason
 	// in Data is "stop" | "cancel" | "complete" so the UI can label the
@@ -54,6 +54,14 @@ const (
 	EventRestoreRequestProgress = "restore_request_progress"
 	EventRestoreRequestComplete = "restore_request_complete"
 	EventRestoreRequestFailed   = "restore_request_failed"
+	// Restore-download events accompany RestoreToDir — a local download and
+	// verify pass that writes files beneath an operator-chosen directory.
+	// Progress is reported per restored file so the UI can show the user
+	// that the S3 download and hash check are still advancing.
+	EventRestoreDownloadStart    = "restore_download_start"
+	EventRestoreDownloadProgress = "restore_download_progress"
+	EventRestoreDownloadComplete = "restore_download_complete"
+	EventRestoreDownloadFailed   = "restore_download_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

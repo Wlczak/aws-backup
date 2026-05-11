@@ -211,6 +211,64 @@ func TestRestoreToDirChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestRestoreToDirEmitsProgress(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/notes.txt", "hello")
+
+	var events []Event
+	stats, err := RestoreToDir(ctx, RestoreOptions{
+		DB:        d,
+		Storage:   store,
+		KeyPrefix: "backups/",
+		TargetDir: t.TempDir(),
+		Paths:     []string{"/"},
+		Emit: func(ev Event) {
+			events = append(events, ev)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
+	}
+	if len(events) != 3 {
+		t.Fatalf("event count = %d want 3 (%+v)", len(events), events)
+	}
+	if events[0].Type != EventRestoreDownloadStart {
+		t.Fatalf("start type = %q", events[0].Type)
+	}
+	if got := events[0].Data["total"].(int); got != 1 {
+		t.Fatalf("start total = %d want 1", got)
+	}
+	if events[1].Type != EventRestoreDownloadProgress {
+		t.Fatalf("progress type = %q", events[1].Type)
+	}
+	if got := events[1].Data["processed"].(int); got != 1 {
+		t.Fatalf("progress processed = %d want 1", got)
+	}
+	if got := events[1].Data["files_written"].(int64); got != 1 {
+		t.Fatalf("progress files_written = %d want 1", got)
+	}
+	if events[2].Type != EventRestoreDownloadComplete {
+		t.Fatalf("complete type = %q", events[2].Type)
+	}
+	if got := events[2].Data["errors"].(int); got != 0 {
+		t.Fatalf("complete errors = %d want 0", got)
+	}
+}
+
 func TestRestoreToDirRejectsNonAbsTarget(t *testing.T) {
 	d := openTestDB(t)
 	_, err := RestoreToDir(context.Background(), RestoreOptions{

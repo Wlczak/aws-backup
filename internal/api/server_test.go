@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -77,6 +80,21 @@ func newTestServer(t *testing.T) (*httptest.Server, Deps) {
 	ts := httptest.NewServer(srv.Router())
 	t.Cleanup(ts.Close)
 	return ts, deps
+}
+
+func newRestoreDownloadServer(t *testing.T) (*httptest.Server, Deps, storage.Storage) {
+	t.Helper()
+	ts, deps := newTestServer(t)
+	store := storage.NewMemStorage()
+	deps.Storage = func() storage.Storage { return store }
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
+	return ts, deps, store
+}
+
+func hexMD5(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func getJSON(t *testing.T, ts *httptest.Server, path string, into any) *http.Response {
@@ -186,10 +204,10 @@ func TestSettingsPutInvokesApplySettings(t *testing.T) {
 	var gotPrev, gotNext config.Config
 	var applied bool
 	srv := &Server{deps: Deps{
-		DB:         deps.DB,
-		Bus:        deps.Bus,
-		Config:     deps.Config,
-		ConfigPath: deps.ConfigPath,
+		DB:          deps.DB,
+		Bus:         deps.Bus,
+		Config:      deps.Config,
+		ConfigPath:  deps.ConfigPath,
 		BuildEngine: deps.BuildEngine,
 		ApplySettings: func(prev, next config.Config) error {
 			gotPrev, gotNext, applied = prev, next, true
@@ -231,10 +249,10 @@ func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	origBucket := deps.Config.S3.Bucket
 
 	srv := &Server{deps: Deps{
-		DB:         deps.DB,
-		Bus:        deps.Bus,
-		Config:     deps.Config,
-		ConfigPath: deps.ConfigPath,
+		DB:          deps.DB,
+		Bus:         deps.Bus,
+		Config:      deps.Config,
+		ConfigPath:  deps.ConfigPath,
 		BuildEngine: deps.BuildEngine,
 		ApplySettings: func(prev, next config.Config) error {
 			return fmt.Errorf("synthetic hot-swap failure")
@@ -927,6 +945,114 @@ func TestRestoreEstimate(t *testing.T) {
 	}
 	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
 		t.Errorf("unknown_paths=%+v", got.UnknownPaths)
+	}
+}
+
+func TestRestoreDownloadOK(t *testing.T) {
+	ts, deps, store := newRestoreDownloadServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, err := deps.DB.UpsertFile(ctx, "notes.txt", 5, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, "backups/notes.txt", strings.NewReader("hello"), int64(len("hello"))); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(t.TempDir(), "restore-out")
+	body := fmt.Sprintf(`{"paths":["notes.txt"],"target_dir":%q}`, target)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	var got struct {
+		FilesWritten int64    `json:"files_written"`
+		BytesWritten int64    `json:"bytes_written"`
+		Skipped      []string `json:"skipped"`
+		Errors       []string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.FilesWritten != 1 {
+		t.Fatalf("files_written=%d want 1", got.FilesWritten)
+	}
+	if got.BytesWritten != int64(len("hello")) {
+		t.Fatalf("bytes_written=%d want %d", got.BytesWritten, len("hello"))
+	}
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors=%v want none", got.Errors)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "notes.txt"))
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("restored file = %q want %q", data, "hello")
+	}
+}
+
+func TestRestoreDownloadRejectsRelativeTarget(t *testing.T) {
+	ts, deps, _ := newRestoreDownloadServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, err := deps.DB.UpsertFile(ctx, "notes.txt", 5, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":["notes.txt"],"target_dir":"relative/path"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestRestoreDownloadRejectsEmptyPaths(t *testing.T) {
+	ts, _, _ := newRestoreDownloadServer(t)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":[],"target_dir":"/tmp/restore"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestRestoreDownloadRejectsWhileRunActive(t *testing.T) {
+	ts, deps, _ := newRestoreDownloadServer(t)
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 1
+	srv.runMu.Unlock()
+	ts.Config.Handler = srv.Router()
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":["notes.txt"],"target_dir":"/tmp/restore"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d want 409", resp.StatusCode)
 	}
 }
 

@@ -4,6 +4,7 @@
     api,
     subscribeEvents,
     type RestoreEstimate,
+    type RestoreDownloadResponse,
     type RestoreTier,
     type RestoreScanResult,
     type InventoryStatus,
@@ -29,6 +30,18 @@
     unknown_paths?: string[];
     errors?: string[];
   } | null>(null);
+  let downloadTargetDir = $state('');
+  let downloadResult = $state<RestoreDownloadResponse | null>(null);
+  let downloadBusy = $state(false);
+  let downloadProgress = $state<{
+    processed: number;
+    total: number;
+    files_written: number;
+    bytes_written: number;
+    path?: string;
+    error?: string;
+    errors: number;
+  } | null>(null);
   let loading = $state(false);
   let confirmTrigger = $state(false);
   let syncing = $state(false);
@@ -47,6 +60,12 @@
     confirmTrigger = false;
     estimate = null;
     triggerResult = null;
+  });
+
+  $effect(() => {
+    void raw;
+    void downloadTargetDir;
+    downloadResult = null;
   });
 
   // Restore-status sync state.
@@ -95,6 +114,30 @@
         triggerProgress = { processed: d.processed, total: d.total };
       } else if (type === 'restore_request_complete' || type === 'restore_request_failed') {
         triggerProgress = null;
+      } else if (type === 'restore_download_start') {
+        const d = data as { total: number };
+        downloadProgress = { processed: 0, total: d.total, files_written: 0, bytes_written: 0, errors: 0 };
+      } else if (type === 'restore_download_progress') {
+        const d = data as {
+          processed: number;
+          total: number;
+          files_written: number;
+          bytes_written: number;
+          path?: string;
+          error?: string;
+          errors: number;
+        };
+        downloadProgress = {
+          processed: d.processed,
+          total: d.total,
+          files_written: d.files_written,
+          bytes_written: d.bytes_written,
+          path: d.path,
+          error: d.error,
+          errors: d.errors,
+        };
+      } else if (type === 'restore_download_complete' || type === 'restore_download_failed') {
+        downloadProgress = null;
       }
     });
     return () => sub.close();
@@ -250,6 +293,33 @@
     } finally {
       loading = false;
       confirmTrigger = false;
+    }
+  }
+
+  async function doDownload() {
+    const p = paths();
+    if (p.length === 0) {
+      toast.error('enter at least one path');
+      return;
+    }
+    if (downloadTargetDir.trim() === '') {
+      toast.error('enter an absolute target directory');
+      return;
+    }
+    downloadBusy = true;
+    downloadResult = null;
+    try {
+      const r = await api.restoreDownload(p, downloadTargetDir.trim());
+      downloadResult = r;
+      if (r.errors?.length) {
+        toast.info(`Downloaded ${r.files_written.toLocaleString()} file(s) with ${r.errors.length} error(s).`);
+      } else {
+        toast.success(`Downloaded ${r.files_written.toLocaleString()} file(s) to ${downloadTargetDir.trim()}.`);
+      }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      downloadBusy = false;
     }
   }
 </script>
@@ -499,6 +569,91 @@
   </div>
 {/if}
 
+<div class="card">
+  <div class="label">Download restored files</div>
+  <p class="muted">
+    Download the selected paths from S3 into an absolute local directory and
+    verify each restored file against the MD5 stored in the index. Glacier
+    objects must already be available; otherwise the download reports a still
+    thawing error.
+  </p>
+  <div class="download-form">
+    <input
+      type="text"
+      bind:value={downloadTargetDir}
+      placeholder="/absolute/path/to/restore"
+      class="target-input mono"
+      aria-label="Target directory"
+    />
+    <button
+      class="primary"
+      onclick={doDownload}
+      disabled={downloadBusy || downloadTargetDir.trim() === ''}
+      type="button"
+    >
+      {#if downloadBusy}
+        Downloading…
+      {:else}
+        Download and verify
+      {/if}
+    </button>
+  </div>
+  {#if downloadProgress}
+    {@const pct = downloadProgress.total > 0
+      ? Math.min(100, Math.round((downloadProgress.processed / downloadProgress.total) * 100))
+      : 0}
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct} style="margin-top: 0.75rem">
+      <div class="fill" style="width: {pct}%"></div>
+    </div>
+    <p class="muted small" style="margin-top: 0.25rem">
+      {downloadProgress.files_written.toLocaleString()} written · {bytes(downloadProgress.bytes_written)} ·
+      {downloadProgress.processed.toLocaleString()} / {downloadProgress.total.toLocaleString()} checked
+      {#if downloadProgress.path} · {downloadProgress.path}{/if}
+      {#if downloadProgress.error} · {downloadProgress.error}{/if}
+    </p>
+  {/if}
+</div>
+
+{#if downloadResult}
+  <div class="card">
+    <div class="label">Download result</div>
+    <div class="stats">
+      <div>
+        <div class="muted">Files written</div>
+        <div class="big">{downloadResult.files_written.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">Bytes written</div>
+        <div class="big">{bytes(downloadResult.bytes_written)}</div>
+      </div>
+      <div>
+        <div class="muted">Skipped</div>
+        <div class="big">{downloadResult.skipped?.length ?? 0}</div>
+      </div>
+      <div>
+        <div class="muted">Errors</div>
+        <div class="big">{downloadResult.errors?.length ?? 0}</div>
+      </div>
+    </div>
+    {#if downloadResult.skipped?.length}
+      <details style="margin-top: 0.75rem">
+        <summary>{downloadResult.skipped.length} skipped path(s)</summary>
+        <ul class="mono small">
+          {#each downloadResult.skipped as p}<li>{p}</li>{/each}
+        </ul>
+      </details>
+    {/if}
+    {#if downloadResult.errors?.length}
+      <details open style="margin-top: 0.75rem" class="err">
+        <summary>{downloadResult.errors.length} error(s)</summary>
+        <ul class="mono small">
+          {#each downloadResult.errors as p}<li>{p}</li>{/each}
+        </ul>
+      </details>
+    {/if}
+  </div>
+{/if}
+
 <style>
   .err { color: var(--err); border-color: var(--err); }
   .warn { color: var(--warn); }
@@ -525,6 +680,24 @@
     min-width: 16rem;
     padding: 0.4rem 0.5rem;
     font-size: 0.9rem;
+  }
+  .download-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.75rem;
+  }
+  .target-input {
+    flex: 1 1 320px;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.9rem;
+    font-family: var(--mono, monospace);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 4px;
   }
   .small { font-size: 0.85rem; }
   details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
