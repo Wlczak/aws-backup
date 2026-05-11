@@ -4,6 +4,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
+| — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
 | — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
 | — | — | Zip archives now live in a dedicated `zips` table, `files.md5` stores per-file hashes again, and zip-backed files point at the archive row via `files.zip_id` |
 | — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |

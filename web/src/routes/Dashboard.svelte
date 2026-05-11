@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse } from '../lib/api';
+  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse, type DownloadJobSummary } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -8,6 +8,8 @@
 
   let status = $state<Status | null>(null);
   let stats = $state<FileStats | null>(null);
+  let downloadCurrent = $state<DownloadJobSummary | null>(null);
+  let downloadLast = $state<DownloadJobSummary | null>(null);
   let logLines = $state<string[]>([]);
   let scanSeen = $state(0);
   let scanNew = $state(0);
@@ -26,6 +28,7 @@
   // reloads. (#remember-completed)
   let seededFilesUploaded = $state(0);
   let triggering = $state(false);
+  let downloading = $state(false);
 
   type ItemProgress = {
     key: string;
@@ -133,7 +136,7 @@
   // calls/hour for no value. (#70)
   function scheduleNextPoll() {
     if (pollDestroyed) return;
-    const delay = status?.current ? 1000 : 30000;
+    const delay = status?.current || downloadCurrent ? 1000 : 30000;
     pollTimer = window.setTimeout(async () => {
       await refresh();
       scheduleNextPoll();
@@ -155,6 +158,8 @@
       // recovers the progress count instead of starting at 0.
       const liveUp = status?.current?.files_uploaded ?? 0;
       if (liveUp > seededFilesUploaded) seededFilesUploaded = liveUp;
+      downloadCurrent = status?.download_current ?? null;
+      downloadLast = status?.download_last ?? downloadLast;
     } catch (e) {
       toast.error(String(e));
     }
@@ -307,6 +312,106 @@
           error: payload.error ?? '',
         };
       }
+      if (type === 'download_mirror_scan_start') {
+        mergeDownload({
+          status: 'running',
+          phase: 'scan',
+          total: payload.total ?? 0,
+          scanned: 0,
+          present: 0,
+          missing: 0,
+          processed: 0,
+          files_written: 0,
+          bytes_written: 0,
+          errors: 0,
+          error_message: undefined,
+        });
+        downloading = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        refresh().then(() => scheduleNextPoll());
+      }
+      if (type === 'download_mirror_scan_progress') {
+        mergeDownload({
+          status: 'running',
+          phase: 'scan',
+          scanned: payload.scanned ?? downloadCurrent?.scanned ?? 0,
+          present: payload.present ?? downloadCurrent?.present ?? 0,
+          missing: payload.missing ?? downloadCurrent?.missing ?? 0,
+          total: payload.total ?? downloadCurrent?.total ?? 0,
+        });
+      }
+      if (type === 'download_mirror_scan_complete') {
+        mergeDownload({
+          status: 'running',
+          phase: 'download',
+          scanned: payload.scanned ?? downloadCurrent?.scanned ?? 0,
+          present: payload.present ?? downloadCurrent?.present ?? 0,
+          missing: payload.missing ?? downloadCurrent?.missing ?? 0,
+          total: payload.total ?? downloadCurrent?.total ?? 0,
+        });
+      }
+      if (type === 'download_mirror_start') {
+        mergeDownload({
+          status: 'running',
+          phase: 'download',
+          total: payload.total ?? downloadCurrent?.total ?? 0,
+          processed: 0,
+          files_written: 0,
+          bytes_written: 0,
+          errors: 0,
+        });
+      }
+      if (type === 'download_mirror_progress') {
+        mergeDownload({
+          status: 'running',
+          phase: 'download',
+          total: payload.total ?? downloadCurrent?.total ?? 0,
+          processed: payload.processed ?? downloadCurrent?.processed ?? 0,
+          files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
+          bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
+          errors: payload.errors ?? downloadCurrent?.errors ?? 0,
+        });
+      }
+      if (type === 'download_mirror_complete') {
+        finishDownload({
+          status: 'completed',
+          phase: 'complete',
+          total: payload.total ?? downloadCurrent?.total ?? 0,
+          processed: payload.processed ?? downloadCurrent?.processed ?? 0,
+          files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
+          bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
+          errors: payload.errors ?? downloadCurrent?.errors ?? 0,
+        });
+        downloading = false;
+        if (pollTimer) clearTimeout(pollTimer);
+        refresh().then(() => scheduleNextPoll());
+      }
+      if (type === 'download_mirror_scan_failed') {
+        finishDownload({
+          status: 'failed',
+          phase: 'failed',
+          files_written: downloadCurrent?.files_written ?? 0,
+          bytes_written: downloadCurrent?.bytes_written ?? 0,
+          errors: downloadCurrent?.errors ?? 0,
+          error_message: payload.error ?? 'full download failed during scan',
+        });
+        downloading = false;
+        if (pollTimer) clearTimeout(pollTimer);
+        refresh().then(() => scheduleNextPoll());
+      }
+      if (type === 'download_mirror_failed') {
+        finishDownload({
+          status: 'failed',
+          phase: 'failed',
+          files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
+          bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
+          errors: payload.errors ?? downloadCurrent?.errors ?? 0,
+          error_message: payload.error ?? 'full download failed',
+        });
+        downloading = false;
+        if (pollTimer) clearTimeout(pollTimer);
+        refresh().then(() => scheduleNextPoll());
+      }
       if (type === 'run_complete') scanActive = false;
       // Skip high-frequency progress events: they fire continuously per
       // upload thread and would otherwise allocate + re-render the log
@@ -346,6 +451,64 @@
     if (reason === 'stop') return 'after stop';
     if (reason === 'cancel') return 'after cancel';
     return 'after run';
+  }
+
+  function downloadBase(): DownloadJobSummary {
+    return {
+      id: 0,
+      started_at: new Date().toISOString(),
+      status: 'running',
+      phase: 'scan',
+      download_dir: '',
+      total: 0,
+      scanned: 0,
+      present: 0,
+      missing: 0,
+      processed: 0,
+      files_written: 0,
+      bytes_written: 0,
+      errors: 0,
+    };
+  }
+
+  function mergeDownload(patch: Partial<DownloadJobSummary>) {
+    downloadCurrent = { ...downloadBase(), ...(downloadCurrent ?? {}), ...patch };
+  }
+
+  function finishDownload(patch: Partial<DownloadJobSummary> & { status: 'completed' | 'failed' }) {
+    const base = downloadCurrent ?? downloadBase();
+    downloadLast = { ...base, ...patch, finished_at: new Date().toISOString() };
+    downloadCurrent = null;
+  }
+
+  function downloadStatusLine(job: DownloadJobSummary | null | undefined): string {
+    if (!job) return 'Idle';
+    if (job.status === 'failed') {
+      return `Failed · ${job.error_message ?? 'full download failed'}`;
+    }
+    if (job.phase === 'scan') {
+      return `Scanning mirror · ${job.scanned.toLocaleString()} / ${job.total.toLocaleString()} row(s)`;
+    }
+    if (job.phase === 'download') {
+      const pct = job.total > 0 ? Math.min(100, Math.round((job.processed / job.total) * 100)) : 0;
+      return `Downloading missing files · ${job.processed.toLocaleString()} / ${job.total.toLocaleString()} checked · ${pct}%`;
+    }
+    if (job.status === 'completed') {
+      const suffix = job.errors > 0 ? ` · ${job.errors.toLocaleString()} error(s)` : '';
+      return `Complete · ${job.files_written.toLocaleString()} written · ${bytes(job.bytes_written)}${suffix}`;
+    }
+    return 'Running';
+  }
+
+  function downloadProgressValue(job: DownloadJobSummary | null | undefined): number {
+    if (!job || job.total <= 0) return 0;
+    if (job.phase === 'scan') {
+      return Math.min(100, Math.round((job.scanned / job.total) * 100));
+    }
+    if (job.phase === 'download') {
+      return Math.min(100, Math.round((job.processed / job.total) * 100));
+    }
+    return job.status === 'completed' ? 100 : 0;
   }
 
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
@@ -536,6 +699,18 @@
       syncing = false;
     }
   }
+
+  async function downloadFullMirror() {
+    if (downloading || status?.current || downloadCurrent) return;
+    downloading = true;
+    try {
+      const resp = await api.downloadFull();
+      toast.success(`Full download started (job #${resp.download_id}).`);
+    } catch (e) {
+      toast.error(String(e));
+      downloading = false;
+    }
+  }
 </script>
 
 <h1>Dashboard</h1>
@@ -600,6 +775,8 @@
     <div class="label">Index</div>
     {#if stats}
       {@const restored = stats.by_restore_status?.['restored'] ?? 0}
+      {@const mirrored = stats.by_download_present?.['present'] ?? 0}
+      {@const notMirrored = stats.by_download_present?.['missing'] ?? 0}
       <div class="big">{stats.total_count.toLocaleString()} files</div>
       <div class="muted">{bytes(stats.total_size)} total</div>
       <div class="pills">
@@ -609,6 +786,9 @@
       </div>
       <div class="muted small" style="margin-top: 0.4rem">
         {restored.toLocaleString()} restored file(s)
+      </div>
+      <div class="muted small" style="margin-top: 0.2rem">
+        Download mirror: {mirrored.toLocaleString()} present, {notMirrored.toLocaleString()} missing
       </div>
     {/if}
   </div>
@@ -623,6 +803,48 @@
     <div class="run-actions">
       <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
         {syncing ? 'Syncing…' : 'Sync with S3'}
+      </button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Full download</div>
+    <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
+      Uses the configured download directory from Settings, scans the local mirror,
+      updates the download mirror columns, and fetches only the files that are still missing.
+    </div>
+    <div class="sync-info" style="margin-bottom: 0.5rem">
+      {#if downloadCurrent}
+        {downloadStatusLine(downloadCurrent)}
+      {:else if downloadLast}
+        {downloadStatusLine(downloadLast)}
+      {:else}
+        Idle
+      {/if}
+    </div>
+    {#if downloadCurrent}
+      {@const pct = downloadProgressValue(downloadCurrent)}
+      <div class="bar" style="margin-top: 0.5rem">
+        <div class="fill" style="width: {pct}%"></div>
+      </div>
+      <div class="db-sync-foot mono" style="margin-top: 0.25rem">
+        {#if downloadCurrent.phase === 'scan'}
+          Scanning {downloadCurrent.scanned.toLocaleString()} / {downloadCurrent.total.toLocaleString()} row(s)
+        {:else}
+          Downloading {downloadCurrent.processed.toLocaleString()} / {downloadCurrent.total.toLocaleString()} file(s)
+        {/if}
+        · {downloadCurrent.files_written.toLocaleString()} written · {bytes(downloadCurrent.bytes_written)}
+        {#if downloadCurrent.errors > 0} · {downloadCurrent.errors.toLocaleString()} error(s){/if}
+      </div>
+    {/if}
+    <div class="run-actions">
+      <button
+        class="primary"
+        onclick={downloadFullMirror}
+        type="button"
+        disabled={downloading || !!status?.current || !!downloadCurrent}
+      >
+        {downloading ? 'Starting…' : 'Run full download'}
       </button>
     </div>
   </div>

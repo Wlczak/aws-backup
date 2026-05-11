@@ -104,6 +104,9 @@ type Server struct {
 	// runWg tracks engine goroutines spawned by handleTriggerRun so the
 	// CLI can wait for them on shutdown before tearing down DB / storage.
 	runWg sync.WaitGroup
+	// downloadWg tracks the background full-download job so Shutdown can
+	// wait for its goroutine before tearing down DB / storage.
+	downloadWg sync.WaitGroup
 	// pendingConfig holds a validated, on-disk-persisted Config that the
 	// operator saved while a backup run was in flight. The post-run
 	// goroutine drains it and calls ApplySettings + updateConfig once the
@@ -117,6 +120,12 @@ type Server struct {
 	// by the queued apply. Always acquired AFTER any runMu acquisition has
 	// been released. (#255)
 	applyMu sync.Mutex
+	// downloadMu guards currentDownload/currentDownloadCancel/lastDownload.
+	downloadMu            sync.Mutex
+	downloadSeq           atomic.Int64
+	currentDownload       *downloadSummary
+	currentDownloadCancel context.CancelFunc
+	lastDownload          *downloadSummary
 	// shutdownCh is closed once at the top of Shutdown. The post-run
 	// DB-sync goroutine watches it so an in-flight DB upload aborts
 	// promptly when the service is shutting down — otherwise a 600 s
@@ -249,10 +258,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.currentRunCancel()
 	}
 	s.runMu.Unlock()
+	s.downloadMu.Lock()
+	if s.currentDownloadCancel != nil {
+		s.currentDownloadCancel()
+	}
+	s.downloadMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
 		s.runWg.Wait()
+		s.downloadWg.Wait()
 		close(done)
 	}()
 	select {
@@ -320,6 +335,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
 		r.Post("/restore/scan/full", s.handleRestoreScanFull)
 		r.Post("/restore/scan/pending", s.handleRestoreScanPending)
+		r.Post("/download/full", s.handleDownloadFull)
 		r.Get("/restore/inventory", s.handleInventoryGet)
 		r.Put("/restore/inventory", s.handleInventoryPut)
 		r.Delete("/restore/inventory", s.handleInventoryDelete)

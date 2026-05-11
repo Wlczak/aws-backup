@@ -82,6 +82,7 @@ export interface RunDetail {
 export interface FileStats {
   by_status: Record<string, number>;
   by_restore_status: Record<string, number>;
+  by_download_present: Record<string, number>;
   restore_soonest_expires_at?: string;
   total_count: number;
   total_size: number;
@@ -90,7 +91,31 @@ export interface FileStats {
 export interface Status {
   current?: Run;
   last?: Run;
+  download_current?: DownloadJobSummary;
+  download_last?: DownloadJobSummary;
   stop_requested?: boolean;
+}
+
+export interface DownloadJobSummary {
+  id: number;
+  started_at: string;
+  finished_at?: string;
+  status: 'running' | 'completed' | 'failed';
+  phase: 'scan' | 'download' | 'complete' | 'failed';
+  download_dir: string;
+  total: number;
+  scanned: number;
+  present: number;
+  missing: number;
+  processed: number;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error_message?: string;
+}
+
+export interface DownloadFullResponse {
+  download_id: number;
 }
 
 export interface RestoreEstimate {
@@ -186,6 +211,7 @@ export interface S3Config {
 export interface BackupConfig {
   chunk_size: number;
   tmp_dir: string;
+  download_dir: string;
   schedule: string;
   zip_threshold: number;
   min_zip_dir_files: number;
@@ -402,6 +428,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ paths, target_dir: targetDir }),
     }),
+  downloadFull: () =>
+    request<DownloadFullResponse>('/api/download/full', {
+      method: 'POST',
+    }),
   restoreDownloadEstimate: (paths: string[]) =>
     request<RestoreDownloadEstimate>('/api/restore/download/estimate', {
       method: 'POST',
@@ -478,6 +508,8 @@ export function subscribeEvents(
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
     'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',
+    'download_mirror_scan_start', 'download_mirror_scan_progress', 'download_mirror_scan_complete', 'download_mirror_scan_failed',
+    'download_mirror_start', 'download_mirror_progress', 'download_mirror_complete', 'download_mirror_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so

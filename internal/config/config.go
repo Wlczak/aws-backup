@@ -133,6 +133,7 @@ type S3Config struct {
 type BackupConfig struct {
 	ChunkSize      int    `json:"chunk_size"`
 	TmpDir         string `json:"tmp_dir"`
+	DownloadDir    string `json:"download_dir"`
 	Schedule       string `json:"schedule"`
 	ZipThreshold   int    `json:"zip_threshold"`
 	MinZipDirFiles int    `json:"min_zip_dir_files"`
@@ -199,6 +200,7 @@ func Default() Config {
 		Backup: BackupConfig{
 			ChunkSize:        10,
 			TmpDir:           filepath.Join(os.TempDir(), "aws-backup"),
+			DownloadDir:      filepath.Join(os.TempDir(), "aws-backup-download"),
 			Schedule:         "",
 			ZipThreshold:     50,
 			MinZipDirFiles:   20,
@@ -239,11 +241,12 @@ func Load(path string) (Config, error) {
 func applyBackfills(data []byte, cfg *Config) {
 	var probe struct {
 		Backup struct {
-			EnableZipIndex   *bool `json:"enable_zip_index"`
-			CopyThreads      *int  `json:"copy_threads"`
-			UploadThreads    *int  `json:"upload_threads"`
-			LogRetentionDays *int  `json:"log_retention_days"`
-			LogMaxPerRun     *int  `json:"log_max_per_run"`
+			EnableZipIndex   *bool   `json:"enable_zip_index"`
+			CopyThreads      *int    `json:"copy_threads"`
+			UploadThreads    *int    `json:"upload_threads"`
+			LogRetentionDays *int    `json:"log_retention_days"`
+			LogMaxPerRun     *int    `json:"log_max_per_run"`
+			DownloadDir      *string `json:"download_dir"`
 		} `json:"backup"`
 	}
 	_ = json.Unmarshal(data, &probe)
@@ -261,6 +264,9 @@ func applyBackfills(data []byte, cfg *Config) {
 	}
 	if probe.Backup.LogMaxPerRun == nil {
 		cfg.Backup.LogMaxPerRun = 5000
+	}
+	if probe.Backup.DownloadDir == nil {
+		cfg.Backup.DownloadDir = filepath.Join(os.TempDir(), "aws-backup-download")
 	}
 }
 
@@ -440,6 +446,11 @@ func (c Config) Validate() error {
 	}
 	if c.Backup.TmpDir == "" {
 		errs = append(errs, errors.New("backup.tmp_dir is required"))
+	}
+	if c.Backup.DownloadDir == "" {
+		errs = append(errs, errors.New("backup.download_dir is required"))
+	} else if !filepath.IsAbs(c.Backup.DownloadDir) {
+		errs = append(errs, fmt.Errorf("backup.download_dir must be an absolute path (got %q)", c.Backup.DownloadDir))
 	}
 	if c.Backup.Schedule != "" {
 		sched, err := cron.ParseStandard(c.Backup.Schedule)

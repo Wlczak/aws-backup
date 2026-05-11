@@ -398,6 +398,56 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestDownloadMirrorBatchAndStats(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	keep, err := d.UpsertFile(ctx, "keep.txt", 10, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := d.UpsertFile(ctx, "missing.txt", 20, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkedAt := now.Add(time.Minute)
+	if err := d.MarkDownloadMirrorBatch(ctx, []int64{keep.ID}, []int64{missing.ID}, checkedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		switch f.Path {
+		case "keep.txt":
+			if !f.DownloadPresent || f.DownloadCheckedAt == nil || !f.DownloadCheckedAt.Equal(checkedAt) {
+				t.Fatalf("keep row not marked present: %+v", f)
+			}
+		case "missing.txt":
+			if f.DownloadPresent || f.DownloadCheckedAt == nil || !f.DownloadCheckedAt.Equal(checkedAt) {
+				t.Fatalf("missing row not marked missing: %+v", f)
+			}
+		default:
+			t.Fatalf("unexpected row %q", f.Path)
+		}
+	}
+
+	stats, err := d.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.ByDownloadPresent["present"]; got != 1 {
+		t.Fatalf("present count = %d, want 1", got)
+	}
+	if got := stats.ByDownloadPresent["missing"]; got != 1 {
+		t.Fatalf("missing count = %d, want 1", got)
+	}
+}
+
 func TestRunLifecycle(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

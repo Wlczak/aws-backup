@@ -562,7 +562,6 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 // corrupt entry doesn't poison the rest of the archive.
 func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File, processed, total int, emit EventEmitter) (written, bytes int64, errs []string, nextProcessed int) {
 	key := pathutil.JoinKey(opts.KeyPrefix, zipName)
-
 	tmp, err := os.CreateTemp(opts.TmpDir, "aws-backup-restore-*.zip")
 	if err != nil {
 		errs = append(errs, zipName+": create temp: "+err.Error())
@@ -570,9 +569,7 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-
-	rc, err := opts.Storage.Get(ctx, key)
-	if err != nil {
+	if err := downloadZipToFile(ctx, opts.Storage, key, tmp); err != nil {
 		tmp.Close()
 		if errors.Is(err, storage.ErrGlacierThawing) {
 			errs = append(errs, zipName+": get zip "+key+": still thawing from glacier: "+err.Error())
@@ -581,19 +578,21 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		}
 		return written, bytes, errs, processed
 	}
-	if _, err := io.Copy(tmp, rc); err != nil {
-		rc.Close()
-		tmp.Close()
-		errs = append(errs, zipName+": download zip "+key+": "+err.Error())
-		return written, bytes, errs, processed
-	}
-	rc.Close()
 	if err := tmp.Close(); err != nil {
 		errs = append(errs, zipName+": close temp zip: "+err.Error())
 		return written, bytes, errs, processed
 	}
+	return extractZipMembers(ctx, target, zipName, tmpPath, members, processed, total, emit, opts.SkipChecksum, nil)
+}
 
-	zr, err := zip.OpenReader(tmpPath)
+// extractZipMembers opens a zip file already present on disk and
+// extracts every matching member listed in members. Errors are returned
+// per-member so a corrupt entry doesn't poison the rest of the archive.
+func extractZipMembers(ctx context.Context, target, zipName, zipPath string, members []db.File, processed, total int, emit EventEmitter, skipChecksum bool, onWritten func(db.File) error) (written, bytes int64, errs []string, nextProcessed int) {
+	if emit == nil {
+		emit = DiscardEvents
+	}
+	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		errs = append(errs, zipName+": open zip: "+err.Error())
 		return written, bytes, errs, processed
@@ -706,7 +705,7 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 			continue
 		}
 		expected := m.MD5
-		if opts.SkipChecksum {
+		if skipChecksum {
 			expected = ""
 		}
 		n, err := writeFromReader(dst, entry, expected)
@@ -740,6 +739,25 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		written++
 		bytes += n
 		processed++
+		if onWritten != nil {
+			if err := onWritten(m); err != nil {
+				errs = append(errs, m.Path+": "+err.Error())
+				emit(Event{
+					Type: EventRestoreDownloadProgress,
+					At:   time.Now(),
+					Data: map[string]any{
+						"path":          m.Path,
+						"processed":     processed,
+						"total":         total,
+						"files_written": written,
+						"bytes_written": bytes,
+						"errors":        len(errs),
+						"error":         err.Error(),
+					},
+				})
+				continue
+			}
+		}
 		emit(Event{
 			Type: EventRestoreDownloadProgress,
 			At:   time.Now(),
@@ -754,6 +772,20 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		})
 	}
 	return written, bytes, errs, processed
+}
+
+// downloadZipToFile streams key to dst, which must already be a writable
+// file on disk. It leaves the caller responsible for closing dst.
+func downloadZipToFile(ctx context.Context, s storage.Storage, key string, dst *os.File) error {
+	rc, err := s.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	if _, err := io.Copy(dst, rc); err != nil {
+		return err
+	}
+	return nil
 }
 
 // writeFromReader copies src to a new file at dst (creating parent

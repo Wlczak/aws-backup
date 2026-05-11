@@ -76,18 +76,20 @@ const (
 
 // File is the GORM model for the `files` table.
 type File struct {
-	ID            int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	Path          string    `gorm:"column:path;uniqueIndex;not null"`
-	Size          int64     `gorm:"column:size;not null"`
-	MTime         time.Time `gorm:"column:mtime;not null"`
-	MD5           string    `gorm:"column:md5"`
-	Status        string    `gorm:"column:status;not null;default:'pending';index"`
-	ZipID         *int64    `gorm:"column:zip_id;index"`
-	ZipName       string    `gorm:"column:zip_name;index"`
-	S3Key         string    `gorm:"column:s3_key"`
-	UploadedAt    time.Time `gorm:"column:uploaded_at"`
-	LastSeenAt    time.Time `gorm:"column:last_seen_at;not null;index"`
-	RestoreStatus string    `gorm:"column:restore_status;index"`
+	ID                int64      `gorm:"column:id;primaryKey;autoIncrement"`
+	Path              string     `gorm:"column:path;uniqueIndex;not null"`
+	Size              int64      `gorm:"column:size;not null"`
+	MTime             time.Time  `gorm:"column:mtime;not null"`
+	MD5               string     `gorm:"column:md5"`
+	Status            string     `gorm:"column:status;not null;default:'pending';index"`
+	ZipID             *int64     `gorm:"column:zip_id;index"`
+	ZipName           string     `gorm:"column:zip_name;index"`
+	S3Key             string     `gorm:"column:s3_key"`
+	UploadedAt        time.Time  `gorm:"column:uploaded_at"`
+	LastSeenAt        time.Time  `gorm:"column:last_seen_at;not null;index"`
+	RestoreStatus     string     `gorm:"column:restore_status;index"`
+	DownloadPresent   bool       `gorm:"column:download_present;not null;default:false;index"`
+	DownloadCheckedAt *time.Time `gorm:"column:download_checked_at"`
 	// restoreExpiresAtRaw is the untyped TEXT we read out of SQLite —
 	// the column has documented format drift (RFC3339 vs. Go-default vs.
 	// SQLite-default) that breaks glebarez/sqlite's single-layout Scan
@@ -847,6 +849,7 @@ func (db *DB) ListSubtreeIDs(ctx context.Context, prefix, statusFilter string, m
 type FileStats struct {
 	ByStatus          map[string]int64
 	ByRestoreStatus   map[string]int64
+	ByDownloadPresent map[string]int64
 	RestoreSoonestExp *time.Time
 	TotalSize         int64
 	TotalCount        int64
@@ -854,7 +857,7 @@ type FileStats struct {
 
 // Stats returns per-status counts plus total size/count across the index.
 func (db *DB) Stats(ctx context.Context) (FileStats, error) {
-	s := FileStats{ByStatus: map[string]int64{}, ByRestoreStatus: map[string]int64{}}
+	s := FileStats{ByStatus: map[string]int64{}, ByRestoreStatus: map[string]int64{}, ByDownloadPresent: map[string]int64{}}
 
 	var rows []struct {
 		Status string
@@ -884,6 +887,24 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	}
 	for _, r := range rrows {
 		s.ByRestoreStatus[r.RestoreStatus] = r.Count
+	}
+
+	var drows []struct {
+		Present bool
+		Count   int64
+	}
+	if err := db.g.WithContext(ctx).Model(&File{}).
+		Select("download_present as present, COUNT(*) as count").
+		Group("download_present").
+		Scan(&drows).Error; err != nil {
+		return s, err
+	}
+	for _, r := range drows {
+		if r.Present {
+			s.ByDownloadPresent["present"] = r.Count
+		} else {
+			s.ByDownloadPresent["missing"] = r.Count
+		}
 	}
 
 	// Soonest expiry across rows that are still in the restored window —
@@ -1393,6 +1414,49 @@ func (db *DB) MarkRestored(ctx context.Context, s3Key string, expiresAt time.Tim
 			"restore_expires_at": expiresAt,
 		})
 	return result.RowsAffected, result.Error
+}
+
+// MarkDownloadMirrorBatch updates download-mirror presence flags for a batch
+// of rows in one transaction.
+func (db *DB) MarkDownloadMirrorBatch(ctx context.Context, presentIDs, missingIDs []int64, checkedAt time.Time) error {
+	if len(presentIDs) == 0 && len(missingIDs) == 0 {
+		return nil
+	}
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for len(presentIDs) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := presentIDs
+			if len(chunk) > sqlChunkSize {
+				chunk = presentIDs[:sqlChunkSize]
+			}
+			presentIDs = presentIDs[len(chunk):]
+			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"download_present":    true,
+				"download_checked_at": checkedAt,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		for len(missingIDs) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := missingIDs
+			if len(chunk) > sqlChunkSize {
+				chunk = missingIDs[:sqlChunkSize]
+			}
+			missingIDs = missingIDs[len(chunk):]
+			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
+				"download_present":    false,
+				"download_checked_at": checkedAt,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // markPendingByColumn is the shared implementation for the three MarkPendingBy* functions.

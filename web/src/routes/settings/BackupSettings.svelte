@@ -11,6 +11,10 @@
     <span>Temp directory</span>
     <input type="text" bind:value={cfg.backup.tmp_dir} />
   </label>
+  <label>
+    <span>Download directory</span>
+    <input type="text" bind:value={cfg.backup.download_dir} />
+  </label>
   <div class="row-2">
     <label>
       <span>Chunk size (individual files per batch)</span>

@@ -13,6 +13,7 @@ POST   /api/runs                      trigger run; body {mode: full|scan|upload,
 POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
+POST   /api/download/full             dashboard-triggered full mirror download using backup.download_dir
 
 # File index
 GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
@@ -53,6 +54,8 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
+`POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members.
+
 `POST /api/sync` / `/api/sync/full` do not use the bucket compare to mark S3-present rows as `missing`. Anything that exists in S3 is kept explicit as either `uploaded` or `cloud_only`; rows absent from S3 are left to source-side reconciliation. Standalone root objects come straight from the bucket listing, not from prior DB history. Zip-backed rows are relinked through the `zips` table, while `files.md5` always stores the per-file checksum.
 
 ## SSE Event Catalogue
@@ -88,3 +91,11 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `restore_download_progress` | processed, total, path, files_written, bytes_written, errors, error |
 | `restore_download_complete` | files_written, bytes_written, errors |
 | `restore_download_failed` | files_written, bytes_written, errors, error |
+| `download_mirror_scan_start` | total |
+| `download_mirror_scan_progress` | scanned, present, missing, total |
+| `download_mirror_scan_complete` | scanned, present, missing, total |
+| `download_mirror_scan_failed` | error |
+| `download_mirror_start` | total |
+| `download_mirror_progress` | processed, total, path, files_written, bytes_written, errors, error |
+| `download_mirror_complete` | files_written, bytes_written, errors |
+| `download_mirror_failed` | files_written, bytes_written, errors, error |

@@ -62,6 +62,17 @@ const (
 	EventRestoreDownloadProgress = "restore_download_progress"
 	EventRestoreDownloadComplete = "restore_download_complete"
 	EventRestoreDownloadFailed   = "restore_download_failed"
+	// Download-mirror events accompany the dashboard's full-download job.
+	// The job first scans the configured mirror folder and then downloads
+	// only the rows still missing from that folder.
+	EventDownloadMirrorScanStart    = "download_mirror_scan_start"
+	EventDownloadMirrorScanProgress = "download_mirror_scan_progress"
+	EventDownloadMirrorScanComplete = "download_mirror_scan_complete"
+	EventDownloadMirrorScanFailed   = "download_mirror_scan_failed"
+	EventDownloadMirrorStart        = "download_mirror_start"
+	EventDownloadMirrorProgress     = "download_mirror_progress"
+	EventDownloadMirrorComplete     = "download_mirror_complete"
+	EventDownloadMirrorFailed       = "download_mirror_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

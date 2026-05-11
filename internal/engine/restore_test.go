@@ -113,6 +113,95 @@ func TestRestoreToDirMixed(t *testing.T) {
 	}
 }
 
+func TestDownloadMirrorToDirZipMissingMember(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	seed := []db.BatchEntry{
+		{Path: "photos/a.jpg", Size: 3, ModTime: now},
+		{Path: "photos/b.jpg", Size: 4, ModTime: now},
+	}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	ids := []int64{res[0].ID, res[1].ID}
+	if err := d.MarkZipUploadedBatch(ctx, db.Zip{
+		ZipName:    "photos/photos_1.zip",
+		Size:       1234,
+		MD5:        "archive-md5",
+		SHA256:     "archive-sha",
+		S3Key:      "backups/photos/photos_1.zip",
+		UploadedAt: &now,
+		LastSeenAt: now,
+	}, []db.ZipMemberUpload{
+		{ID: ids[0], MD5: md5hex("aaa")},
+		{ID: ids[1], MD5: md5hex("bbbb")},
+	}); err != nil {
+		t.Fatalf("MarkZipUploadedBatch: %v", err)
+	}
+
+	mirror := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mirror, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "photos", "a.jpg"), []byte("aaa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	zipBytes := buildZip(t, map[string]string{
+		"photos/a.jpg": "aaa",
+		"photos/b.jpg": "bbbb",
+	})
+	if _, err := store.Put(ctx, "backups/photos/photos_1.zip", bytes.NewReader(zipBytes), int64(len(zipBytes))); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := DownloadMirrorToDir(ctx, DownloadOptions{
+		DB:          d,
+		Storage:     store,
+		KeyPrefix:   "backups/",
+		DownloadDir: mirror,
+		TmpDir:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("DownloadMirrorToDir: %v", err)
+	}
+	if stats.Scanned != 2 || stats.Present != 1 || stats.Missing != 1 {
+		t.Fatalf("unexpected scan stats: %+v", stats)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
+	}
+
+	got, err := os.ReadFile(filepath.Join(mirror, "photos", "b.jpg"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(got) != "bbbb" {
+		t.Fatalf("downloaded file = %q want %q", got, "bbbb")
+	}
+
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	for _, f := range files {
+		switch f.Path {
+		case "photos/a.jpg":
+			if !f.DownloadPresent {
+				t.Fatalf("expected %s to remain marked present", f.Path)
+			}
+		case "photos/b.jpg":
+			if !f.DownloadPresent {
+				t.Fatalf("expected %s to be marked present after download", f.Path)
+			}
+		}
+	}
+}
+
 func TestRestoreToDirPrefixFilter(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

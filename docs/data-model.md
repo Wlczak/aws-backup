@@ -30,13 +30,16 @@ CREATE TABLE files (
     uploaded_at         DATETIME,
     last_seen_at        DATETIME NOT NULL,
     restore_status      TEXT,                                -- '' | in_progress | restored
-    restore_expires_at  DATETIME                             -- when the Glacier restore copy expires
+    restore_expires_at  DATETIME,                            -- when the Glacier restore copy expires
+    download_present    INTEGER NOT NULL DEFAULT 0,          -- whether the file exists in the dashboard mirror dir
+    download_checked_at DATETIME                             -- last scan timestamp for the mirror dir
 );
 CREATE INDEX idx_files_status              ON files(status);
 CREATE INDEX idx_files_zip_id              ON files(zip_id);
 CREATE INDEX idx_files_zip_name            ON files(zip_name);
 CREATE INDEX idx_files_last_seen_at        ON files(last_seen_at);
 CREATE INDEX idx_files_restore_status      ON files(restore_status);
+CREATE INDEX idx_files_download_present    ON files(download_present);
 
 CREATE TABLE zips (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +131,8 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 `cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing. The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It does not collapse S3-present rows into `missing`.
 Unchanged source rescans preserve that bucket-backed state. An unchanged `cloud_only` row is promoted to `uploaded` when the local file is seen again.
 Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
+
+`download_present` / `download_checked_at` are mirror-metadata columns used by the dashboard-triggered full-download job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
 
 ## Zip naming + sidecar
 
