@@ -136,6 +136,7 @@ export interface SyncResponse {
   keys_in_s3: number;
   missing_zips: number;
   missing_individual: number;
+  files_created: number;
   files_reset: number;
 }
 

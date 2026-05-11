@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -19,6 +21,7 @@ type syncResponse struct {
 	KeysInS3           int   `json:"keys_in_s3"`
 	MissingZips        int   `json:"missing_zips"`
 	MissingIndividual  int   `json:"missing_individual"`
+	FilesCreated       int64 `json:"files_created"`
 	FilesReset         int64 `json:"files_reset"`
 }
 
@@ -46,7 +49,8 @@ const fullSyncListCap = 1000
 
 // handleSync runs the authoritative cloud compare: list every object in the
 // bucket, download every zip index, compare the resulting path set to the
-// locally scanned rows, and reset only rows that are still local but whose
+// locally scanned rows, recreate any cloud-only paths that are missing from
+// the local index, and reset only rows that are still local but whose
 // recorded object is no longer present.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
@@ -112,8 +116,9 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 
 // runSyncCloudCompare runs the authoritative sync pass: list the bucket,
 // download all zip indexes, compare the resulting cloud path set to the local
-// rows that are still on disk, and reset only those local rows that are no
-// longer represented in S3 back to pending.
+// rows that are still on disk, recreate missing rows for cloud-only objects,
+// and reset only those local rows that are no longer represented in S3 back to
+// pending.
 func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
@@ -140,8 +145,11 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		return fullSyncResponse{}, fmt.Errorf("load cloud index: %w", err)
 	}
 
+	existingPaths := map[string]struct{}{}
 	localPaths := map[string]struct{}{}
 	missingIDs := make([]int64, 0)
+	recreateRows := make([]db.File, 0)
+	now := time.Now().UTC()
 	const pageSize = 1000
 	for p := 1; ; p++ {
 		if err := ctx.Err(); err != nil {
@@ -155,6 +163,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			break
 		}
 		for _, f := range rows {
+			existingPaths[f.Path] = struct{}{}
 			// Missing rows are already known to be absent from the source,
 			// so they stay out of both the local diff and the reset list.
 			if f.Status == db.StatusMissing {
@@ -173,6 +182,65 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		}
 	}
 
+	cloudPaths := make([]string, 0, len(idx.Files))
+	zipHeadCache := map[string]storage.HeadResult{}
+	for p := range idx.Files {
+		if _, ok := existingPaths[p]; ok {
+			continue
+		}
+		cloudPaths = append(cloudPaths, p)
+	}
+	sort.Strings(cloudPaths)
+	for _, p := range cloudPaths {
+		cf := idx.Files[p]
+		row := db.File{
+			Path:       p,
+			Size:       0,
+			MTime:      time.Unix(0, 0).UTC(),
+			Status:     db.StatusMissing,
+			LastSeenAt: now,
+		}
+		if cf.ZipKey != "" {
+			row.ZipName = strings.TrimPrefix(cf.ZipKey, prefix)
+			row.S3Key = cf.ZipKey
+			head, ok := zipHeadCache[cf.ZipKey]
+			if !ok {
+				if h, err := st.Head(ctx, cf.ZipKey); err == nil {
+					head = h
+					zipHeadCache[cf.ZipKey] = h
+					ok = true
+				}
+			}
+			if ok {
+				row.MTime = head.LastModified.UTC()
+				row.UploadedAt = head.LastModified.UTC()
+			} else {
+				row.MTime = now
+				row.UploadedAt = now
+			}
+		} else {
+			row.S3Key = cf.S3Key
+			if head, err := st.Head(ctx, cf.S3Key); err == nil {
+				row.Size = head.Size
+				row.MTime = head.LastModified.UTC()
+				row.UploadedAt = head.LastModified.UTC()
+			} else {
+				row.MTime = now
+				row.UploadedAt = now
+			}
+		}
+		recreateRows = append(recreateRows, row)
+	}
+
+	var filesCreated int64
+	if len(recreateRows) > 0 {
+		n, err := s.deps.DB.CreateFiles(ctx, recreateRows)
+		if err != nil {
+			return fullSyncResponse{}, fmt.Errorf("recreate cloud-only files: %w", err)
+		}
+		filesCreated = n
+	}
+
 	var filesReset int64
 	if len(missingIDs) > 0 {
 		n, err := s.deps.DB.MarkPendingByIDs(ctx, missingIDs)
@@ -187,6 +255,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			ZipNamesInDB:       len(zipNames),
 			IndividualKeysInDB: len(indivKeys),
 			KeysInS3:           len(s3Keys),
+			FilesCreated:       filesCreated,
 			FilesReset:         filesReset,
 		},
 		CloudFileCount:     len(idx.Files),

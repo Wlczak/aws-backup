@@ -525,6 +525,7 @@
         `${r.zip_indexes_consumed} zip index(es) consumed`,
         `${r.cloud_file_count} cloud file(s) / ${r.local_file_count} local file(s)`,
       ];
+      if (r.files_created > 0) parts.push(`${r.files_created} cloud file(s) recreated as missing`);
       if (total > 0) parts.push(`${total} S3 object(s) missing from bucket`);
       if (r.files_reset > 0) parts.push(`${r.files_reset} file(s) reset to pending`);
       syncInfo = `Sync complete: ${parts.join(' · ')}.`;

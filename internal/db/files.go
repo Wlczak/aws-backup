@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // flexTimeLayouts is the list of textual timestamp formats the
@@ -119,6 +120,25 @@ type UpsertResult struct {
 	ID      int64
 	Created bool
 	Changed bool
+}
+
+// CreateFiles inserts a batch of fully-populated file rows. Used by the
+// authoritative S3 sync when the cloud contains objects that were lost
+// from the local index and need to be reconstructed as missing rows.
+func (db *DB) CreateFiles(ctx context.Context, rows []File) (int64, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	var total int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, sqlChunkSize)
+		if result.Error != nil {
+			return result.Error
+		}
+		total = result.RowsAffected
+		return nil
+	})
+	return total, err
 }
 
 // BatchEntry is a single file record passed to UpsertFileBatch.

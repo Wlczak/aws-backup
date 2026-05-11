@@ -103,7 +103,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 
 	// Seed S3: the zip + its index, the standalone file, and one
-	// cloud-only file (restore-me.jpg inside a zip) that has no local row.
+	// cloud-only file (restore-me.jpg inside a zip) that has no local row
+	// and should be recreated as a missing row.
 	mustPut := func(key, body string) {
 		t.Helper()
 		if _, err := store.Put(ctx, key, strings.NewReader(body), int64(len(body))); err != nil {
@@ -154,6 +155,9 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	if body.ZipIndexesConsumed != 1 {
 		t.Errorf("ZipIndexesConsumed: got %d want 1", body.ZipIndexesConsumed)
 	}
+	if body.FilesCreated < 1 {
+		t.Errorf("expected at least one recreated file, got %d", body.FilesCreated)
+	}
 
 	// Only the row that is still local should be normalised back to
 	// pending. The missing row stays missing even though its cloud object
@@ -184,6 +188,23 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 	if goneCloudRows[0].Status != db.StatusMissing {
 		t.Errorf("gone-cloud status=%q want missing", goneCloudRows[0].Status)
+	}
+
+	restoreRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "restore-me.jpg", All: true})
+	if err != nil {
+		t.Fatalf("reload restore-me: %v", err)
+	}
+	if len(restoreRows) != 1 {
+		t.Fatalf("reload restore-me rows=%d want 1", len(restoreRows))
+	}
+	if restoreRows[0].Status != db.StatusMissing {
+		t.Errorf("restore-me status=%q want missing", restoreRows[0].Status)
+	}
+	if restoreRows[0].ZipName != "docs/docs_1.zip" {
+		t.Errorf("restore-me zip=%q want docs/docs_1.zip", restoreRows[0].ZipName)
+	}
+	if restoreRows[0].S3Key != "backups/docs/docs_1.zip" {
+		t.Errorf("restore-me s3_key=%q want backups/docs/docs_1.zip", restoreRows[0].S3Key)
 	}
 }
 

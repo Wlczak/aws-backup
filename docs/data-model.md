@@ -102,6 +102,7 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 ```
 
 `missing` rows are kept until the corresponding S3 object is also deleted — the index models the **bucket**, not the source. See `CLAUDE.md`.
+If the row itself disappears from SQLite, the authoritative S3 sync can recreate it from the cloud listing as a `missing` row so the bucket view can be recovered after DB corruption.
 
 ## Zip naming + sidecar
 
