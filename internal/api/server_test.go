@@ -902,10 +902,15 @@ func TestRestoreEstimate(t *testing.T) {
 	_ = deps.DB.SetZipName(ctx, []int64{b.ID}, "photos/photos_1.zip")
 	_ = c // unused; left as pending
 
-	body := strings.NewReader(`{"paths":["photos","unknown/dir"]}`)
+	body := strings.NewReader(`{"paths":["photos","unknown/dir"],"tier":"standard"}`)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/estimate", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 	var got restoreEstimateResponse
 	_ = json.NewDecoder(resp.Body).Decode(&got)
