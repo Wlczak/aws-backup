@@ -125,7 +125,7 @@ type UpsertResult struct {
 
 // CreateFiles inserts a batch of fully-populated file rows. Used by the
 // authoritative S3 sync when the cloud contains objects that were lost
-// from the local index and need to be reconstructed as missing rows.
+// from the local index and need to be reconstructed as cloud_only rows.
 func (db *DB) CreateFiles(ctx context.Context, rows []File) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -140,6 +140,32 @@ func (db *DB) CreateFiles(ctx context.Context, rows []File) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// FileUpdate is a targeted row mutation used by sync/reconcile helpers.
+type FileUpdate struct {
+	ID     int64
+	Fields map[string]any
+}
+
+// UpdateFiles applies a set of per-row field updates in one transaction.
+// Callers use this for sync paths where each row needs a slightly different
+// state transition.
+func (db *DB) UpdateFiles(ctx context.Context, updates []FileUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, u := range updates {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := tx.Model(&File{}).Where("id = ?", u.ID).Updates(u.Fields).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // BatchEntry is a single file record passed to UpsertFileBatch.

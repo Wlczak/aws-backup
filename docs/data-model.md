@@ -97,7 +97,7 @@ State terms used throughout the codebase:
 
 - `uploaded` - the file exists locally and its object exists in S3.
 - `pending` - the file exists locally, but no S3 object has been written yet.
-- `cloud only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk. The full sync can recreate or refresh this state from S3.
+- `cloud only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk. The authoritative S3 sync can recreate or refresh this state from S3.
 - `missing` - the row exists in SQLite, but the file is gone locally and there is no recoverable S3 object for it.
 
 ```text
@@ -112,7 +112,7 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 
 `cloud only` is a first-class stored status, not just a label derived from `missing + s3_key`.
 `missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
-`cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing.
+`cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing. The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It does not collapse S3-present rows into `missing`.
 
 ## Zip naming + sidecar
 

@@ -117,8 +117,8 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 // runSyncCloudCompare runs the authoritative sync pass: list the bucket,
 // download all zip indexes, compare the resulting cloud path set to the local
 // rows that are still on disk, recreate missing rows for cloud-only objects as
-// cloud_only, and reset only those local rows that are no longer represented in
-// S3 back to pending.
+// cloud_only, and promote any S3-present local rows into either uploaded or
+// cloud_only so the bucket-backed state is always explicit.
 func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
@@ -147,11 +147,51 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 
 	existingPaths := map[string]struct{}{}
 	localPaths := map[string]struct{}{}
-	missingIDs := make([]int64, 0)
-	missingPaths := make([]string, 0)
+	promoteUploaded := make([]db.FileUpdate, 0)
+	promoteCloudOnly := make([]db.FileUpdate, 0)
 	recreateRows := make([]db.File, 0)
 	now := time.Now().UTC()
 	const pageSize = 1000
+	zipHeadCache := map[string]storage.HeadResult{}
+	getHead := func(key string) (storage.HeadResult, bool) {
+		if head, ok := zipHeadCache[key]; ok {
+			return head, true
+		}
+		head, err := st.Head(ctx, key)
+		if err != nil {
+			return storage.HeadResult{}, false
+		}
+		zipHeadCache[key] = head
+		return head, true
+	}
+	buildFields := func(cf engine.CloudFile, status string) map[string]any {
+		fields := map[string]any{
+			"status": status,
+		}
+		s3Key := cf.S3Key
+		if cf.ZipKey != "" {
+			s3Key = cf.ZipKey
+			fields["zip_name"] = strings.TrimPrefix(cf.ZipKey, prefix)
+		} else {
+			fields["zip_name"] = ""
+		}
+		fields["s3_key"] = s3Key
+		if head, ok := getHead(s3Key); ok {
+			fields["uploaded_at"] = head.LastModified.UTC()
+			if status == db.StatusCloudOnly {
+				fields["mtime"] = head.LastModified.UTC()
+				if cf.ZipKey == "" {
+					fields["size"] = head.Size
+				}
+			}
+		} else {
+			fields["uploaded_at"] = now
+			if status == db.StatusCloudOnly {
+				fields["mtime"] = now
+			}
+		}
+		return fields
+	}
 	for p := 1; ; p++ {
 		if err := ctx.Err(); err != nil {
 			return fullSyncResponse{}, err
@@ -169,11 +209,20 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			// source, so they stay out of the local diff. cloud_only rows remain
 			// recoverable only while their S3 object still exists.
 			if f.Status == db.StatusMissing {
+				if cf, ok := idx.Files[f.Path]; ok {
+					promoteCloudOnly = append(promoteCloudOnly, db.FileUpdate{
+						ID:     f.ID,
+						Fields: buildFields(cf, db.StatusCloudOnly),
+					})
+				}
 				continue
 			}
-			if f.Status == db.StatusCloudOnly {
-				if _, ok := idx.Files[f.Path]; !ok {
-					missingPaths = append(missingPaths, f.Path)
+			if cf, ok := idx.Files[f.Path]; ok {
+				if f.Status != db.StatusUploaded && f.Status != db.StatusCloudOnly {
+					promoteUploaded = append(promoteUploaded, db.FileUpdate{
+						ID:     f.ID,
+						Fields: buildFields(cf, db.StatusUploaded),
+					})
 				}
 				continue
 			}
@@ -182,7 +231,16 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 				continue
 			}
 			if f.Status != db.StatusPending || f.MD5 != "" || f.ZipName != "" || f.S3Key != "" || !f.UploadedAt.IsZero() {
-				missingIDs = append(missingIDs, f.ID)
+				promoteUploaded = append(promoteUploaded, db.FileUpdate{
+					ID: f.ID,
+					Fields: map[string]any{
+						"status":      db.StatusPending,
+						"md5":         nil,
+						"zip_name":    nil,
+						"s3_key":      nil,
+						"uploaded_at": nil,
+					},
+				})
 			}
 		}
 		if len(rows) < pageSize {
@@ -191,7 +249,6 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 	}
 
 	cloudPaths := make([]string, 0, len(idx.Files))
-	zipHeadCache := map[string]storage.HeadResult{}
 	for p := range idx.Files {
 		if _, ok := existingPaths[p]; ok {
 			continue
@@ -250,18 +307,18 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 	}
 
 	var filesReset int64
-	if len(missingIDs) > 0 {
-		n, err := s.deps.DB.MarkPendingByIDs(ctx, missingIDs)
-		if err != nil {
-			return fullSyncResponse{}, fmt.Errorf("reset missing files: %w", err)
+	if len(promoteUploaded) > 0 {
+		if err := s.deps.DB.UpdateFiles(ctx, promoteUploaded); err != nil {
+			return fullSyncResponse{}, fmt.Errorf("promote uploaded files: %w", err)
 		}
-		filesReset = n
 	}
-	if len(missingPaths) > 0 {
-		_, err := s.deps.DB.MarkMissingByPaths(ctx, missingPaths)
-		if err != nil {
-			return fullSyncResponse{}, fmt.Errorf("mark cloud-only files missing: %w", err)
+	if len(promoteCloudOnly) > 0 {
+		if err := s.deps.DB.UpdateFiles(ctx, promoteCloudOnly); err != nil {
+			return fullSyncResponse{}, fmt.Errorf("promote cloud-only files: %w", err)
 		}
+	}
+	if len(promoteUploaded) > 0 || len(promoteCloudOnly) > 0 {
+		filesReset = int64(len(promoteUploaded) + len(promoteCloudOnly))
 	}
 
 	resp := fullSyncResponse{

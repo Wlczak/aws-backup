@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | S3 sync now normalizes every S3-present row into `uploaded` or `cloud_only`; it no longer collapses bucket-backed rows into `missing` |
 | — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
 | #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `cloud_only`, and reset only still-local stale rows to pending |

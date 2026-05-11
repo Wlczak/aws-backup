@@ -74,12 +74,26 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{goneCloudRes.ID}, "md5", "backups/gone-cloud.txt", pastTime); err != nil {
 		t.Fatalf("mark gone-cloud uploaded: %v", err)
 	}
+	// Seed a row that is marked missing but whose object is still in S3.
+	// Full sync should rebuild it as cloud_only because the bucket still
+	// has the object.
+	recoverableRes, err := d.UpsertFile(ctx, "recoverable.txt", 1, pastTime, pastTime)
+	if err != nil {
+		t.Fatalf("seed recoverable: %v", err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{recoverableRes.ID}, "md5", "backups/recoverable.txt", pastTime); err != nil {
+		t.Fatalf("mark recoverable uploaded: %v", err)
+	}
+	if _, err := d.MarkMissingByPaths(ctx, []string{"recoverable.txt"}); err != nil {
+		t.Fatalf("mark recoverable missing: %v", err)
+	}
 
 	// Seed the remaining three files.
 	seed := []db.BatchEntry{
 		{Path: "photos/a.jpg", Size: 10, ModTime: now},
 		{Path: "docs/spec.pdf", Size: 20, ModTime: now},
 		{Path: "new-on-disk.txt", Size: 5, ModTime: now},
+		{Path: "pending-on-s3.txt", Size: 7, ModTime: now},
 	}
 	res, err := d.UpsertFileBatch(ctx, seed, now)
 	if err != nil {
@@ -104,7 +118,10 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 
 	// Seed S3: the zip + its index, the standalone file, and one
 	// cloud-only file (restore-me.jpg inside a zip) that has no local row
-	// and should be recreated as a cloud_only row.
+	// and should be recreated as a cloud_only row. pending-on-s3.txt is
+	// local-only before sync, but because it is in S3 it should be promoted
+	// to uploaded. recoverable.txt exists in the DB as missing and should
+	// be rebuilt as cloud_only because S3 still has the object.
 	mustPut := func(key, body string) {
 		t.Helper()
 		if _, err := store.Put(ctx, key, strings.NewReader(body), int64(len(body))); err != nil {
@@ -114,6 +131,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	mustPut("backups/photos/a.jpg", "x")
 	mustPut("backups/docs/docs_1.zip", "zipbytes")
 	mustPut("backups/docs/docs_1.zip.index.txt", "docs/spec.pdf\nrestore-me.jpg\n")
+	mustPut("backups/pending-on-s3.txt", "pending")
+	mustPut("backups/recoverable.txt", "recoverable")
 	// Note: backups/gone-locally.txt is intentionally ABSENT to exercise
 	// the existence-check reset path.
 
@@ -132,14 +151,15 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 
 	// Local file set = {photos/a.jpg, docs/spec.pdf, new-on-disk.txt,
-	// gone-cloud.txt}; gone-locally is status=missing, so excluded.
-	if body.LocalFileCount != 4 {
-		t.Errorf("LocalFileCount: got %d want 4 (body=%+v)", body.LocalFileCount, body)
+	// gone-cloud.txt, pending-on-s3.txt}; gone-locally and recoverable are
+	// status=missing, so excluded.
+	if body.LocalFileCount != 5 {
+		t.Errorf("LocalFileCount: got %d want 5 (body=%+v)", body.LocalFileCount, body)
 	}
 	// Cloud index = {photos/a.jpg (standalone), docs/spec.pdf,
-	// restore-me.jpg}.
-	if body.CloudFileCount != 3 {
-		t.Errorf("CloudFileCount: got %d want 3 (body=%+v)", body.CloudFileCount, body)
+	// restore-me.jpg, pending-on-s3.txt, recoverable.txt}.
+	if body.CloudFileCount != 5 {
+		t.Errorf("CloudFileCount: got %d want 5 (body=%+v)", body.CloudFileCount, body)
 	}
 
 	sort.Strings(body.LocalMissingFromCloud)
@@ -148,8 +168,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 
 	sort.Strings(body.CloudMissingFromLocal)
-	if strings.Join(body.CloudMissingFromLocal, ",") != "restore-me.jpg" {
-		t.Errorf("CloudMissingFromLocal: got %v want [restore-me.jpg]", body.CloudMissingFromLocal)
+	if strings.Join(body.CloudMissingFromLocal, ",") != "recoverable.txt,restore-me.jpg" {
+		t.Errorf("CloudMissingFromLocal: got %v want [recoverable.txt restore-me.jpg]", body.CloudMissingFromLocal)
 	}
 
 	if body.ZipIndexesConsumed != 1 {
@@ -188,6 +208,28 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 	if goneCloudRows[0].Status != db.StatusPending {
 		t.Errorf("gone-cloud status=%q want pending", goneCloudRows[0].Status)
+	}
+
+	pendingOnS3Rows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "pending-on-s3.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload pending-on-s3: %v", err)
+	}
+	if len(pendingOnS3Rows) != 1 {
+		t.Fatalf("reload pending-on-s3 rows=%d want 1", len(pendingOnS3Rows))
+	}
+	if pendingOnS3Rows[0].Status != db.StatusUploaded {
+		t.Errorf("pending-on-s3 status=%q want uploaded", pendingOnS3Rows[0].Status)
+	}
+
+	recoverableRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "recoverable.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload recoverable: %v", err)
+	}
+	if len(recoverableRows) != 1 {
+		t.Fatalf("reload recoverable rows=%d want 1", len(recoverableRows))
+	}
+	if recoverableRows[0].Status != db.StatusCloudOnly {
+		t.Errorf("recoverable status=%q want cloud_only", recoverableRows[0].Status)
 	}
 
 	restoreRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "restore-me.jpg", All: true})
