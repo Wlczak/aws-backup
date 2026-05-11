@@ -1,6 +1,6 @@
 module github.com/Wlczak/aws-backup
 
-go 1.25.9
+go 1.25.10
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.6
