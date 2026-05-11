@@ -23,6 +23,7 @@ const (
 	pricePerGBRetrievalStandard      = 0.02   // USD/GB; Glacier standard retrieval
 	pricePerThousandRequestsBulk     = 0.025  // USD; Glacier bulk retrieval requests
 	pricePerGBRetrievalBulk          = 0.003  // USD/GB; Glacier bulk retrieval
+	pricePerGBStorageStandard        = 0.023  // USD/GB-month; restored copy billed at S3 Standard rates
 	pricePerThousandRequestsGet      = 0.0004 // USD; S3 Standard GET requests
 	pricePerGBEgress                 = 0.09   // USD/GB; internet egress after free tier
 	egressFreeGB                     = 100.0  // free tier
@@ -55,21 +56,47 @@ func restoreTierPricing(tier storage.RestoreTier) (requestPerThousand, retrieval
 	}
 }
 
+func estimateDownloadFees(objectCount, totalBytes int64) (requestFeeUSD, egressFeeUSD, totalFeeUSD float64) {
+	requestFeeUSD = float64(objectCount) * pricePerThousandRequestsGet / 1000
+	gb := float64(totalBytes) / (1024 * 1024 * 1024)
+	egressGB := gb
+	if egressGB > egressFreeGB {
+		egressGB -= egressFreeGB
+	} else {
+		egressGB = 0
+	}
+	egressFeeUSD = egressGB * pricePerGBEgress
+	totalFeeUSD = requestFeeUSD + egressFeeUSD
+	return requestFeeUSD, egressFeeUSD, totalFeeUSD
+}
+
+func estimateRestoreStorageFee(totalBytes int64, days int) float64 {
+	if totalBytes <= 0 || days <= 0 {
+		return 0
+	}
+	gb := float64(totalBytes) / (1024 * 1024 * 1024)
+	months := float64(days) / 30.0
+	return gb * months * pricePerGBStorageStandard
+}
+
 type restoreEstimateRequest struct {
 	Paths []string `json:"paths"`
 	Tier  string   `json:"tier"`
+	Days  int      `json:"days"`
 }
 
 type restoreEstimateResponse struct {
 	// FileCount / TotalBytes count only the actual S3 objects that will
 	// be retrieved — i.e. one zip archive per zip group, plus standalone
 	// objects. Rows already in_progress or restored are excluded. The
-	// request fee is computed off FileCount; TotalBytes remains the
-	// current DB-byte estimate for the matching rows.
+	// estimate prices request, retrieval, temporary S3 Standard storage,
+	// and egress separately; TotalBytes remains the current DB-byte
+	// estimate for the matching rows.
 	FileCount       int64   `json:"file_count"`
 	TotalBytes      int64   `json:"total_bytes"`
 	RequestFeeUSD   float64 `json:"request_fee_usd"`
 	RetrievalFeeUSD float64 `json:"retrieval_fee_usd"`
+	StorageFeeUSD   float64 `json:"storage_fee_usd"`
 	EgressFeeUSD    float64 `json:"egress_fee_usd"`
 	TotalFeeUSD     float64 `json:"total_fee_usd"`
 	WaitHoursMin    int     `json:"wait_hours_min"`
@@ -95,6 +122,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Paths) == 0 {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+	if req.Days < restoreDaysMin || req.Days > restoreDaysMax {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("days must be in [%d, %d] (got %d)", restoreDaysMin, restoreDaysMax, req.Days))
 		return
 	}
 	tier, err := parseRestoreTier(req.Tier)
@@ -147,6 +179,7 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	gb := float64(br.RetrievableBytes) / (1024 * 1024 * 1024)
 	request := float64(objectCount) * requestPerThousand / 1000
 	retrieval := gb * retrievalPerGB
+	storage := estimateRestoreStorageFee(br.RetrievableBytes, req.Days)
 	egressGB := gb
 	if egressGB > egressFreeGB {
 		egressGB -= egressFreeGB
@@ -160,8 +193,9 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		TotalBytes:             br.RetrievableBytes,
 		RequestFeeUSD:          round2(request),
 		RetrievalFeeUSD:        round2(retrieval),
+		StorageFeeUSD:          round2(storage),
 		EgressFeeUSD:           round2(egress),
-		TotalFeeUSD:            round2(request + retrieval + egress),
+		TotalFeeUSD:            round2(request + retrieval + storage + egress),
 		WaitHoursMin:           waitHoursMin,
 		WaitHoursMax:           waitHoursMax,
 		AlreadyInProgressCount: br.AlreadyInProgressCount,
@@ -233,9 +267,9 @@ type restoreTriggerRequest struct {
 	Paths []string `json:"paths"`
 	Tier  string   `json:"tier"`
 	// Days is how long the restored copy stays in the standard tier
-	// before reverting to the archive class. AWS S3 accepts 1..N (N
-	// depends on retrieval tier); we clamp to [1, 30] to keep the UI
-	// honest and avoid runaway dollar costs from a typo.
+	// before reverting to the archive class. AWS S3 accepts a wider
+	// range; we clamp to [1, 180] to keep the UI honest and avoid
+	// runaway dollar costs from a typo.
 	Days int `json:"days"`
 }
 
@@ -287,12 +321,12 @@ type restoreDownloadEstimateResponse struct {
 }
 
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
-// AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
-// cost of a typo bounded; the operator can re-issue the restore later
-// to extend.
+// The restored copy is billed at S3 Standard rates for the full period,
+// so the 180-day ceiling keeps typo-driven costs bounded while still
+// covering the longest Deep Archive retention window.
 const (
 	restoreDaysMin = 1
-	restoreDaysMax = 30
+	restoreDaysMax = 180
 )
 
 // handleRestoreTrigger issues a Glacier restore (s3:RestoreObject) for
@@ -479,15 +513,7 @@ func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	gb := float64(br.TotalBytes) / (1024 * 1024 * 1024)
-	request := float64(br.ObjectCount) * pricePerThousandRequestsGet / 1000
-	egressGB := gb
-	if egressGB > egressFreeGB {
-		egressGB -= egressFreeGB
-	} else {
-		egressGB = 0
-	}
-	egress := egressGB * pricePerGBEgress
+	request, egress, total := estimateDownloadFees(br.ObjectCount, br.TotalBytes)
 
 	writeJSON(w, http.StatusOK, restoreDownloadEstimateResponse{
 		ObjectCount:       br.ObjectCount,
@@ -497,7 +523,7 @@ func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Re
 		NotRestoringCount: br.NotRestoringCount,
 		RequestFeeUSD:     round2(request),
 		EgressFeeUSD:      round2(egress),
-		TotalFeeUSD:       round2(request + egress),
+		TotalFeeUSD:       round2(total),
 		UnknownPaths:      unknown,
 	})
 }

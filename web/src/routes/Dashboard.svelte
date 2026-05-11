@@ -57,6 +57,12 @@
   };
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
+  const usd = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
   // Cap retained terminal (done/failed) items so a 50k-file run doesn't
   // keep every row in $state for the tab lifetime — itemList re-sorts the
@@ -318,6 +324,10 @@
           phase: 'scan',
           total: payload.total ?? 0,
           total_bytes: payload.total_bytes ?? 0,
+          object_count: payload.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? 0,
           scanned: 0,
           present: 0,
           missing: 0,
@@ -340,6 +350,10 @@
           missing: payload.missing ?? downloadCurrent?.missing ?? 0,
           total: payload.total ?? downloadCurrent?.total ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
         });
       }
       if (type === 'download_mirror_scan_complete') {
@@ -351,6 +365,10 @@
           missing: payload.missing ?? downloadCurrent?.missing ?? 0,
           total: payload.total ?? downloadCurrent?.total ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
         });
       }
       if (type === 'download_mirror_start') {
@@ -359,6 +377,10 @@
           phase: 'download',
           total: payload.total ?? downloadCurrent?.total ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
           processed: 0,
           files_written: 0,
           bytes_written: 0,
@@ -371,6 +393,10 @@
           phase: 'download',
           total: payload.total ?? downloadCurrent?.total ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
           processed: payload.processed ?? downloadCurrent?.processed ?? 0,
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
@@ -383,6 +409,10 @@
           phase: 'complete',
           total: payload.total ?? downloadCurrent?.total ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
           processed: payload.processed ?? downloadCurrent?.processed ?? 0,
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
@@ -399,6 +429,10 @@
           files_written: downloadCurrent?.files_written ?? 0,
           bytes_written: downloadCurrent?.bytes_written ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
           errors: downloadCurrent?.errors ?? 0,
           error_message: payload.error ?? 'full download failed during scan',
         });
@@ -413,6 +447,10 @@
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
           total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
+          object_count: payload.object_count ?? downloadCurrent?.object_count ?? 0,
+          request_fee_usd: payload.request_fee_usd ?? downloadCurrent?.request_fee_usd ?? 0,
+          egress_fee_usd: payload.egress_fee_usd ?? downloadCurrent?.egress_fee_usd ?? 0,
+          total_fee_usd: payload.total_fee_usd ?? downloadCurrent?.total_fee_usd ?? 0,
           errors: payload.errors ?? downloadCurrent?.errors ?? 0,
           error_message: payload.error ?? 'full download failed',
         });
@@ -470,6 +508,10 @@
       download_dir: '',
       total: 0,
       total_bytes: 0,
+      object_count: 0,
+      request_fee_usd: 0,
+      egress_fee_usd: 0,
+      total_fee_usd: 0,
       scanned: 0,
       present: 0,
       missing: 0,
@@ -526,6 +568,18 @@
 
   function downloadBytesMax(job: DownloadJobSummary | null | undefined): number {
     return job?.total_bytes ?? 0;
+  }
+
+  function downloadCostLine(job: DownloadJobSummary | null | undefined): string {
+    if (!job || job.object_count <= 0) return '';
+    return [
+      'Estimated cost',
+      `${job.object_count.toLocaleString()} object(s)`,
+      bytes(job.total_bytes),
+      `request ${usd.format(job.request_fee_usd)}`,
+      `egress ${usd.format(job.egress_fee_usd)}`,
+      `total ${usd.format(job.total_fee_usd)}`,
+    ].join(' · ');
   }
 
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
@@ -665,8 +719,8 @@
 
   async function restoreMissing() {
     if (!fullSyncResult?.cloud_missing_from_local?.length) return;
-    if (!Number.isInteger(restoreDays) || restoreDays < 1 || restoreDays > 30) {
-      toast.error('days must be an integer between 1 and 30');
+    if (!Number.isInteger(restoreDays) || restoreDays < 1 || restoreDays > 180) {
+      toast.error('days must be an integer between 1 and 180');
       return;
     }
     restoring = true; restoreResult = null;
@@ -865,6 +919,11 @@
           />
         </div>
       {/if}
+      {#if downloadCostLine(job)}
+        <div class="muted small" style="margin-top: 0.35rem">
+          {downloadCostLine(job)}
+        </div>
+      {/if}
     {/if}
     <div class="run-actions">
       <button
@@ -989,7 +1048,7 @@
                     type="number"
                     bind:value={restoreDays}
                     min="1"
-                    max="30"
+                    max="180"
                     step="1"
                     class="path-input"
                     style="width: 5rem"

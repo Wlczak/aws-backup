@@ -105,6 +105,10 @@ export interface DownloadJobSummary {
   download_dir: string;
   total: number;
   total_bytes: number;
+  object_count: number;
+  request_fee_usd: number;
+  egress_fee_usd: number;
+  total_fee_usd: number;
   scanned: number;
   present: number;
   missing: number;
@@ -127,6 +131,7 @@ export interface RestoreEstimate {
   total_bytes: number;
   request_fee_usd: number;
   retrieval_fee_usd: number;
+  storage_fee_usd: number;
   egress_fee_usd: number;
   total_fee_usd: number;
   wait_hours_min: number;
@@ -395,10 +400,10 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  restoreEstimate: (paths: string[], tier: RestoreTier) =>
+  restoreEstimate: (paths: string[], days: number, tier: RestoreTier) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',
-      body: JSON.stringify({ paths, tier }),
+      body: JSON.stringify({ paths, days, tier }),
     }),
   /**
    * Issue a Glacier restore request for every unique S3 key covering the

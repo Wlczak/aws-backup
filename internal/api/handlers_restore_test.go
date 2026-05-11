@@ -54,7 +54,7 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 		{name: "invalid tier", body: `{"paths":["a"],"days":7,"tier":"fast"}`, status: http.StatusBadRequest},
 		{name: "missing days", body: `{"paths":["a"]}`, status: http.StatusBadRequest},
 		{name: "days zero", body: `{"paths":["a"],"days":0}`, status: http.StatusBadRequest},
-		{name: "days too high", body: `{"paths":["a"],"days":31}`, status: http.StatusBadRequest},
+		{name: "days too high", body: `{"paths":["a"],"days":181}`, status: http.StatusBadRequest},
 		{name: "days negative", body: `{"paths":["a"],"days":-1}`, status: http.StatusBadRequest},
 	}
 	for _, tc := range cases {
@@ -164,8 +164,11 @@ func TestRestoreEstimateValidatesTier(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "missing tier", body: `{"paths":["/"]}`},
-		{name: "invalid tier", body: `{"paths":["/"],"tier":"fast"}`},
+		{name: "missing days", body: `{"paths":["/"],"tier":"bulk"}`},
+		{name: "days zero", body: `{"paths":["/"],"tier":"bulk","days":0}`},
+		{name: "days too high", body: `{"paths":["/"],"tier":"bulk","days":181}`},
+		{name: "missing tier", body: `{"paths":["/"],"days":7}`},
+		{name: "invalid tier", body: `{"paths":["/"],"tier":"fast","days":7}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,6 +206,7 @@ func TestRestoreEstimateTierChangesPreview(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{
 			"paths": []string{"/"},
 			"tier":  tier,
+			"days":  30,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -230,6 +234,12 @@ func TestRestoreEstimateTierChangesPreview(t *testing.T) {
 	}
 	if bulk.TotalFeeUSD >= std.TotalFeeUSD {
 		t.Fatalf("bulk should cost less than standard: bulk=%v std=%v", bulk.TotalFeeUSD, std.TotalFeeUSD)
+	}
+	if bulk.StorageFeeUSD == 0 || std.StorageFeeUSD == 0 {
+		t.Fatalf("expected storage fee in both estimates: bulk=%+v std=%+v", bulk, std)
+	}
+	if bulk.StorageFeeUSD != std.StorageFeeUSD {
+		t.Fatalf("storage fee should not depend on tier: bulk=%v std=%v", bulk.StorageFeeUSD, std.StorageFeeUSD)
 	}
 }
 
@@ -270,6 +280,7 @@ func TestRestoreEstimateCountsZipAsOneObject(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"paths": []string{"/"},
 		"tier":  "bulk",
+		"days":  30,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -321,6 +332,7 @@ func TestRestoreEstimateUsesObjectCountForRequestFee(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"paths": []string{"/"},
 		"tier":  "standard",
+		"days":  30,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

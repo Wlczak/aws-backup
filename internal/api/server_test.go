@@ -920,7 +920,7 @@ func TestRestoreEstimate(t *testing.T) {
 	_ = deps.DB.SetZipName(ctx, []int64{b.ID}, "photos/photos_1.zip")
 	_ = c // unused; left as pending
 
-	body := strings.NewReader(`{"paths":["photos","unknown/dir"],"tier":"standard"}`)
+	body := strings.NewReader(`{"paths":["photos","unknown/dir"],"tier":"standard","days":30}`)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/estimate", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
@@ -939,6 +939,9 @@ func TestRestoreEstimate(t *testing.T) {
 	}
 	if got.TotalBytes != 2*1024*1024*1024 {
 		t.Errorf("total_bytes=%d", got.TotalBytes)
+	}
+	if got.StorageFeeUSD <= 0 {
+		t.Errorf("storage_fee_usd not positive: %v", got.StorageFeeUSD)
 	}
 	if got.TotalFeeUSD <= 0 {
 		t.Errorf("total fee not positive: %v", got.TotalFeeUSD)
@@ -1076,6 +1079,40 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 	}
 	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
 		t.Fatalf("unknown_paths=%v", got.UnknownPaths)
+	}
+}
+
+func TestDownloadStatusCarriesCostEstimate(t *testing.T) {
+	srv := &Server{}
+	srv.currentDownload = &downloadSummary{
+		ID:          1,
+		StartedAt:   time.Now().UTC(),
+		Status:      "running",
+		Phase:       "scan",
+		DownloadDir: t.TempDir(),
+	}
+
+	srv.applyDownloadEvent(engine.Event{
+		Type: engine.EventDownloadMirrorScanComplete,
+		Data: map[string]any{
+			"scanned":      4,
+			"present":      2,
+			"missing":      2,
+			"total":        2,
+			"total_bytes":  int64(101 * 1024 * 1024 * 1024),
+			"object_count": int64(3),
+		},
+	})
+
+	got := srv.currentDownload
+	if got == nil {
+		t.Fatal("currentDownload cleared unexpectedly")
+	}
+	if got.ObjectCount != 3 {
+		t.Fatalf("object_count=%d want 3", got.ObjectCount)
+	}
+	if got.RequestFeeUSD <= 0 || got.EgressFeeUSD <= 0 || got.TotalFeeUSD <= 0 {
+		t.Fatalf("expected positive fees: %+v", got)
 	}
 }
 
