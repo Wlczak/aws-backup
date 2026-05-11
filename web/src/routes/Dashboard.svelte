@@ -598,12 +598,16 @@
   <div class="card">
     <div class="label">Index</div>
     {#if stats}
+      {@const restored = stats.by_restore_status?.['restored'] ?? 0}
       <div class="big">{stats.total_count.toLocaleString()} files</div>
       <div class="muted">{bytes(stats.total_size)} total</div>
       <div class="pills">
         {#each Object.entries(stats.by_status) as [k, v]}
           <span class="pill"><StatusBadge status={k} /> {v.toLocaleString()}</span>
         {/each}
+      </div>
+      <div class="muted small" style="margin-top: 0.4rem">
+        {restored.toLocaleString()} restored file(s)
       </div>
     {/if}
   </div>
