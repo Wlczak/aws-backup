@@ -126,12 +126,14 @@
   let pollDestroyed = false;
 
   // SSE drives most updates; polling is a backstop for missed events and
-  // to surface server-side state changes the bus doesn't emit. Use 3s
-  // while a run is active, 30s when idle — an idle dashboard otherwise
-  // burns ~1200 status calls/hour for no value. (#70)
+  // to surface server-side state changes the bus doesn't emit. Use 1s
+  // while a run is active so the headline numbers (files scanned /
+  // uploaded / bytes) feel live even if a few SSE frames were dropped;
+  // 30s when idle — an idle dashboard otherwise burns ~1200 status
+  // calls/hour for no value. (#70)
   function scheduleNextPoll() {
     if (pollDestroyed) return;
-    const delay = status?.current ? 3000 : 30000;
+    const delay = status?.current ? 1000 : 30000;
     pollTimer = window.setTimeout(async () => {
       await refresh();
       scheduleNextPoll();
@@ -497,7 +499,7 @@
     }
     restoring = true; restoreResult = null;
     try {
-      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays);
+      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays, 'standard');
     } catch (e) {
       toast.error(String(e)); // (#226)
     } finally {

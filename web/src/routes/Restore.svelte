@@ -4,6 +4,7 @@
     api,
     subscribeEvents,
     type RestoreEstimate,
+    type RestoreTier,
     type RestoreScanResult,
     type InventoryStatus,
   } from '../lib/api';
@@ -12,6 +13,7 @@
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
+  let tier = $state<RestoreTier>('bulk');
   let days = $state(7);
   let estimate = $state<RestoreEstimate | null>(null);
   let triggerResult = $state<{
@@ -20,6 +22,10 @@
     keys_already_available: number;
     files_affected: number;
     bytes_affected: number;
+    files_skipped_in_progress: number;
+    bytes_skipped_in_progress: number;
+    files_skipped_restored: number;
+    bytes_skipped_restored: number;
     unknown_paths?: string[];
     errors?: string[];
   } | null>(null);
@@ -36,10 +42,23 @@
     confirmTrigger = false;
   });
 
+  $effect(() => {
+    void tier;
+    confirmTrigger = false;
+    estimate = null;
+    triggerResult = null;
+  });
+
   // Restore-status sync state.
   let scanBusy = $state(false);
   let scanResult = $state<RestoreScanResult | null>(null);
   let scanProgress = $state<{ scanned: number; total: number; mode: string } | null>(null);
+
+  // Live progress while a "Request retrieval" is in flight — driven by
+  // restore_request_* SSE events from RequestRestore. A 5000-file restore
+  // issues hundreds of S3 RestoreObject calls, so without this the button
+  // just sat in "Requesting…" with no signal anything was happening.
+  let triggerProgress = $state<{ processed: number; total: number } | null>(null);
 
   // Inventory state.
   let inventory = $state<InventoryStatus | null>(null);
@@ -68,6 +87,14 @@
         scanProgress = null;
       } else if (type === 'restore_scan_failed') {
         scanProgress = null;
+      } else if (type === 'restore_request_start') {
+        const d = data as { total: number };
+        triggerProgress = { processed: 0, total: d.total };
+      } else if (type === 'restore_request_progress') {
+        const d = data as { processed: number; total: number };
+        triggerProgress = { processed: d.processed, total: d.total };
+      } else if (type === 'restore_request_complete' || type === 'restore_request_failed') {
+        triggerProgress = null;
       }
     });
     return () => sub.close();
@@ -170,7 +197,7 @@
     loading = true;
     estimate = null;
     try {
-      estimate = await api.restoreEstimate(p);
+      estimate = await api.restoreEstimate(p, tier);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -208,12 +235,14 @@
     loading = true;
     triggerResult = null;
     try {
-      triggerResult = await api.restoreTrigger(p, days);
+      triggerResult = await api.restoreTrigger(p, days, tier);
       const r = triggerResult;
       const parts: string[] = [];
       if (r.keys_requested > 0) parts.push(`${r.keys_requested} requested`);
       if (r.keys_already_in_progress > 0) parts.push(`${r.keys_already_in_progress} already thawing`);
       if (r.keys_already_available > 0) parts.push(`${r.keys_already_available} already available`);
+      const skipped = r.files_skipped_in_progress + r.files_skipped_restored;
+      if (skipped > 0) parts.push(`${skipped.toLocaleString()} skipped (already thawed)`);
       const summary = parts.length > 0 ? parts.join(' · ') : 'no keys to restore';
       toast.success(`Retrieval ${summary} for ${r.files_affected.toLocaleString()} file(s).`);
     } catch (e) {
@@ -315,19 +344,44 @@
     <code class="mono">restored</code> — track via "Drain SQS now" or
     "Scan pending only" above.
   </p>
-  <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
+  <div class="restore-controls">
+    <select bind:value={tier} class="mono" aria-label="Restore tier">
+      <option value="bulk">Bulk - lowest cost, up to 48h</option>
+      <option value="standard">Standard - faster, up to 12h</option>
+    </select>
+    <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
+  </div>
 
   <div class="actions">
     <button class="primary" onclick={doEstimate} disabled={loading} type="button">
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
     <button onclick={doTrigger} disabled={loading || !estimate} type="button">
-      {confirmTrigger ? 'Click again to confirm' : 'Request retrieval'}
+      {#if loading && triggerProgress}
+        Requesting… {triggerProgress.processed.toLocaleString()} / {triggerProgress.total.toLocaleString()}
+      {:else if loading}
+        Requesting…
+      {:else if confirmTrigger}
+        Click again to confirm
+      {:else}
+        Request retrieval
+      {/if}
     </button>
     <button type="button" onclick={() => { raw = '/'; estimate = null; }} title="Select all files">
       Select all
     </button>
   </div>
+  {#if triggerProgress}
+    {@const pct = triggerProgress.total > 0
+      ? Math.min(100, Math.round((triggerProgress.processed / triggerProgress.total) * 100))
+      : 0}
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct} style="margin-top: 0.75rem">
+      <div class="fill" style="width: {pct}%"></div>
+    </div>
+    <p class="muted small" style="margin-top: 0.25rem">
+      Issuing S3 RestoreObject calls — {pct}% of {triggerProgress.total.toLocaleString()} key(s).
+    </p>
+  {/if}
 </div>
 
 {#if triggerResult}
@@ -335,8 +389,8 @@
     <div class="label">Retrieval request result</div>
     <p class="muted">
       AWS has accepted the restore request. Glacier objects typically thaw
-      within 12–48 h (Standard tier). The matching files are now marked
-      <code class="mono">in_progress</code>; status flips to
+      within about {tier === 'bulk' ? '48 h' : '12 h'} for the selected tier.
+      The matching files are now marked <code class="mono">in_progress</code>; status flips to
       <code class="mono">restored</code> once SQS notifies us or a HEAD scan
       observes <code class="mono">x-amz-restore</code>.
     </p>
@@ -347,6 +401,17 @@
       <div><div class="muted">Files affected</div><div class="big">{triggerResult.files_affected.toLocaleString()}</div></div>
       <div><div class="muted">Data</div><div class="big">{bytes(triggerResult.bytes_affected)}</div></div>
     </div>
+    {#if triggerResult.files_skipped_in_progress > 0 || triggerResult.files_skipped_restored > 0}
+      <p class="muted small" style="margin-top: 0.75rem">
+        Skipped (already thawed, no fresh request issued):
+        {#if triggerResult.files_skipped_restored > 0}
+          {triggerResult.files_skipped_restored.toLocaleString()} restored ({bytes(triggerResult.bytes_skipped_restored)}){#if triggerResult.files_skipped_in_progress > 0}, {/if}
+        {/if}
+        {#if triggerResult.files_skipped_in_progress > 0}
+          {triggerResult.files_skipped_in_progress.toLocaleString()} thawing ({bytes(triggerResult.bytes_skipped_in_progress)})
+        {/if}
+      </p>
+    {/if}
     {#if triggerResult.unknown_paths?.length}
       <details style="margin-top: 0.75rem">
         <summary>{triggerResult.unknown_paths.length} unknown path(s)</summary>
@@ -367,7 +432,7 @@
     <div class="label">Estimate</div>
     <div class="stats">
       <div>
-        <div class="muted">Files</div>
+        <div class="muted">S3 objects</div>
         <div class="big">{estimate.file_count.toLocaleString()}</div>
       </div>
       <div>
@@ -376,7 +441,13 @@
       </div>
       <div>
         <div class="muted">Wait</div>
-        <div class="big">{estimate.wait_hours_min}–{estimate.wait_hours_max}h</div>
+        <div class="big">
+          {#if estimate.wait_hours_min === estimate.wait_hours_max}
+            {estimate.wait_hours_min}h
+          {:else}
+            {estimate.wait_hours_min}–{estimate.wait_hours_max}h
+          {/if}
+        </div>
       </div>
       <div>
         <div class="muted">Total (USD)</div>
@@ -389,12 +460,33 @@
         <tr><th>Fee</th><th>USD</th></tr>
       </thead>
       <tbody>
-        <tr><td>Request fees ({estimate.file_count.toLocaleString()} files × $0.10 / 1000)</td><td class="mono">${estimate.request_fee_usd.toFixed(2)}</td></tr>
-        <tr><td>Retrieval ({bytes(estimate.total_bytes)} × $0.02 / GB)</td><td class="mono">${estimate.retrieval_fee_usd.toFixed(2)}</td></tr>
+        <tr>
+          <td>Request fees ({estimate.file_count.toLocaleString()} object(s) × {tier === 'bulk' ? '$0.025 / 1000' : '$0.11 / 1000'})</td>
+          <td class="mono">${estimate.request_fee_usd.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td>Retrieval ({bytes(estimate.total_bytes)} × {tier === 'bulk' ? '$0.003 / GB' : '$0.02 / GB'})</td>
+          <td class="mono">${estimate.retrieval_fee_usd.toFixed(2)}</td>
+        </tr>
         <tr><td>Egress (first 100 GB free, then $0.09 / GB)</td><td class="mono">${estimate.egress_fee_usd.toFixed(2)}</td></tr>
         <tr><td><strong>Total</strong></td><td class="mono"><strong>${estimate.total_fee_usd.toFixed(2)}</strong></td></tr>
       </tbody>
     </table>
+
+    {#if estimate.already_in_progress_count > 0 || estimate.already_restored_count > 0}
+      <p class="muted small" style="margin-top: 0.75rem">
+        Excluded from this estimate:
+        {#if estimate.already_restored_count > 0}
+          <strong>{estimate.already_restored_count.toLocaleString()}</strong> file(s)
+          ({bytes(estimate.already_restored_bytes)}) already restored{#if estimate.already_in_progress_count > 0}, {/if}
+        {/if}
+        {#if estimate.already_in_progress_count > 0}
+          <strong>{estimate.already_in_progress_count.toLocaleString()}</strong> file(s)
+          ({bytes(estimate.already_in_progress_bytes)}) currently thawing
+        {/if}
+        — re-issuing on these would extend their AWS expiry and re-bill retrieval, so they're skipped.
+      </p>
+    {/if}
 
     {#if estimate.unknown_paths?.length}
       <div class="warn" style="margin-top: 0.75rem">
@@ -423,6 +515,17 @@
     padding: 0.4rem 0.5rem;
     font-size: 0.9rem;
   }
+  .restore-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .restore-controls select {
+    min-width: 16rem;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.9rem;
+  }
   .small { font-size: 0.85rem; }
   details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
   .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
@@ -432,4 +535,6 @@
     gap: 1rem;
   }
   .big { font-size: 1.3rem; font-weight: 500; }
+  .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
 </style>

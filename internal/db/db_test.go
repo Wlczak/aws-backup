@@ -333,6 +333,150 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestTrimRunLogsForRun(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	started := time.Now().UTC().Truncate(time.Second)
+	id, err := d.CreateRun(ctx, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed: 5 info, 2 warn, 1 error — 8 rows total.
+	for i := 0; i < 5; i++ {
+		if err := d.AppendLog(ctx, id, LogInfo, "i", started.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.AppendLog(ctx, id, LogWarn, "w1", started.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id, LogWarn, "w2", started.Add(11*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id, LogError, "e1", started.Add(12*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cap to 4 — must drop 4 rows. Lowest-severity (info) oldest first
+	// means the 4 oldest info rows go; remaining: 1 info, 2 warn, 1 error.
+	deleted, err := d.TrimRunLogsForRun(ctx, id, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 4 {
+		t.Errorf("want 4 deleted, got %d", deleted)
+	}
+	logs, total, err := d.ListLogs(ctx, id, 1, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 {
+		t.Errorf("want 4 remaining, got %d", total)
+	}
+	var info, warn, errLevel int
+	for _, l := range logs {
+		switch l.Level {
+		case LogInfo:
+			info++
+		case LogWarn:
+			warn++
+		case LogError:
+			errLevel++
+		}
+	}
+	if errLevel != 1 || warn != 2 || info != 1 {
+		t.Errorf("severity preservation broken: info=%d warn=%d error=%d", info, warn, errLevel)
+	}
+
+	// Cap >= total → no-op.
+	deleted, err = d.TrimRunLogsForRun(ctx, id, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 0 {
+		t.Errorf("want 0 deleted on no-op, got %d", deleted)
+	}
+
+	// maxLines<=0 → no-op.
+	deleted, err = d.TrimRunLogsForRun(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 0 {
+		t.Errorf("want 0 deleted on disabled, got %d", deleted)
+	}
+}
+
+func TestTrimRunLogsByAge(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	old := now.Add(-60 * 24 * time.Hour)  // 60 days ago
+	recent := now.Add(-1 * 24 * time.Hour) // 1 day ago
+
+	oldID, err := d.CreateRun(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recentID, err := d.CreateRun(ctx, recent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, err := d.CreateRun(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []int64{oldID, recentID, activeID} {
+		if err := d.AppendLog(ctx, id, LogInfo, "x", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Finish the two non-active ones with appropriate timestamps.
+	if err := d.FinishRun(ctx, oldID, RunCompleted, "", old.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FinishRun(ctx, recentID, RunCompleted, "", recent.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cutoff = 30 days ago. Old run's logs go; recent + active stay.
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	deleted, err := d.TrimRunLogsByAge(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Errorf("want 1 deleted, got %d", deleted)
+	}
+
+	// Old run row must still exist (only logs were trimmed).
+	if _, err := d.GetRun(ctx, oldID); err != nil {
+		t.Fatalf("old run row was unexpectedly deleted: %v", err)
+	}
+	if _, total, _ := d.ListLogs(ctx, oldID, 1, 10); total != 0 {
+		t.Errorf("old run still has %d log rows", total)
+	}
+	if _, total, _ := d.ListLogs(ctx, recentID, 1, 10); total != 1 {
+		t.Errorf("recent run logs trimmed unexpectedly: %d", total)
+	}
+	if _, total, _ := d.ListLogs(ctx, activeID, 1, 10); total != 1 {
+		t.Errorf("active run logs trimmed unexpectedly: %d", total)
+	}
+
+	// Zero cutoff → no-op.
+	deleted, err = d.TrimRunLogsByAge(ctx, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 0 {
+		t.Errorf("want 0 deleted on disabled, got %d", deleted)
+	}
+}
+
 func TestListPending(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

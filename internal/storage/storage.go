@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+// RestoreTier selects the Glacier retrieval speed/cost tradeoff when
+// requesting a thaw for archived objects.
+type RestoreTier string
+
+const (
+	RestoreTierStandard RestoreTier = "standard"
+	RestoreTierBulk     RestoreTier = "bulk"
+)
+
 // ErrNotFound is returned by Head / GetRestoreStatus when a key is absent.
 var ErrNotFound = errors.New("storage: key not found")
 
@@ -84,9 +93,10 @@ type Storage interface {
 	// Head returns metadata or ErrNotFound.
 	Head(ctx context.Context, key string) (HeadResult, error)
 
-	// Restore issues a Glacier-style restore request for `days`. Returns
-	// ErrUnsupported on storage classes that don't need restoration.
-	Restore(ctx context.Context, key string, days int) error
+	// Restore issues a Glacier-style restore request for `days` using the
+	// chosen retrieval tier. Returns ErrUnsupported on storage classes
+	// that don't need restoration.
+	Restore(ctx context.Context, key string, days int, tier RestoreTier) error
 
 	// List returns every object key in the bucket whose key starts with
 	// prefix. Pass "" to list everything. Used by the index-sync operation.

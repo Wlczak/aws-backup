@@ -42,7 +42,9 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
     "retry_failed": true,                // pick up status='failed' alongside 'pending'
     "copy_threads": 0,                   // 0/1 = sequential staging
     "upload_threads": 0,                 // 0/1 = sequential uploads
-    "pipeline_queue": 0                  // 0 = max(upload_threads, 1)
+    "pipeline_queue": 0,                 // 0 = max(upload_threads, 1)
+    "log_retention_days": 30,            // 0 = keep run_logs forever
+    "log_max_per_run": 5000              // 0 = no per-run cap
   },
   "server": { "host": "127.0.0.1", "port": 8080 }
 }

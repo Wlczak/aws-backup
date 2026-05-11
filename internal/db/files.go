@@ -955,12 +955,13 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 	return result.RowsAffected, result.Error
 }
 
-// RestoreEstimateStats aggregates file_count + total_bytes for a
-// restore-cost estimate in one SQL query instead of paging the whole
-// index into Go and matching prefixes per row. The previous handler
-// scanned every file row + ran AfterFind on every restore_expires_at
-// just to tally a count and a sum, which made a "select all" estimate
-// take many seconds on large indexes. (#estimate-batch)
+// RestoreEstimateStats aggregates per-bucket counts + bytes for a
+// restore-cost estimate in one SQL pass per chunk instead of paging
+// the whole index into Go and matching prefixes per row. (#estimate-batch)
+// The breakdown splits files by current restore_status so the cost
+// estimate (and the trigger) can ignore files already in_progress or
+// already restored — re-issuing those would just extend their AWS
+// expiry timer and re-bill retrieval. (#estimate-skip-thawed)
 //
 // `paths` are matched component-wise: a path equals the request OR
 // starts with it followed by a separator (so "foo" matches "foo" and
@@ -968,53 +969,116 @@ func (db *DB) MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, e
 // separator the rest of the system stores.
 //
 // Pass allFiles=true to skip the path filter entirely (the "/" or ""
-// sentinel from the API). Returns count, total bytes, and the subset
-// of `paths` that actually matched at least one row (the rest are the
-// caller's "unknown_paths").
-func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles bool) (int64, int64, []string, error) {
+// sentinel from the API). MatchedPaths is the subset of `paths` that
+// matched at least one uploaded/zipped row (regardless of restore
+// state); the caller's "unknown_paths" is the complement.
+// RestoreEstimateBreakdown splits the matched files into the bucket the
+// caller actually needs to retrieve (Retrievable*) and the bucket already
+// thawed or being thawed (AlreadyInProgress* + AlreadyRestored*) so the
+// estimate cost / trigger payload only counts files that will actually
+// generate fresh S3 RestoreObject calls.
+type RestoreEstimateBreakdown struct {
+	RetrievableCount       int64
+	RetrievableBytes       int64
+	AlreadyInProgressCount int64
+	AlreadyInProgressBytes int64
+	AlreadyRestoredCount   int64
+	AlreadyRestoredBytes   int64
+	MatchedPaths           []string
+}
+
+func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles bool) (RestoreEstimateBreakdown, error) {
 	statuses := []string{StatusUploaded, StatusZipped}
 
-	q := db.g.WithContext(ctx).Model(&File{}).Where("status IN ?", statuses)
-	if !allFiles && len(paths) > 0 {
-		var conds []string
-		var args []any
-		for _, p := range paths {
-			conds = append(conds, "path = ? OR path LIKE ? ESCAPE '\\'")
-			args = append(args, p, likeEscape.Replace(p)+"/%")
-		}
-		q = q.Where("("+strings.Join(conds, ") OR (")+")", args...)
-	}
+	// Conditional aggregates so one scan per chunk yields counts + bytes
+	// for all three buckets (retrievable / in_progress / restored).
+	const sel = "" +
+		"SUM(CASE WHEN COALESCE(restore_status,'') NOT IN ('" + RestoreStatusInProgress + "','" + RestoreStatusRestored + "') THEN 1 ELSE 0 END) AS retrievable_count, " +
+		"COALESCE(SUM(CASE WHEN COALESCE(restore_status,'') NOT IN ('" + RestoreStatusInProgress + "','" + RestoreStatusRestored + "') THEN size ELSE 0 END), 0) AS retrievable_bytes, " +
+		"SUM(CASE WHEN restore_status = '" + RestoreStatusInProgress + "' THEN 1 ELSE 0 END) AS in_progress_count, " +
+		"COALESCE(SUM(CASE WHEN restore_status = '" + RestoreStatusInProgress + "' THEN size ELSE 0 END), 0) AS in_progress_bytes, " +
+		"SUM(CASE WHEN restore_status = '" + RestoreStatusRestored + "' THEN 1 ELSE 0 END) AS restored_count, " +
+		"COALESCE(SUM(CASE WHEN restore_status = '" + RestoreStatusRestored + "' THEN size ELSE 0 END), 0) AS restored_bytes"
 
-	var row struct {
-		Count int64
-		Bytes int64
+	type aggRow struct {
+		RetrievableCount int64
+		RetrievableBytes int64
+		InProgressCount  int64
+		InProgressBytes  int64
+		RestoredCount    int64
+		RestoredBytes    int64
 	}
-	if err := q.Select("COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes").
-		Scan(&row).Error; err != nil {
-		return 0, 0, nil, err
+	var br RestoreEstimateBreakdown
+
+	addRow := func(r aggRow) {
+		br.RetrievableCount += r.RetrievableCount
+		br.RetrievableBytes += r.RetrievableBytes
+		br.AlreadyInProgressCount += r.InProgressCount
+		br.AlreadyInProgressBytes += r.InProgressBytes
+		br.AlreadyRestoredCount += r.RestoredCount
+		br.AlreadyRestoredBytes += r.RestoredBytes
 	}
 
 	if allFiles || len(paths) == 0 {
-		return row.Count, row.Bytes, nil, nil
+		var row aggRow
+		if err := db.g.WithContext(ctx).Model(&File{}).
+			Where("status IN ?", statuses).
+			Select(sel).
+			Scan(&row).Error; err != nil {
+			return RestoreEstimateBreakdown{}, err
+		}
+		addRow(row)
+		return br, nil
+	}
+
+	// Chunk the path filter so the OR-chain stays under SQLite's
+	// SQLITE_MAX_EXPR_DEPTH (default 1000). Each path contributes one
+	// OR'd subexpression; with thousands of paths a single query blows
+	// the limit. (#estimate-depth)
+	for s := 0; s < len(paths); s += sqlChunkSize {
+		if err := ctx.Err(); err != nil {
+			return RestoreEstimateBreakdown{}, err
+		}
+		end := s + sqlChunkSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunk := paths[s:end]
+		conds := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, p := range chunk {
+			conds = append(conds, "path = ? OR path LIKE ? ESCAPE '\\'")
+			args = append(args, p, likeEscape.Replace(p)+"/%")
+		}
+		var row aggRow
+		if err := db.g.WithContext(ctx).Model(&File{}).
+			Where("status IN ?", statuses).
+			Where("("+strings.Join(conds, ") OR (")+")", args...).
+			Select(sel).
+			Scan(&row).Error; err != nil {
+			return RestoreEstimateBreakdown{}, err
+		}
+		addRow(row)
 	}
 
 	// Per-path EXISTS check so the caller can flag unmatched paths.
-	// Each query uses the unique path index for the equality probe and
-	// a range scan for the LIKE — both sub-ms in practice.
-	matched := make([]string, 0, len(paths))
+	// "Matched" means "matches any uploaded/zipped row" regardless of
+	// restore_status — a path whose files are all already thawed should
+	// not be reported as "unknown", just as having nothing to retrieve.
+	br.MatchedPaths = make([]string, 0, len(paths))
 	for _, p := range paths {
 		var probe []int64
 		if err := db.g.WithContext(ctx).Model(&File{}).
 			Where("status IN ? AND (path = ? OR path LIKE ? ESCAPE '\\')",
 				statuses, p, likeEscape.Replace(p)+"/%").
 			Select("id").Limit(1).Pluck("id", &probe).Error; err != nil {
-			return 0, 0, nil, err
+			return RestoreEstimateBreakdown{}, err
 		}
 		if len(probe) > 0 {
-			matched = append(matched, p)
+			br.MatchedPaths = append(br.MatchedPaths, p)
 		}
 	}
-	return row.Count, row.Bytes, matched, nil
+	return br, nil
 }
 
 // MarkRestoreInProgressMany is the bulk variant of MarkRestoreInProgress.

@@ -54,4 +54,19 @@
     <input type="checkbox" bind:checked={cfg.backup.retry_failed} />
     <span>Auto-retry failed files on the next run</span>
   </label>
+  <div class="row-2">
+    <label>
+      <span>Log retention (days, 0 = keep forever)</span>
+      <input type="number" min="0" bind:value={cfg.backup.log_retention_days} />
+    </label>
+    <label>
+      <span>Max log lines per run (0 = unlimited)</span>
+      <input type="number" min="0" bind:value={cfg.backup.log_max_per_run} />
+    </label>
+  </div>
+  <p class="muted">
+    Old runs lose their per-line logs after the retention window; the run row + final
+    error message stay. The per-run cap deletes lowest-severity oldest lines first
+    (info before warn before error). Trim runs after each backup and once at startup.
+  </p>
 </div>

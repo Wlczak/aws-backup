@@ -88,6 +88,13 @@ type Options struct {
 	// PipelineQueue bounds how many staged groups wait between the copy
 	// and upload stages. 0 = auto (max(UploadThreads, 1)).
 	PipelineQueue int
+	// LogRetentionDays / LogMaxPerRun bound how much per-run log data
+	// stays in run_logs. After FinishRun, the engine prunes:
+	//   - the just-finished run to LogMaxPerRun rows (lowest-severity oldest first)
+	//   - every run finished more than LogRetentionDays days ago (drops all log rows; runs row preserved)
+	// 0 disables the corresponding pass.
+	LogRetentionDays int
+	LogMaxPerRun     int
 }
 
 // ErrStopRequested is returned by upload helpers when StopRequested
@@ -207,6 +214,21 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 		slog.Warn("finalize run failed", "err", ferr, "run_id", runID)
 		if runErr == nil {
 			return runID, fmt.Errorf("finalize run: %w", ferr)
+		}
+	}
+
+	// Trim run_logs so a chatty run + long retention history doesn't
+	// grow the DB unboundedly. Log-only failures here are non-fatal —
+	// they don't affect the run's reported outcome. (#log-trim)
+	if e.opts.LogMaxPerRun > 0 {
+		if _, err := e.opts.DB.TrimRunLogsForRun(cleanupCtx, runID, e.opts.LogMaxPerRun); err != nil {
+			slog.Warn("trim run_logs (per-run cap) failed", "err", err, "run_id", runID)
+		}
+	}
+	if e.opts.LogRetentionDays > 0 {
+		cutoff := finished.AddDate(0, 0, -e.opts.LogRetentionDays)
+		if _, err := e.opts.DB.TrimRunLogsByAge(cleanupCtx, cutoff); err != nil {
+			slog.Warn("trim run_logs (age cutoff) failed", "err", err, "cutoff", cutoff)
 		}
 	}
 

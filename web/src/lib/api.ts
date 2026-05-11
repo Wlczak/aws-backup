@@ -4,6 +4,7 @@
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
 export type RestoreStatus = '' | 'in_progress' | 'restored';
+export type RestoreTier = 'bulk' | 'standard';
 
 export interface Run {
   id: number;
@@ -92,6 +93,9 @@ export interface Status {
 }
 
 export interface RestoreEstimate {
+  // Counts of actual S3 objects that will generate fresh
+  // RestoreObject calls — zip members collapse to one archive key and
+  // already_in_progress / already_restored buckets are excluded.
   file_count: number;
   total_bytes: number;
   request_fee_usd: number;
@@ -100,6 +104,10 @@ export interface RestoreEstimate {
   total_fee_usd: number;
   wait_hours_min: number;
   wait_hours_max: number;
+  already_in_progress_count: number;
+  already_in_progress_bytes: number;
+  already_restored_count: number;
+  already_restored_bytes: number;
   unknown_paths?: string[];
 }
 
@@ -147,6 +155,8 @@ export interface BackupConfig {
   copy_threads: number;
   upload_threads: number;
   pipeline_queue: number;
+  log_retention_days: number;
+  log_max_per_run: number;
 }
 export interface ServerConfig { host: string; port: number }
 export interface SQSConfig {
@@ -340,10 +350,10 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  restoreEstimate: (paths: string[]) =>
+  restoreEstimate: (paths: string[], tier: RestoreTier) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ paths, tier }),
     }),
   /**
    * Issue a Glacier restore request for every unique S3 key covering the
@@ -353,18 +363,22 @@ export const api = {
    * affected DB rows immediately move to restore_status='in_progress'
    * so the UI reflects the request.
    */
-  restoreTrigger: (paths: string[], days: number) =>
+  restoreTrigger: (paths: string[], days: number, tier: RestoreTier) =>
     request<{
       keys_requested: number;
       keys_already_in_progress: number;
       keys_already_available: number;
       files_affected: number;
       bytes_affected: number;
+      files_skipped_in_progress: number;
+      bytes_skipped_in_progress: number;
+      files_skipped_restored: number;
+      bytes_skipped_restored: number;
       unknown_paths?: string[];
       errors?: string[];
     }>('/api/restore/trigger', {
       method: 'POST',
-      body: JSON.stringify({ paths, days }),
+      body: JSON.stringify({ paths, days, tier }),
     }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {
@@ -435,6 +449,7 @@ export function subscribeEvents(
     'run_start', 'run_log', 'run_complete',
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
+    'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so
