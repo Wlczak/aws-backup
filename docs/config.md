@@ -37,7 +37,7 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
     "download_dir": "",                  // local mirror target used by the dashboard full-download job
     "schedule": "",                      // empty = manual only; otherwise standard cron
     "zip_threshold": 50,                 // files-per-dir threshold for zipping
-    "min_zip_dir_files": 0,              // optional floor on per-zip file count
+    "min_zip_dir_files": 0,              // optional floor on per-zip file count; folds tiny sibling folders into the current zip pool
     "zip_max_bytes": 0,                  // 0 = engine default (2 GiB per zip)
     "enable_zip_index": true,            // upload .zip.index.txt sidecar in STANDARD
     "retry_failed": true,                // pick up status='failed' alongside 'pending'

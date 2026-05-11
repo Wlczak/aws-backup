@@ -171,6 +171,39 @@ func TestGroupFilesMinZipDirFiles(t *testing.T) {
 	}
 }
 
+func TestGroupFilesMinZipDirFilesFoldTopLevelDirs(t *testing.T) {
+	// Before the root-level fold fix, each top-level folder below the
+	// threshold would be emitted separately even when the whole tree was
+	// object-heavy. Now those small sibling folders collapse into a small
+	// number of zip groups at the root.
+	files := []PendingFile{
+		{ID: 1, RelPath: "alpha/a1.txt", Size: 200},
+		{ID: 2, RelPath: "alpha/a2.txt", Size: 200},
+		{ID: 3, RelPath: "beta/b1.txt", Size: 200},
+		{ID: 4, RelPath: "beta/b2.txt", Size: 200},
+		{ID: 5, RelPath: "gamma/c1.txt", Size: 200},
+		{ID: 6, RelPath: "gamma/c2.txt", Size: 200},
+	}
+
+	groups := GroupFiles(files, 3, 3, 1000)
+	if len(groups) != 2 {
+		t.Fatalf("want 2 root zip groups, got %d: %+v", len(groups), groups)
+	}
+	total := 0
+	for _, g := range groups {
+		if g.TopDir != "" {
+			t.Errorf("root-folded groups should keep TopDir empty, got %q", g.TopDir)
+		}
+		if !g.Zip {
+			t.Errorf("group %+v should be zipped", g)
+		}
+		total += len(g.Files)
+	}
+	if total != len(files) {
+		t.Errorf("groups lost files: covered=%d want=%d", total, len(files))
+	}
+}
+
 func TestZipName(t *testing.T) {
 	// Files all in photos/ → label is "photos"
 	photosFiles := []PendingFile{

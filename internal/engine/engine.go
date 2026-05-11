@@ -61,8 +61,9 @@ type Options struct {
 	ZipMaxBytes int64
 	// MinZipDirFiles is the minimum file count a subdirectory must have
 	// to be emitted as its own group during a size-cap split. Subdirs
-	// below this threshold are folded into the parent's loose-file pool
-	// to avoid producing many tiny zips. <= 0 disables the floor.
+	// below this threshold are folded into the current level's loose-
+	// file pool so many tiny sibling folders can collapse into a small
+	// number of zip objects. <= 0 disables the floor.
 	MinZipDirFiles int
 	// EnableZipIndex, when true, uploads a STANDARD-tier
 	// `{zipKey}.index.txt` sidecar next to each zip listing its

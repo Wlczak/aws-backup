@@ -68,7 +68,9 @@ type dirNode struct {
 }
 
 // GroupFiles splits pending files into upload groups, preferring
-// subdirectory boundaries over arbitrary numbered slices.
+// subdirectory boundaries over arbitrary numbered slices while folding
+// small sibling folders up into their parent loose-file pool so object-
+// heavy trees get zipped instead of fanning out into many uploads.
 //
 // Algorithm:
 //  1. Build a path tree from all RelPaths.
@@ -78,8 +80,10 @@ type dirNode struct {
 //  3. If a subtree is too big, recurse into each child subdirectory —
 //     so `photos/2024/` and `photos/2025/` become separate zips instead
 //     of one monolithic `photos_1.zip`. Child subdirectories with fewer
-//     than minZipDirFiles files are folded into the parent's loose-file
-//     pool instead of becoming tiny standalone groups.
+//     than minZipDirFiles files are folded into the current level's
+//     loose-file pool instead of becoming tiny standalone groups; this
+//     applies at the root too so many tiny top-level folders can still
+//     collapse into a small number of zip objects.
 //  4. Files sitting directly at a splitting level ("loose files"), plus
 //     any folded small-child files, form their own group; if they
 //     collectively exceed maxBytes they are chunked by size.
@@ -96,9 +100,9 @@ func GroupFiles(files []PendingFile, zipThreshold, minZipDirFiles int, maxBytes 
 
 	root := buildTree(files)
 	var out []Group
-	// Root always descends into its children so each top-level directory
-	// is a natural group boundary, independent of the size cap. The cap
-	// only drives further splits inside a top-level subtree.
+	// Keep the root as a split point so top-level directories still act
+	// like natural boundaries when the tree is not object-heavy enough
+	// to collapse.
 	walkTree(root, "", zipThreshold, minZipDirFiles, maxBytes, true, &out)
 	return out
 }
@@ -136,9 +140,9 @@ func buildTree(files []PendingFile) *dirNode {
 
 // walkTree decides how to split a subtree into groups, writing them into
 // *out. pathPrefix is the slash-joined directory path from the tree root
-// to this node ("" for root). mustDescend forces the split at this level
-// even if the subtree would fit in the cap — set at root so top-level
-// directories are always their own groups regardless of cap settings.
+// to this node ("" for root). mustDescend forces a split at this level so
+// the root can remain a natural boundary even when the whole tree fits in
+// the size cap.
 func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, maxBytes int64, mustDescend bool, out *[]Group) {
 	// Subtree fits in the cap — emit the whole thing as one group.
 	if !mustDescend && (maxBytes <= 0 || n.size <= maxBytes) {
@@ -158,8 +162,8 @@ func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, m
 	// Descend into each child subdir so subfolders become the group
 	// boundary (e.g. photos/2024/ vs photos/2025/) instead of numbered
 	// slices of a flat top-dir. Children with fewer than minZipDirFiles
-	// files (only when not at the forced root level) are folded into
-	// this level's loose-file pool rather than becoming tiny groups.
+	// files are folded into this level's loose-file pool rather than
+	// becoming tiny groups.
 	childNames := make([]string, 0, len(n.children))
 	for name := range n.children {
 		childNames = append(childNames, name)
@@ -173,7 +177,7 @@ func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, m
 		if pathPrefix != "" {
 			childPrefix = pathPrefix + "/" + name
 		}
-		if !mustDescend && minZipDirFiles > 0 && child.count < minZipDirFiles {
+		if minZipDirFiles > 0 && child.count < minZipDirFiles {
 			folded = append(folded, collectSubtree(child)...)
 			continue
 		}

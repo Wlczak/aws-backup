@@ -4,6 +4,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
+| — | — | Full-download dashboard job now carries an object-count + GET/egress cost estimate for the missing set, so the dashboard can show the expected download cost once the mirror scan has determined what is actually missing |
 | — | — | SQLite connection pool now closes the idle connection after 15 minutes and transparently reopens on the next query; the DB handle itself stays alive for the process lifetime |
 | — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
 | — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
