@@ -31,6 +31,7 @@ export interface FileRow {
   mtime: string;
   md5?: string;
   status: FileStatus;
+  zip_id?: number;
   zip_name?: string;
   s3_key?: string;
   uploaded_at?: string;

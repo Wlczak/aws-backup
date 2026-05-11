@@ -103,7 +103,7 @@ aws-backup/
 | `cmd/aws-backup` | CLI entry: subcommands `config` (`init`/`path`/`validate`), `run`, `serve`. Owns `appState` (cfg/db/src/store/sched/bus/sqsConsumer), wires `applySettings` for hot-swap, runs scheduler + HTTP server |
 | `internal/api` | HTTP layer: chi router, JSON handlers, SSE bridge, in-flight run tracking, cfg mutex shared with cmd via `Deps.ConfigMu` |
 | `internal/config` | Config tree (`Source`/`S3`/`SQS`/`Backup`/`Server`), JSON load/save with atomic + fsync, `Validate`, `Redacted`, `Default` |
-| `internal/db` | GORM (+ glebarez/sqlite, CGO-free) models and queries. `AutoMigrate` is the schema source of truth |
+| `internal/db` | GORM (+ glebarez/sqlite, CGO-free) models and queries. Goose migrations own the schema |
 | `internal/engine` | Backup orchestrator + zip grouping + cloud index reader + restore extractor + tmp-space guard |
 | `internal/events` | Tiny in-process pub/sub bus that fans `engine.Event` out to SSE subscribers |
 | `internal/pathutil` | Canonical path helpers: prefix matching with exact-match guard, S3 list-prefix normalisation |

@@ -6,6 +6,9 @@ package engine
 import (
 	"archive/zip"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +42,13 @@ type Group struct {
 	TopDir string // top-level directory, "" for root-level files
 	Zip    bool
 	Files  []PendingFile
+}
+
+// ZipEntry captures one member written into an archive together with its
+// per-file MD5. The archive checksum itself lives on the zip row.
+type ZipEntry struct {
+	Path string
+	MD5  string
 }
 
 // rootDirLabel is the fake "directory" name used when naming zips that
@@ -379,13 +389,13 @@ func sanitizeLabel(s string) string {
 // non-nil, is applied once per source reader before bytes flow into
 // the zip writer; the engine uses it to inject a counterReader that
 // emits live copy_progress events.
-func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string, wrap func(io.Reader) io.Reader) (size int64, entries []string, err error) {
+func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string, wrap func(io.Reader) io.Reader) (size int64, entries []ZipEntry, md5hex, sha256hex string, err error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	out, err := os.Create(outPath)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	defer func() {
 		cerr := out.Close()
@@ -394,39 +404,42 @@ func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outP
 		}
 	}()
 
-	zw := zip.NewWriter(out)
+	md5h := md5.New()
+	sha256h := sha256.New()
+	zw := zip.NewWriter(io.MultiWriter(out, md5h, sha256h))
 	for _, f := range files {
 		if err := ctx.Err(); err != nil {
 			zw.Close()
-			return 0, nil, err
+			return 0, nil, "", "", err
 		}
-		if err := writeZipEntry(ctx, zw, src, f, wrap); err != nil {
+		md5hex, err := writeZipEntry(ctx, zw, src, f, wrap)
+		if err != nil {
 			zw.Close()
-			return 0, nil, fmt.Errorf("zip %s: %w", f.RelPath, err)
+			return 0, nil, "", "", fmt.Errorf("zip %s: %w", f.RelPath, err)
 		}
-		entries = append(entries, f.RelPath)
+		entries = append(entries, ZipEntry{Path: f.RelPath, MD5: md5hex})
 	}
 	if err := zw.Close(); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	if err := out.Sync(); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	st, err := out.Stat()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
-	return st.Size(), entries, nil
+	return st.Size(), entries, hex.EncodeToString(md5h.Sum(nil)), hex.EncodeToString(sha256h.Sum(nil)), nil
 }
 
-func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile, wrap func(io.Reader) io.Reader) error {
+func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile, wrap func(io.Reader) io.Reader) (string, error) {
 	w, err := zw.Create(f.RelPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	rc, err := src.Open(ctx, f.RelPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer rc.Close()
 	var reader io.Reader = rc
@@ -437,6 +450,10 @@ func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f Pen
 	// zip-entry read within one io.Copy buffer instead of waiting for
 	// the file to fully drain into the zip writer.
 	reader = &ctxReader{ctx: ctx, r: reader}
-	_, err = io.Copy(w, reader)
-	return err
+	h := md5.New()
+	_, err = io.Copy(w, io.TeeReader(reader, h))
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

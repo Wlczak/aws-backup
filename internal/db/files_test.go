@@ -233,3 +233,65 @@ func TestListRestoreScanKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestMarkZipUploadedBatchCreatesZipRow verifies the new archive table and
+// per-file checksum split: the zip row carries archive metadata while each
+// member row keeps its own MD5 and points at the zip record.
+func TestMarkZipUploadedBatchCreatesZipRow(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	a, err := d.UpsertFile(ctx, "photos/a.jpg", 10, now, now)
+	if err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+	b, err := d.UpsertFile(ctx, "photos/b.jpg", 20, now, now)
+	if err != nil {
+		t.Fatalf("seed b: %v", err)
+	}
+
+	zipTime := now.Add(2 * time.Minute)
+	if err := d.MarkZipUploadedBatch(ctx, Zip{
+		ZipName:    "photos/photos_1.zip",
+		Size:       1234,
+		MD5:        "archive-md5",
+		SHA256:     "archive-sha",
+		S3Key:      "backups/photos/photos_1.zip",
+		UploadedAt: &zipTime,
+		LastSeenAt: zipTime,
+	}, []ZipMemberUpload{
+		{ID: a.ID, MD5: "md5-a"},
+		{ID: b.ID, MD5: "md5-b"},
+	}); err != nil {
+		t.Fatalf("MarkZipUploadedBatch: %v", err)
+	}
+
+	var zipRow Zip
+	if err := d.g.WithContext(ctx).Where("zip_name = ?", "photos/photos_1.zip").First(&zipRow).Error; err != nil {
+		t.Fatalf("load zip row: %v", err)
+	}
+	if zipRow.MD5 != "archive-md5" || zipRow.SHA256 != "archive-sha" || zipRow.S3Key != "backups/photos/photos_1.zip" {
+		t.Fatalf("zip row = %+v", zipRow)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{Search: "photos/", All: true})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("want 2 files, got %d", len(files))
+	}
+	for _, f := range files {
+		if f.ZipID == nil {
+			t.Fatalf("%s missing zip_id", f.Path)
+		}
+		if f.ZipName != "photos/photos_1.zip" {
+			t.Fatalf("%s zip_name=%q", f.Path, f.ZipName)
+		}
+		wantMD5 := map[string]string{"photos/a.jpg": "md5-a", "photos/b.jpg": "md5-b"}[f.Path]
+		if f.MD5 != wantMD5 {
+			t.Fatalf("%s md5=%q want %q", f.Path, f.MD5, wantMD5)
+		}
+	}
+}

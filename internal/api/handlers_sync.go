@@ -59,7 +59,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Gate on engine-idle: while a run is in flight the engine writes
-	// status / s3_key / zip_name on the same rows MarkPending* flips. A
+	// status / s3_key / zip_name / zip_id on the same rows MarkPending* flips. A
 	// stale List page could observe a just-uploaded key as missing and
 	// reset it to pending. (#222)
 	s.runMu.Lock()
@@ -152,6 +152,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 	now := time.Now().UTC()
 	const pageSize = 1000
 	zipHeadCache := map[string]storage.HeadResult{}
+	zipIDCache := map[string]int64{}
 	getHead := func(key string) (storage.HeadResult, bool) {
 		if head, ok := zipHeadCache[key]; ok {
 			return head, true
@@ -163,7 +164,28 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		zipHeadCache[key] = head
 		return head, true
 	}
-	buildFields := func(cf engine.CloudFile, status string) map[string]any {
+	getZipID := func(zipKey string) (int64, error) {
+		if id, ok := zipIDCache[zipKey]; ok {
+			return id, nil
+		}
+		zipRel := strings.TrimPrefix(zipKey, prefix)
+		zipRow := db.Zip{ZipName: zipRel, S3Key: zipKey, LastSeenAt: now}
+		if head, ok := getHead(zipKey); ok {
+			zipRow.Size = head.Size
+			uploadedAt := head.LastModified.UTC()
+			zipRow.UploadedAt = &uploadedAt
+		} else {
+			uploadedAt := now
+			zipRow.UploadedAt = &uploadedAt
+		}
+		id, err := s.deps.DB.UpsertZip(ctx, zipRow)
+		if err != nil {
+			return 0, err
+		}
+		zipIDCache[zipKey] = id
+		return id, nil
+	}
+	buildFields := func(cf engine.CloudFile, status string) (map[string]any, error) {
 		fields := map[string]any{
 			"status": status,
 		}
@@ -171,8 +193,14 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		if cf.ZipKey != "" {
 			s3Key = cf.ZipKey
 			fields["zip_name"] = strings.TrimPrefix(cf.ZipKey, prefix)
+			zipID, err := getZipID(cf.ZipKey)
+			if err != nil {
+				return nil, err
+			}
+			fields["zip_id"] = zipID
 		} else {
 			fields["zip_name"] = ""
+			fields["zip_id"] = nil
 		}
 		fields["s3_key"] = s3Key
 		if head, ok := getHead(s3Key); ok {
@@ -189,7 +217,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 				fields["mtime"] = now
 			}
 		}
-		return fields
+		return fields, nil
 	}
 	for p := 1; ; p++ {
 		if err := ctx.Err(); err != nil {
@@ -209,18 +237,26 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			// recoverable only while their S3 object still exists.
 			if f.Status == db.StatusMissing {
 				if cf, ok := idx.Files[f.Path]; ok {
+					fields, err := buildFields(cf, db.StatusCloudOnly)
+					if err != nil {
+						return fullSyncResponse{}, fmt.Errorf("build cloud-only fields for %s: %w", f.Path, err)
+					}
 					promoteUploaded = append(promoteUploaded, db.FileUpdate{
 						ID:     f.ID,
-						Fields: buildFields(cf, db.StatusCloudOnly),
+						Fields: fields,
 					})
 				}
 				continue
 			}
 			if cf, ok := idx.Files[f.Path]; ok {
 				if f.Status != db.StatusUploaded {
+					fields, err := buildFields(cf, db.StatusUploaded)
+					if err != nil {
+						return fullSyncResponse{}, fmt.Errorf("build uploaded fields for %s: %w", f.Path, err)
+					}
 					promoteUploaded = append(promoteUploaded, db.FileUpdate{
 						ID:     f.ID,
-						Fields: buildFields(cf, db.StatusUploaded),
+						Fields: fields,
 					})
 				}
 				continue
@@ -235,6 +271,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 					Fields: map[string]any{
 						"status":      db.StatusPending,
 						"md5":         nil,
+						"zip_id":      nil,
 						"zip_name":    nil,
 						"s3_key":      nil,
 						"uploaded_at": nil,
@@ -265,7 +302,12 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			LastSeenAt: now,
 		}
 		if cf.ZipKey != "" {
+			zipID, err := getZipID(cf.ZipKey)
+			if err != nil {
+				return fullSyncResponse{}, fmt.Errorf("upsert zip %s: %w", cf.ZipKey, err)
+			}
 			row.ZipName = strings.TrimPrefix(cf.ZipKey, prefix)
+			row.ZipID = &zipID
 			row.S3Key = cf.ZipKey
 			head, ok := zipHeadCache[cf.ZipKey]
 			if !ok {

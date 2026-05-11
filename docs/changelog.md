@@ -5,6 +5,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | # | Commit | Summary |
 | --- | --- | --- |
 | — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
+| — | — | Zip archives now live in a dedicated `zips` table, `files.md5` stores per-file hashes again, and zip-backed files point at the archive row via `files.zip_id` |
 | — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
 | #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `cloud_only`, and reset only still-local stale rows to pending |

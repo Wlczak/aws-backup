@@ -82,6 +82,7 @@ type File struct {
 	MTime         time.Time `gorm:"column:mtime;not null"`
 	MD5           string    `gorm:"column:md5"`
 	Status        string    `gorm:"column:status;not null;default:'pending';index"`
+	ZipID         *int64    `gorm:"column:zip_id;index"`
 	ZipName       string    `gorm:"column:zip_name;index"`
 	S3Key         string    `gorm:"column:s3_key"`
 	UploadedAt    time.Time `gorm:"column:uploaded_at"`
@@ -98,6 +99,27 @@ type File struct {
 	// RestoreExpiresAt is parsed from the raw column in AfterFind;
 	// callers continue to read it as the typed *time.Time they always did.
 	RestoreExpiresAt *time.Time `gorm:"-" json:"restore_expires_at,omitempty"`
+}
+
+// Zip tracks one archive object in S3. Files that were packed into the
+// archive point at this row via files.zip_id, while standalone rows keep
+// zip_id NULL.
+type Zip struct {
+	ID         int64      `gorm:"column:id;primaryKey;autoIncrement"`
+	ZipName    string     `gorm:"column:zip_name;uniqueIndex;not null"`
+	Size       int64      `gorm:"column:size;not null"`
+	MD5        string     `gorm:"column:md5"`
+	SHA256     string     `gorm:"column:sha256"`
+	S3Key      string     `gorm:"column:s3_key"`
+	UploadedAt *time.Time `gorm:"column:uploaded_at"`
+	LastSeenAt time.Time  `gorm:"column:last_seen_at;not null;index"`
+}
+
+// ZipMemberUpload is the per-file payload used when a zip archive is
+// committed. Each member keeps its own MD5 in files.md5.
+type ZipMemberUpload struct {
+	ID  int64
+	MD5 string
 }
 
 // AfterFind parses restore_expires_at via parseFlexTime so legacy /
@@ -140,6 +162,61 @@ func (db *DB) CreateFiles(ctx context.Context, rows []File) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// UpsertZip inserts or updates one archive row keyed by zip_name.
+// Callers use this for both the actual upload path and recovery paths
+// that only know the archive's name/key and need to relink files.
+func (db *DB) UpsertZip(ctx context.Context, z Zip) (int64, error) {
+	if z.ZipName == "" {
+		return 0, fmt.Errorf("zip_name is required")
+	}
+	if z.LastSeenAt.IsZero() {
+		z.LastSeenAt = time.Now().UTC()
+	}
+	var zipID int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing Zip
+		err := tx.Select("id").Where("zip_name = ?", z.ZipName).First(&existing).Error
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		if err == gorm.ErrRecordNotFound {
+			if z.UploadedAt == nil && z.S3Key != "" {
+				now := z.LastSeenAt
+				z.UploadedAt = &now
+			}
+			if err := tx.Create(&z).Error; err != nil {
+				return err
+			}
+			zipID = z.ID
+			return nil
+		}
+		updates := map[string]any{
+			"last_seen_at": z.LastSeenAt,
+		}
+		if z.S3Key != "" {
+			updates["s3_key"] = z.S3Key
+		}
+		if z.Size > 0 {
+			updates["size"] = z.Size
+		}
+		if z.MD5 != "" {
+			updates["md5"] = z.MD5
+		}
+		if z.SHA256 != "" {
+			updates["sha256"] = z.SHA256
+		}
+		if z.UploadedAt != nil {
+			updates["uploaded_at"] = z.UploadedAt
+		}
+		if err := tx.Model(&Zip{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+		zipID = existing.ID
+		return nil
+	})
+	return zipID, err
 }
 
 // FileUpdate is a targeted row mutation used by sync/reconcile helpers.
@@ -304,7 +381,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 		// Changed rows still go one-by-one because each carries a
 		// different (size, mtime) pair. Re-scans of stable trees rarely
 		// touch this path, so the per-row cost is fine.
-		// Preserve md5/zip_name/s3_key/uploaded_at as the historical
+		// Preserve md5/zip_name/zip_id/s3_key/uploaded_at as the historical
 		// record of the *previous* uploaded version. status=pending
 		// drives the new upload; the stale columns let reconcileFromS3
 		// distinguish "fresh row never uploaded" (uploaded_at IS NULL →
@@ -319,6 +396,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				"size":               c.size,
 				"mtime":              c.mtime,
 				"status":             StatusPending,
+				"zip_id":             gorm.Expr("NULL"),
 				"last_seen_at":       seenAt,
 				"restore_status":     "",
 				"restore_expires_at": nil,
@@ -351,12 +429,13 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 		res.ID = existing.ID
 		if size != existing.Size || !mtime.Equal(existing.MTime) {
 			res.Changed = true
-			// See UpsertFileBatch for why md5/zip_name/s3_key/uploaded_at
+			// See UpsertFileBatch for why md5/zip_name/zip_id/s3_key/uploaded_at
 			// are preserved instead of cleared. (#103)
 			return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(map[string]any{
 				"size":               size,
 				"mtime":              mtime,
 				"status":             StatusPending,
+				"zip_id":             gorm.Expr("NULL"),
 				"last_seen_at":       seenAt,
 				"restore_status":     "",
 				"restore_expires_at": nil,
@@ -423,6 +502,7 @@ func (db *DB) MarkUploaded(ctx context.Context, id int64, md5, s3Key string, upl
 	return db.g.WithContext(ctx).Model(&File{}).Where("id = ?", id).Updates(map[string]any{
 		"md5":         md5,
 		"s3_key":      s3Key,
+		"zip_id":      gorm.Expr("NULL"),
 		"uploaded_at": uploadedAt,
 		"status":      StatusUploaded,
 	}).Error
@@ -432,33 +512,72 @@ func (db *DB) MarkUploaded(ctx context.Context, id int64, md5, s3Key string, upl
 // SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; stay well under it.
 const sqlChunkSize = 500
 
-// MarkZipUploadedBatch attaches a zip_name and flips many ids straight to
-// 'uploaded' (md5/s3_key/uploaded_at populated) in a single transaction.
-// Used by the engine after a successful zip+sidecar upload so the rows
-// don't sit in the intermediate 'zipped' state if the second of two
-// updates fails.
-func (db *DB) MarkZipUploadedBatch(ctx context.Context, ids []int64, zipName, md5, s3Key string, uploadedAt time.Time) error {
-	if len(ids) == 0 {
+// MarkZipUploadedBatch ensures the archive row exists, then flips many
+// member files straight to uploaded with their per-file MD5s and the
+// archive link populated.
+func (db *DB) MarkZipUploadedBatch(ctx context.Context, zip Zip, rows []ZipMemberUpload) error {
+	if len(rows) == 0 {
 		return nil
 	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for len(ids) > 0 {
+		if zip.LastSeenAt.IsZero() {
+			zip.LastSeenAt = time.Now().UTC()
+		}
+		var existing Zip
+		err := tx.Select("id").Where("zip_name = ?", zip.ZipName).First(&existing).Error
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		if err == gorm.ErrRecordNotFound {
+			if zip.UploadedAt == nil && zip.S3Key != "" {
+				now := zip.LastSeenAt
+				zip.UploadedAt = &now
+			}
+			if err := tx.Create(&zip).Error; err != nil {
+				return err
+			}
+			existing.ID = zip.ID
+		} else {
+			updates := map[string]any{
+				"s3_key":       zip.S3Key,
+				"last_seen_at": zip.LastSeenAt,
+			}
+			if zip.Size > 0 {
+				updates["size"] = zip.Size
+			}
+			if zip.MD5 != "" {
+				updates["md5"] = zip.MD5
+			}
+			if zip.SHA256 != "" {
+				updates["sha256"] = zip.SHA256
+			}
+			if zip.UploadedAt != nil {
+				updates["uploaded_at"] = zip.UploadedAt
+			}
+			if err := tx.Model(&Zip{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		for len(rows) > 0 {
 			if err := ctx.Err(); err != nil { // cancel-aware (#227)
 				return err
 			}
-			chunk := ids
+			chunk := rows
 			if len(chunk) > sqlChunkSize {
-				chunk = ids[:sqlChunkSize]
+				chunk = rows[:sqlChunkSize]
 			}
-			ids = ids[len(chunk):]
-			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
-				"zip_name":    zipName,
-				"md5":         md5,
-				"s3_key":      s3Key,
-				"uploaded_at": uploadedAt,
-				"status":      StatusUploaded,
-			}).Error; err != nil {
-				return err
+			rows = rows[len(chunk):]
+			for _, row := range chunk {
+				if err := tx.Model(&File{}).Where("id = ?", row.ID).Updates(map[string]any{
+					"zip_id":      existing.ID,
+					"zip_name":    zip.ZipName,
+					"md5":         row.MD5,
+					"s3_key":      zip.S3Key,
+					"uploaded_at": zip.UploadedAt,
+					"status":      StatusUploaded,
+				}).Error; err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -485,6 +604,7 @@ func (db *DB) MarkUploadedBatch(ctx context.Context, ids []int64, md5, s3Key str
 			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
 				"md5":         md5,
 				"s3_key":      s3Key,
+				"zip_id":      gorm.Expr("NULL"),
 				"uploaded_at": uploadedAt,
 				"status":      StatusUploaded,
 			}).Error; err != nil {
@@ -518,6 +638,7 @@ func (db *DB) MarkUploadedMany(ctx context.Context, rows []UploadedRow) error {
 			if err := tx.Model(&File{}).Where("id = ?", r.ID).Updates(map[string]any{
 				"md5":         r.MD5,
 				"s3_key":      r.S3Key,
+				"zip_id":      gorm.Expr("NULL"),
 				"uploaded_at": r.UploadedAt,
 				"status":      StatusUploaded,
 			}).Error; err != nil {
@@ -541,6 +662,10 @@ func (db *DB) SetZipName(ctx context.Context, ids []int64, zipName string) error
 	if len(ids) == 0 {
 		return nil
 	}
+	zipID, err := db.UpsertZip(ctx, Zip{ZipName: zipName, LastSeenAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
 	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for len(ids) > 0 {
 			if err := ctx.Err(); err != nil { // cancel-aware (#227)
@@ -553,6 +678,7 @@ func (db *DB) SetZipName(ctx context.Context, ids []int64, zipName string) error
 			ids = ids[len(chunk):]
 			if err := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
 				"zip_name": zipName,
+				"zip_id":   zipID,
 				"status":   StatusZipped,
 			}).Error; err != nil {
 				return err
@@ -834,6 +960,7 @@ func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) 
 			result := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
 				"status":      StatusPending,
 				"md5":         gorm.Expr("NULL"),
+				"zip_id":      gorm.Expr("NULL"),
 				"zip_name":    gorm.Expr("NULL"),
 				"s3_key":      gorm.Expr("NULL"),
 				"uploaded_at": gorm.Expr("NULL"),
@@ -853,6 +980,7 @@ func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 	result := db.g.WithContext(ctx).Model(&File{}).Where("status = ?", StatusFailed).Updates(map[string]any{
 		"status":      StatusPending,
 		"md5":         gorm.Expr("NULL"),
+		"zip_id":      gorm.Expr("NULL"),
 		"zip_name":    gorm.Expr("NULL"),
 		"s3_key":      gorm.Expr("NULL"),
 		"uploaded_at": gorm.Expr("NULL"),
@@ -897,7 +1025,7 @@ func (db *DB) ListPending(ctx context.Context, includeFailed bool) ([]File, erro
 	}
 	var files []File
 	// The engine's PendingFile only reads ID/Path/Size/MTime; pulling the
-	// full row (md5/sha256/zip_name/etc.) wastes I/O on large indexes. (#172)
+	// full row (md5/sha256/zip_name/zip_id/etc.) wastes I/O on large indexes. (#172)
 	err := db.g.WithContext(ctx).
 		Select("id, path, size, mtime").
 		Where("status IN ?", statuses).
@@ -906,10 +1034,10 @@ func (db *DB) ListPending(ctx context.Context, includeFailed bool) ([]File, erro
 	return files, err
 }
 
-// ListZipNames returns every distinct non-empty zip_name in the index.
+// ListZipNames returns every distinct non-empty zip_name in the archive index.
 func (db *DB) ListZipNames(ctx context.Context) ([]string, error) {
 	var names []string
-	err := db.g.WithContext(ctx).Model(&File{}).
+	err := db.g.WithContext(ctx).Model(&Zip{}).
 		Where("zip_name != ''").
 		Distinct("zip_name").
 		Order("zip_name").
@@ -949,7 +1077,7 @@ func (db *DB) ListRestoreScanKeys(ctx context.Context) ([]string, error) {
 func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 	var keys []string
 	err := db.g.WithContext(ctx).Model(&File{}).
-		Where("COALESCE(zip_name,'') = '' AND COALESCE(s3_key,'') != ''").
+		Where("status IN ? AND zip_id IS NULL AND COALESCE(s3_key,'') != ''", []string{StatusUploaded, StatusCloudOnly}).
 		Distinct("s3_key").
 		Order("s3_key").
 		Pluck("s3_key", &keys).Error
@@ -968,6 +1096,15 @@ func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 // modified content (the new bytes never get uploaded). See #103.
 func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key string, now time.Time) (int64, error) {
 	var total int64
+	zipID, err := db.UpsertZip(ctx, Zip{
+		ZipName:    zipRel,
+		S3Key:      s3Key,
+		UploadedAt: &now,
+		LastSeenAt: now,
+	})
+	if err != nil {
+		return 0, err
+	}
 	for len(paths) > 0 {
 		// Check ctx between chunks so a cancel doesn't keep blocking
 		// other writers behind the SQLite write lock for the remaining
@@ -999,6 +1136,7 @@ func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key st
 				[]string{StatusPending, StatusFailed},
 			).
 			Updates(map[string]any{
+				"zip_id":      zipID,
 				"zip_name":    zipRel,
 				"s3_key":      s3Key,
 				"uploaded_at": now,
@@ -1281,6 +1419,7 @@ func markPendingByColumn(ctx context.Context, g *gorm.DB, column string, values 
 				Updates(map[string]any{
 					"status":      StatusPending,
 					"md5":         gorm.Expr("NULL"),
+					"zip_id":      gorm.Expr("NULL"),
 					"zip_name":    gorm.Expr("NULL"),
 					"s3_key":      gorm.Expr("NULL"),
 					"uploaded_at": gorm.Expr("NULL"),

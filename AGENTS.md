@@ -8,6 +8,8 @@ The authoritative S3 sync must keep every S3-present file in an explicit bucket-
 
 Source rescans must preserve bucket-backed state on unchanged rows. An unchanged `cloud_only` row becomes `uploaded` when the local file is seen again; unchanged `uploaded` rows stay `uploaded`.
 
+Zip archives are indexed separately in `zips`; `files.md5` is the per-file checksum and `files.zip_id` is the archive link when a row belongs to a zip.
+
 ## docs-guide.md is the project briefing
 
 `docs-guide.md` at the repo root is the index to the per-topic project docs under `docs/`. Read it at the start of every session in this repo before answering questions or making changes — it tells you which detail files (`docs/architecture.md`, `docs/api.md`, `docs/engine.md`, etc.) are worth opening for the current task, so you can be selective rather than re-deriving state from `git log` or directory structure. This replaces the old single-file `plan.md`. When a change you make alters something a doc describes, update the relevant doc in the same turn (and add a `docs/changelog.md` row if it's a noteworthy fix).

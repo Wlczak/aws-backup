@@ -321,7 +321,7 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "photos.zip")
-	size, entries, err := CreateZip(context.Background(), src, pending, out, nil)
+	size, entries, md5hex, sha256hex, err := CreateZip(context.Background(), src, pending, out, nil)
 	if err != nil {
 		t.Fatalf("CreateZip: %v", err)
 	}
@@ -330,6 +330,9 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 	if len(entries) != len(pending) {
 		t.Errorf("entries=%d want %d", len(entries), len(pending))
+	}
+	if md5hex == "" || sha256hex == "" {
+		t.Fatalf("expected archive digests, got md5=%q sha256=%q", md5hex, sha256hex)
 	}
 
 	// Reopen the zip and verify contents.
@@ -390,7 +393,7 @@ func TestCreateZipCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := CreateZip(ctx, src, []PendingFile{{RelPath: "a.txt"}},
+	_, _, _, _, err := CreateZip(ctx, src, []PendingFile{{RelPath: "a.txt"}},
 		filepath.Join(t.TempDir(), "out.zip"), nil)
 	if err == nil {
 		t.Fatal("expected cancel error")

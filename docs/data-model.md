@@ -24,6 +24,7 @@ CREATE TABLE files (
     mtime               DATETIME NOT NULL,
     md5                 TEXT,
     status              TEXT    NOT NULL DEFAULT 'pending',  -- pending | zipped | uploaded | failed | cloud_only | missing
+    zip_id              INTEGER,                             -- nullable link to zips.id when the row belongs to an archive
     zip_name            TEXT,                                -- relative zip path, e.g. "photos/photos_1.zip"
     s3_key              TEXT,                                -- full S3 key
     uploaded_at         DATETIME,
@@ -32,9 +33,21 @@ CREATE TABLE files (
     restore_expires_at  DATETIME                             -- when the Glacier restore copy expires
 );
 CREATE INDEX idx_files_status              ON files(status);
+CREATE INDEX idx_files_zip_id              ON files(zip_id);
 CREATE INDEX idx_files_zip_name            ON files(zip_name);
 CREATE INDEX idx_files_last_seen_at        ON files(last_seen_at);
 CREATE INDEX idx_files_restore_status      ON files(restore_status);
+
+CREATE TABLE zips (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    zip_name        TEXT    NOT NULL UNIQUE,
+    size            INTEGER NOT NULL DEFAULT 0,
+    md5             TEXT,                                    -- archive checksum
+    sha256          TEXT,
+    s3_key          TEXT,                                    -- full S3 key for the archive object
+    uploaded_at     DATETIME,
+    last_seen_at    DATETIME NOT NULL
+);
 
 CREATE TABLE runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,6 +127,7 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 `missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
 `cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing. The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It does not collapse S3-present rows into `missing`.
 Unchanged source rescans preserve that bucket-backed state. An unchanged `cloud_only` row is promoted to `uploaded` when the local file is seen again.
+Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
 
 ## Zip naming + sidecar
 
