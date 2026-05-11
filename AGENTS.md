@@ -17,3 +17,7 @@ Transient success/error feedback in the web app goes through the toast system (`
 Whenever the user says "remember …", or otherwise shares important project information (architecture invariants, conventions, gotchas, decisions), update `AGENTS.md` in the same turn so the rule is durable across sessions. Do not rely on conversation memory alone for project-level rules.
 
 If the new rule also belongs in the topical project docs (anything that affects architecture, the API, the data model, the engine lifecycle, the config schema, the dev workflow, etc.), update the matching file under `docs/` in the same turn — `AGENTS.md` is for cross-cutting harness rules; `docs/*.md` is where future readers go for details. When both apply, write the rule once in the right doc and keep the `AGENTS.md` entry as a short pointer.
+
+## Commiting
+
+When you commit new changes always mention yourself (your current model) as a co-author.
