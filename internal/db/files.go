@@ -773,43 +773,6 @@ func (db *DB) MarkPendingByIDs(ctx context.Context, ids []int64) (int64, error) 
 	return total, err
 }
 
-// MarkPendingByIDsForce resets md5/zip_name/s3_key/uploaded_at and flips
-// status to pending for every matching row, regardless of its prior
-// status. Used by the authoritative S3 sync when cloud state says the
-// object is gone and even a row already marked missing should be
-// normalised back to pending so the next source scan can re-evaluate it.
-func (db *DB) MarkPendingByIDsForce(ctx context.Context, ids []int64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	var total int64
-	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for len(ids) > 0 {
-			if err := ctx.Err(); err != nil { // cancel-aware (#227)
-				return err
-			}
-			chunk := ids
-			if len(chunk) > sqlChunkSize {
-				chunk = ids[:sqlChunkSize]
-			}
-			ids = ids[len(chunk):]
-			result := tx.Model(&File{}).Where("id IN ?", chunk).Updates(map[string]any{
-				"status":      StatusPending,
-				"md5":         gorm.Expr("NULL"),
-				"zip_name":    gorm.Expr("NULL"),
-				"s3_key":      gorm.Expr("NULL"),
-				"uploaded_at": gorm.Expr("NULL"),
-			})
-			if result.Error != nil {
-				return result.Error
-			}
-			total += result.RowsAffected
-		}
-		return nil
-	})
-	return total, err
-}
-
 // MarkAllFailedPending is the bulk 'retry everything that failed' path.
 func (db *DB) MarkAllFailedPending(ctx context.Context) (int64, error) {
 	result := db.g.WithContext(ctx).Model(&File{}).Where("status = ?", StatusFailed).Updates(map[string]any{

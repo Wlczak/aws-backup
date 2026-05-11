@@ -99,7 +99,6 @@ pending →          uploaded         (individual file)
 pending →  failed                   (upload error; retryable)
 {pending,zipped,uploaded,failed} → missing   (file gone from source)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
-missing → pending                   (authoritative S3 compare no longer finds the object)
 ```
 
 `missing` rows are kept until the corresponding S3 object is also deleted — the index models the **bucket**, not the source. See `CLAUDE.md`.

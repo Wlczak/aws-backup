@@ -42,7 +42,7 @@ POST   /api/restore/scan/full          HEADs every uploaded/zipped S3 object key
 POST   /api/restore/scan/pending       HEADs only rows currently marked `in_progress`
 
 # Sync / reconcile
-POST   /api/sync                      authoritative cloud compare; lists bucket objects + zip indexes, compares them to the DB, and resets rows whose objects are no longer present
+POST   /api/sync                      authoritative cloud compare; lists bucket objects + zip indexes, compares them to the locally scanned rows, and resets only rows that are still local but whose objects are no longer present
 POST   /api/sync/full                 same authoritative cloud compare (compatibility alias)
 POST   /api/sync/delete-cloud-paths   {paths: []} → delete corresponding S3 objects/zips
 

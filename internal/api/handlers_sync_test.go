@@ -155,14 +155,14 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 		t.Errorf("ZipIndexesConsumed: got %d want 1", body.ZipIndexesConsumed)
 	}
 
-	// Both gone-locally and gone-cloud should be normalised back to
-	// pending, and the cloud-side absence should be reflected in the
-	// missing counts.
+	// Only the row that is still local should be normalised back to
+	// pending. The missing row stays missing even though its cloud object
+	// is gone.
 	if body.MissingIndividual < 2 {
 		t.Errorf("expected two missing individual keys, got %d", body.MissingIndividual)
 	}
-	if body.FilesReset < 2 {
-		t.Errorf("expected two rows reset to pending, got %d", body.FilesReset)
+	if body.FilesReset < 1 {
+		t.Errorf("expected one row reset to pending, got %d", body.FilesReset)
 	}
 
 	goneLocallyRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "gone-locally.txt", All: true})
@@ -182,8 +182,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	if goneLocallyRows[0].Status != db.StatusPending {
 		t.Errorf("gone-locally status=%q want pending", goneLocallyRows[0].Status)
 	}
-	if goneCloudRows[0].Status != db.StatusPending {
-		t.Errorf("gone-cloud status=%q want pending", goneCloudRows[0].Status)
+	if goneCloudRows[0].Status != db.StatusMissing {
+		t.Errorf("gone-cloud status=%q want missing", goneCloudRows[0].Status)
 	}
 }
 

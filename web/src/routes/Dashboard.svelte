@@ -612,7 +612,7 @@
     <div class="label">S3 sync</div>
     <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
       Download the full bucket file list and every zip index, then compare the
-      result to the local index DB.
+      result to the rows that are still local on disk.
     </div>
     {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
     <div class="run-actions">

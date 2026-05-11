@@ -45,8 +45,9 @@ type fullSyncResponse struct {
 const fullSyncListCap = 1000
 
 // handleSync runs the authoritative cloud compare: list every object in the
-// bucket, download every zip index, compare the resulting path set to the local
-// DB, and reset rows whose recorded object is no longer present.
+// bucket, download every zip index, compare the resulting path set to the
+// locally scanned rows, and reset only rows that are still local but whose
+// recorded object is no longer present.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -111,7 +112,8 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 
 // runSyncCloudCompare runs the authoritative sync pass: list the bucket,
 // download all zip indexes, compare the resulting cloud path set to the local
-// DB, and reset rows that are no longer represented in S3 back to pending.
+// rows that are still on disk, and reset only those local rows that are no
+// longer represented in S3 back to pending.
 func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
@@ -153,12 +155,12 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			break
 		}
 		for _, f := range rows {
-			// Missing rows are not local for the purpose of the diff, but
-			// they still get reset to pending below when the cloud object is
-			// gone so the next source scan can re-evaluate them.
-			if f.Status != db.StatusMissing {
-				localPaths[f.Path] = struct{}{}
+			// Missing rows are already known to be absent from the source,
+			// so they stay out of both the local diff and the reset list.
+			if f.Status == db.StatusMissing {
+				continue
 			}
+			localPaths[f.Path] = struct{}{}
 			if _, ok := idx.Files[f.Path]; ok {
 				continue
 			}
@@ -173,7 +175,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 
 	var filesReset int64
 	if len(missingIDs) > 0 {
-		n, err := s.deps.DB.MarkPendingByIDsForce(ctx, missingIDs)
+		n, err := s.deps.DB.MarkPendingByIDs(ctx, missingIDs)
 		if err != nil {
 			return fullSyncResponse{}, fmt.Errorf("reset missing files: %w", err)
 		}

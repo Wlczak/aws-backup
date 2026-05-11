@@ -4,7 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
-| #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the DB, and reset stale rows to pending |
+| #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, and reset only still-local stale rows to pending |
 | — | — | Missing rows without an `s3_key` now stay labeled `missing` instead of being shown as `cloud only` |
 | — | — | Download tab now reports restored / in-progress / not-restoring counts and only estimates downloadable rows |
 | — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
