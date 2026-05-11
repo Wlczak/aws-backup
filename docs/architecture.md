@@ -78,7 +78,8 @@ aws-backup/
 │   │   │   ├── Dashboard.svelte # Live progress, run controls, copy/upload bars
 │   │   │   ├── Files.svelte     # Paginated file index with status filter, retry, delete
 │   │   │   ├── Logs.svelte      # Run history + per-run log viewer
-│   │   │   ├── Restore.svelte   # Restore estimate, trigger, download UI
+│   │   │   ├── Download.svelte  # Download + unzip + MD5 verification into local dir
+│   │   │   ├── Restore.svelte   # Glacier estimate, trigger, status sync UI
 │   │   │   ├── Settings.svelte  # Top-level Settings shell + sub-route nav
 │   │   │   └── settings/        # SourceSettings, StorageSettings, SqsSettings, BackupSettings, ServerSettings
 │   │   ├── components/          # FileTreeNode, ProgressBar, StatusBadge, Toaster

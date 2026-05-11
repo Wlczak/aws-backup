@@ -19,7 +19,7 @@ import (
 
 // newSyncTestServer wires a Server against a real DB + MemStorage so we
 // can exercise /api/sync and /api/sync/full against known cloud state.
-func newSyncTestServer(t *testing.T) (*httptest.Server, *db.DB, *storage.MemStorage) {
+func newSyncTestServer(t *testing.T) (*Server, *db.DB, *storage.MemStorage) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -39,13 +39,11 @@ func newSyncTestServer(t *testing.T) (*httptest.Server, *db.DB, *storage.MemStor
 		Storage:       func() storage.Storage { return store },
 		StoragePrefix: "backups/",
 	})
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-	return ts, d, store
+	return srv, d, store
 }
 
 func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
-	ts, d, store := newSyncTestServer(t)
+	srv, d, store := newSyncTestServer(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -106,17 +104,15 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	// Note: backups/gone-locally.txt is intentionally ABSENT to exercise
 	// the existence-check reset path.
 
-	resp, err := ts.Client().Post(ts.URL+"/api/sync/full", "application/json", nil)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodPost, "/api/sync/full", nil)
+	rr := httptest.NewRecorder()
+	srv.handleSyncFull(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: %d", rr.Code)
 	}
 
 	var body fullSyncResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
@@ -169,15 +165,11 @@ func TestSyncFullStorageNotConfigured(t *testing.T) {
 		Bus:    events.NewBus(16),
 		Config: &cfg,
 	})
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
 
-	resp, err := ts.Client().Post(ts.URL+"/api/sync/full", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodPost, "/api/sync/full", nil)
+	rr := httptest.NewRecorder()
+	srv.handleSyncFull(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rr.Code)
 	}
 }

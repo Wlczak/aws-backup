@@ -111,6 +111,14 @@ export interface RestoreEstimate {
   unknown_paths?: string[];
 }
 
+export interface RestoreToDirResult {
+  files_written: number;
+  bytes_written: number;
+  skipped?: string[];
+  blocked?: string[];
+  errors?: string[];
+}
+
 export interface TestResult {
   ok: boolean;
   message?: string;
@@ -385,6 +393,16 @@ export const api = {
       method: 'POST',
     }),
 
+  restoreToDir: (paths: string[], targetDir: string, verifyChecksum = true) =>
+    request<RestoreToDirResult>('/api/restore/to-dir', {
+      method: 'POST',
+      body: JSON.stringify({
+        paths,
+        target_dir: targetDir,
+        verify_checksum: verifyChecksum,
+      }),
+    }),
+
   restoreScanFull: () =>
     request<RestoreScanResult>('/api/restore/scan/full', { method: 'POST' }),
   restoreScanPending: () =>
@@ -450,6 +468,7 @@ export function subscribeEvents(
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
+    'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so

@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"sort"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -255,6 +258,20 @@ type restoreTriggerResponse struct {
 	Errors                 []string `json:"errors,omitempty"`
 }
 
+type restoreToDirRequest struct {
+	Paths          []string `json:"paths"`
+	TargetDir      string   `json:"target_dir"`
+	VerifyChecksum *bool    `json:"verify_checksum,omitempty"`
+}
+
+type restoreToDirResponse struct {
+	FilesWritten int64    `json:"files_written"`
+	BytesWritten int64    `json:"bytes_written"`
+	Skipped      []string `json:"skipped,omitempty"`
+	Blocked      []string `json:"blocked,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
+}
+
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
 // AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
 // cost of a typo bounded; the operator can re-issue the restore later
@@ -330,8 +347,167 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRestoreToDir downloads already-readable S3 objects into a local
+// directory, extracting zip archives on the way and verifying each
+// written file against the MD5 stored in the index by default.
+func (s *Server) handleRestoreToDir(w http.ResponseWriter, r *http.Request) {
+	st := s.storage()
+	if st == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+		return
+	}
+	cfg, ok := s.snapshotConfig()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
+		return
+	}
+
+	var req restoreToDirRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+	if req.TargetDir == "" {
+		writeError(w, http.StatusBadRequest, errors.New("target_dir must be non-empty"))
+		return
+	}
+	if !filepath.IsAbs(req.TargetDir) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("target_dir must be an absolute path, got %q", req.TargetDir))
+		return
+	}
+
+	downloadPaths, skipped, blocked, err := s.restoreToDirCandidates(r.Context(), req.Paths)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	resp := restoreToDirResponse{
+		Skipped: append([]string(nil), skipped...),
+		Blocked: append([]string(nil), blocked...),
+	}
+	if len(downloadPaths) == 0 {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	var emit engine.EventEmitter
+	if s.deps.Bus != nil {
+		emit = s.deps.Bus.Publish
+	}
+	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
+		DB:           s.deps.DB,
+		Storage:      st,
+		KeyPrefix:    s.storagePrefix(),
+		TargetDir:    req.TargetDir,
+		Paths:        downloadPaths,
+		TmpDir:       cfg.Backup.TmpDir,
+		SkipChecksum: req.VerifyChecksum != nil && !*req.VerifyChecksum,
+		Emit:         emit,
+	})
+	if err != nil {
+		if emit != nil {
+			emit(engine.Event{
+				Type: engine.EventRestoreDownloadFailed,
+				At:   time.Now(),
+				Data: map[string]any{
+					"files_written": stats.FilesWritten,
+					"bytes_written": stats.BytesWritten,
+					"total_bytes":   stats.TotalBytes,
+					"errors":        len(stats.Errors),
+					"error":         err.Error(),
+				},
+			})
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp.FilesWritten = stats.FilesWritten
+	resp.BytesWritten = stats.BytesWritten
+	resp.Skipped = append(resp.Skipped, stats.Skipped...)
+	resp.Errors = append(resp.Errors, stats.Errors...)
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
+}
+
+// restoreToDirCandidates expands requested prefixes to the exact file
+// paths that are safe to pass into RestoreToDir. Rows that are not yet
+// available to download are reported separately so the UI can surface
+// them without trying to fetch them.
+func (s *Server) restoreToDirCandidates(ctx context.Context, reqPaths []string) (download []string, skipped []string, blocked []string, err error) {
+	wantAll := false
+	wantSet := make(map[string]struct{}, len(reqPaths))
+	for _, p := range reqPaths {
+		if p == "" || p == "/" {
+			wantAll = true
+			break
+		}
+		wantSet[p] = struct{}{}
+	}
+
+	matched := make(map[string]struct{})
+	seen := make(map[string]struct{})
+	const pageSize = 1000
+	for page := 1; ; page++ {
+		rows, _, err := s.deps.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("list files: %w", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, f := range rows {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+				continue
+			}
+			if !wantAll {
+				hit := false
+				for req := range wantSet {
+					if pathutil.HasPrefixPath(f.Path, req) {
+						hit = true
+						matched[req] = struct{}{}
+						break
+					}
+				}
+				if !hit {
+					continue
+				}
+			}
+			switch f.RestoreStatus {
+			case db.RestoreStatusInProgress:
+				blocked = append(blocked, f.Path+" (restoring)")
+				continue
+			}
+			if _, dup := seen[f.Path]; dup {
+				continue
+			}
+			seen[f.Path] = struct{}{}
+			download = append(download, f.Path)
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+
+	if !wantAll {
+		for req := range wantSet {
+			if _, ok := matched[req]; !ok {
+				skipped = append(skipped, req)
+			}
+		}
+	}
+
+	sort.Strings(download)
+	sort.Strings(skipped)
+	sort.Strings(blocked)
+	return download, skipped, blocked, nil
 }
 
 // handleRestoreSyncStatus drains the configured SQS queue of pending S3

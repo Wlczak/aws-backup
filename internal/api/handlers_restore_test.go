@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -67,6 +69,151 @@ func TestRestoreTriggerValidatesRequest(t *testing.T) {
 				t.Errorf("status: got %d want %d", rr.Code, tc.status)
 			}
 		})
+	}
+}
+
+func TestRestoreToDirValidatesRequest(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	cfg := config.Default()
+	cfg.Backup.TmpDir = t.TempDir()
+	srv := NewServer(Deps{
+		DB:     d,
+		Bus:    events.NewBus(16),
+		Config: &cfg,
+		Storage: func() storage.Storage {
+			return storage.NewMemStorage()
+		},
+	})
+
+	cases := []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{name: "missing paths", body: `{"paths":[],"target_dir":"/tmp/out"}`, status: http.StatusBadRequest},
+		{name: "missing target", body: `{"paths":["/"],"target_dir":""}`, status: http.StatusBadRequest},
+		{name: "relative target", body: `{"paths":["/"],"target_dir":"relative/path"}`, status: http.StatusBadRequest},
+		{name: "invalid json", body: `{`, status: http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/restore/to-dir", bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.handleRestoreToDir(rr, req)
+			if rr.Code != tc.status {
+				t.Fatalf("status=%d want %d body=%s", rr.Code, tc.status, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestRestoreToDirDownloadsMixedStandaloneAndZip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	now := time.Now()
+	seed := []db.BatchEntry{
+		{Path: "docs/readme.md", Size: 5, ModTime: now},
+		{Path: "photos/a.jpg", Size: 3, ModTime: now},
+		{Path: "photos/b.jpg", Size: 4, ModTime: now},
+		{Path: "pending.txt", Size: 7, ModTime: now},
+	}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{}
+	for i, r := range res {
+		ids[seed[i].Path] = r.ID
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/readme.md"]}, md5hex("hello"), "backups/docs/readme.md", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, md5hex("aaa"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/docs/readme.md", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/photos/photos_1.zip", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{ids["pending.txt"]}, md5hex("skip-me"), "backups/pending.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestoreInProgress(ctx, "backups/pending.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut := func(key, body string) {
+		t.Helper()
+		if _, err := store.Put(ctx, key, strings.NewReader(body), int64(len(body))); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	mustPut("backups/docs/readme.md", "hello")
+	zipBytes := buildTestZip(t, map[string]string{
+		"photos/a.jpg": "aaa",
+		"photos/b.jpg": "bbbb",
+	})
+	if _, err := store.Put(ctx, "backups/photos/photos_1.zip", bytes.NewReader(zipBytes), int64(len(zipBytes))); err != nil {
+		t.Fatal(err)
+	}
+	mustPut("backups/pending.txt", "skip-me")
+
+	cfg := config.Default()
+	cfg.Backup.TmpDir = t.TempDir()
+	srv := NewServer(Deps{
+		DB:            d,
+		Bus:           events.NewBus(16),
+		Config:        &cfg,
+		Storage:       func() storage.Storage { return store },
+		StoragePrefix: "backups/",
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"paths":      []string{"/"},
+		"target_dir": t.TempDir(),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/to-dir", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreToDir(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var out restoreToDirResponse
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.FilesWritten != 3 {
+		t.Fatalf("files_written=%d want 3 (%+v)", out.FilesWritten, out)
+	}
+	if out.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
+		t.Fatalf("bytes_written=%d want %d", out.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
+	}
+	if len(out.Blocked) != 1 || !strings.Contains(out.Blocked[0], "pending.txt") {
+		t.Fatalf("blocked=%v want pending.txt", out.Blocked)
 	}
 }
 
@@ -418,18 +565,37 @@ func TestRestoreTriggerStorageNotConfigured(t *testing.T) {
 		Bus:    events.NewBus(16),
 		Config: &cfg,
 	})
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-
-	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger",
-		"application/json", bytes.NewReader([]byte(`{"paths":["x"],"days":7}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/trigger", bytes.NewReader([]byte(`{"paths":["x"],"days":7}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreTrigger(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rr.Code)
 	}
 
 	_ = storage.ErrNotFound
+}
+
+func buildTestZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	keys := make([]string, 0, len(files))
+	for name := range files {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(files[name])); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buf.Bytes()
 }

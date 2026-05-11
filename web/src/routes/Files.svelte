@@ -299,6 +299,11 @@
     go('restore');
   }
 
+  function downloadSelected() {
+    if (paths().length === 0) return;
+    go('download');
+  }
+
   async function rescanSelected() {
     const sel = paths();
     if (sel.length === 0) return;
@@ -375,13 +380,14 @@
   {/if}
 </div>
 
-{#if $selection.length > 0}
-  <div class="card selectionbar">
-    <span><strong>{$selection.length}</strong> selected</span>
-    <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
-    <button onclick={rescanSelected} disabled={busy} type="button" title="Re-scan selected paths for changes">Rescan</button>
-    <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
-    <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
+  {#if $selection.length > 0}
+    <div class="card selectionbar">
+      <span><strong>{$selection.length}</strong> selected</span>
+      <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
+      <button onclick={downloadSelected} disabled={busy} type="button">Download selected</button>
+      <button onclick={rescanSelected} disabled={busy} type="button" title="Re-scan selected paths for changes">Rescan</button>
+      <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
+      <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
     <button onclick={clear} disabled={busy} type="button">Clear</button>
   </div>
 {/if}

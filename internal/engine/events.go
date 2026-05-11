@@ -54,6 +54,13 @@ const (
 	EventRestoreRequestProgress = "restore_request_progress"
 	EventRestoreRequestComplete = "restore_request_complete"
 	EventRestoreRequestFailed   = "restore_request_failed"
+	// Restore-download events accompany RestoreToDir — the API handler uses
+	// these to surface live progress while files are copied out to a local
+	// target directory.
+	EventRestoreDownloadStart    = "restore_download_start"
+	EventRestoreDownloadProgress = "restore_download_progress"
+	EventRestoreDownloadComplete  = "restore_download_complete"
+	EventRestoreDownloadFailed    = "restore_download_failed"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

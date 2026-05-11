@@ -1,6 +1,7 @@
 <script lang="ts">
   import { route, go } from './lib/router';
   import Dashboard from './routes/Dashboard.svelte';
+  import Download from './routes/Download.svelte';
   import Files from './routes/Files.svelte';
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
@@ -10,6 +11,7 @@
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'files', label: 'Files' },
+    { id: 'download', label: 'Download' },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings' },
     { id: 'restore', label: 'Restore' },
@@ -33,6 +35,7 @@
   <main>
     {#if $route === 'dashboard'}<Dashboard />
     {:else if $route === 'files' || $route === 'index'}<Files />
+    {:else if $route === 'download'}<Download />
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />

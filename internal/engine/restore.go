@@ -47,6 +47,10 @@ type RestoreOptions struct {
 	// SHA256 wouldn't catch. Opt out only for huge restores where the
 	// extra hashing visibly hurts. (#75)
 	SkipChecksum bool
+	// Emit is an optional progress sink. When set, RestoreToDir publishes
+	// restore_download_* events while files are being copied out to the
+	// local directory so the API layer can show live progress.
+	Emit EventEmitter
 }
 
 // RestoreStats summarizes the outcome of RestoreToDir. Errors are
@@ -54,6 +58,7 @@ type RestoreOptions struct {
 type RestoreStats struct {
 	FilesWritten int64
 	BytesWritten int64
+	TotalBytes   int64
 	Skipped      []string
 	Errors       []string
 }
@@ -358,6 +363,11 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 		return stats, fmt.Errorf("abs target: %w", err)
 	}
 
+	emit := opts.Emit
+	if emit == nil {
+		emit = DiscardEvents
+	}
+
 	// Collect matching rows from the DB, grouped by zip membership.
 	wantAll := false
 	wantSet := make(map[string]struct{}, len(opts.Paths))
@@ -371,6 +381,8 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 
 	byZip := map[string][]db.File{} // zip_name -> rows; "" key = standalone
 	matched := map[string]bool{}    // which want-paths saw a hit
+	total := int64(0)
+	totalBytes := int64(0)
 
 	const pageSize = 1000
 	for page := 1; ; page++ {
@@ -404,6 +416,8 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 				continue
 			}
 			byZip[f.ZipName] = append(byZip[f.ZipName], f)
+			total++
+			totalBytes += f.Size
 		}
 		if len(rows) < pageSize {
 			break
@@ -417,6 +431,19 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 		}
 	}
 
+	emit(Event{
+		Type: EventRestoreDownloadStart,
+		At:   time.Now(),
+		Data: map[string]any{
+			"total":        total,
+			"total_bytes":  totalBytes,
+			"files_written": int64(0),
+			"bytes_written": int64(0),
+		},
+	})
+
+	processed := int64(0)
+
 	// Standalone files first — one GET per file, cheaper than zips.
 	if rows := byZip[""]; len(rows) > 0 {
 		sort.Slice(rows, func(i, j int) bool { return rows[i].Path < rows[j].Path })
@@ -429,12 +456,40 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 				expected = ""
 			}
 			n, err := restoreStandalone(ctx, opts.Storage, cleanTarget, f, expected)
+			processed++
 			if err != nil {
 				stats.Errors = append(stats.Errors, f.Path+": "+err.Error())
+				emit(Event{
+					Type: EventRestoreDownloadProgress,
+					At:   time.Now(),
+					Data: map[string]any{
+						"path":          f.Path,
+						"processed":     processed,
+						"total":         total,
+						"total_bytes":   totalBytes,
+						"files_written": stats.FilesWritten,
+						"bytes_written": stats.BytesWritten,
+						"errors":        len(stats.Errors),
+						"error":         err.Error(),
+					},
+				})
 				continue
 			}
 			stats.FilesWritten++
 			stats.BytesWritten += n
+			emit(Event{
+				Type: EventRestoreDownloadProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"path":          f.Path,
+					"processed":     processed,
+					"total":         total,
+					"total_bytes":   totalBytes,
+					"files_written": stats.FilesWritten,
+					"bytes_written": stats.BytesWritten,
+					"errors":        len(stats.Errors),
+				},
+			})
 		}
 	}
 
@@ -451,11 +506,24 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (RestoreStats, error
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		written, bytes, errs := restoreZipMembers(ctx, opts, cleanTarget, z, byZip[z])
+		written, bytes, errs, nextProcessed := restoreZipMembers(ctx, opts, cleanTarget, z, byZip[z], processed, total, totalBytes, emit)
+		processed = nextProcessed
 		stats.FilesWritten += written
 		stats.BytesWritten += bytes
 		stats.Errors = append(stats.Errors, errs...)
 	}
+
+	stats.TotalBytes = totalBytes
+	emit(Event{
+		Type: EventRestoreDownloadComplete,
+		At:   time.Now(),
+		Data: map[string]any{
+			"files_written": stats.FilesWritten,
+			"bytes_written": stats.BytesWritten,
+			"total_bytes":   totalBytes,
+			"errors":        len(stats.Errors),
+		},
+	})
 
 	return stats, nil
 }
@@ -481,13 +549,20 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 // restoreZipMembers downloads the zip at zipName once and extracts every
 // matching member listed in members. Errors are returned per-member so a
 // corrupt entry doesn't poison the rest of the archive.
-func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File) (written, bytes int64, errs []string) {
+func restoreZipMembers(
+	ctx context.Context,
+	opts RestoreOptions,
+	target, zipName string,
+	members []db.File,
+	processed, total, totalBytes int64,
+	emit EventEmitter,
+) (written, bytes int64, errs []string, nextProcessed int64) {
 	key := pathutil.JoinKey(opts.KeyPrefix, zipName)
 
 	tmp, err := os.CreateTemp(opts.TmpDir, "aws-backup-restore-*.zip")
 	if err != nil {
 		errs = append(errs, zipName+": create temp: "+err.Error())
-		return
+		return written, bytes, errs, processed
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
@@ -500,24 +575,24 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		} else {
 			errs = append(errs, zipName+": get zip "+key+": "+err.Error())
 		}
-		return
+		return written, bytes, errs, processed
 	}
 	if _, err := io.Copy(tmp, rc); err != nil {
 		rc.Close()
 		tmp.Close()
 		errs = append(errs, zipName+": download zip "+key+": "+err.Error())
-		return
+		return written, bytes, errs, processed
 	}
 	rc.Close()
 	if err := tmp.Close(); err != nil {
 		errs = append(errs, zipName+": close temp zip: "+err.Error())
-		return
+		return written, bytes, errs, processed
 	}
 
 	zr, err := zip.OpenReader(tmpPath)
 	if err != nil {
 		errs = append(errs, zipName+": open zip: "+err.Error())
-		return
+		return written, bytes, errs, processed
 	}
 	defer zr.Close()
 
@@ -542,13 +617,28 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 	for _, m := range members {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, m.Path+": "+err.Error())
-			return
+			return written, bytes, errs, processed
 		}
 		zf, ok := byName[m.Path]
 		if !ok {
 			fk := strings.ToLower(m.Path)
 			if foldCollision[fk] {
 				errs = append(errs, m.Path+": ambiguous case-insensitive match in zip "+zipName)
+				processed++
+				emit(Event{
+					Type: EventRestoreDownloadProgress,
+					At:   time.Now(),
+					Data: map[string]any{
+						"path":          m.Path,
+						"processed":     processed,
+						"total":         total,
+						"total_bytes":   totalBytes,
+						"files_written": written,
+						"bytes_written": bytes,
+						"errors":        len(errs),
+						"error":         "ambiguous case-insensitive match in zip " + zipName,
+					},
+				})
 				continue
 			}
 			if alt, found := byFolded[fk]; found {
@@ -557,17 +647,62 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 				zf = alt
 			} else {
 				errs = append(errs, m.Path+": not found in zip "+zipName)
+				processed++
+				emit(Event{
+					Type: EventRestoreDownloadProgress,
+					At:   time.Now(),
+					Data: map[string]any{
+						"path":          m.Path,
+						"processed":     processed,
+						"total":         total,
+						"total_bytes":   totalBytes,
+						"files_written": written,
+						"bytes_written": bytes,
+						"errors":        len(errs),
+						"error":         "not found in zip " + zipName,
+					},
+				})
 				continue
 			}
 		}
 		dst, err := safeJoin(target, m.Path)
 		if err != nil {
 			errs = append(errs, m.Path+": "+err.Error())
+			processed++
+			emit(Event{
+				Type: EventRestoreDownloadProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"path":          m.Path,
+					"processed":     processed,
+					"total":         total,
+					"total_bytes":   totalBytes,
+					"files_written": written,
+					"bytes_written": bytes,
+					"errors":        len(errs),
+					"error":         err.Error(),
+				},
+			})
 			continue
 		}
 		entry, err := zf.Open()
 		if err != nil {
 			errs = append(errs, m.Path+": open entry: "+err.Error())
+			processed++
+			emit(Event{
+				Type: EventRestoreDownloadProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"path":          m.Path,
+					"processed":     processed,
+					"total":         total,
+					"total_bytes":   totalBytes,
+					"files_written": written,
+					"bytes_written": bytes,
+					"errors":        len(errs),
+					"error":         err.Error(),
+				},
+			})
 			continue
 		}
 		expected := m.MD5
@@ -578,6 +713,21 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		entry.Close()
 		if err != nil {
 			errs = append(errs, m.Path+": write: "+err.Error())
+			processed++
+			emit(Event{
+				Type: EventRestoreDownloadProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"path":          m.Path,
+					"processed":     processed,
+					"total":         total,
+					"total_bytes":   totalBytes,
+					"files_written": written,
+					"bytes_written": bytes,
+					"errors":        len(errs),
+					"error":         err.Error(),
+				},
+			})
 			continue
 		}
 		// Preserve the zip entry's file mode (executable bit, restrictive
@@ -590,8 +740,22 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		}
 		written++
 		bytes += n
+		processed++
+		emit(Event{
+			Type: EventRestoreDownloadProgress,
+			At:   time.Now(),
+			Data: map[string]any{
+				"path":          m.Path,
+				"processed":     processed,
+				"total":         total,
+				"total_bytes":   totalBytes,
+				"files_written": written,
+				"bytes_written": bytes,
+				"errors":        len(errs),
+			},
+		})
 	}
-	return
+	return written, bytes, errs, processed
 }
 
 // writeFromReader copies src to a new file at dst (creating parent
