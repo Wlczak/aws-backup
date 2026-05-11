@@ -38,6 +38,8 @@ POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..
 POST   /api/restore/download/estimate {paths: []} → restored-file estimate for the Download tab (breaks out restored / in_progress / not_restoring; request fee counts actual downloadable S3 objects, zip groups count once)
 POST   /api/restore/download          {paths: [], target_dir: "/abs/path"} → downloads only restored S3 objects / zip members to disk and verifies each file against files.md5
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
+POST   /api/restore/scan/full          HEADs every uploaded/zipped S3 object key and reconciles restore status authoritatively
+POST   /api/restore/scan/pending       HEADs only rows currently marked `in_progress`
 
 # Sync / reconcile
 POST   /api/sync                      existence check; resets DB rows whose S3 keys are missing

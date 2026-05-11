@@ -69,9 +69,9 @@ type Deps struct {
 	// Returns the number of messages processed. nil means "SQS not
 	// configured" — the handler returns 503 so the UI can surface that.
 	SyncRestoreStatus func(ctx context.Context) (int, error)
-	// RestoreScanner reconciles restore status by HEADing every (or only
-	// pending) individually-uploaded file. nil disables the on-demand
-	// scan endpoints (handlers return 503).
+	// RestoreScanner reconciles restore status by HEADing every uploaded
+	// or zipped object key on a full scan, plus the pending-only path.
+	// nil disables the on-demand scan endpoints (handlers return 503).
 	RestoreScanner *scanner.Scanner
 	// Inventory manages the bucket's S3 inventory configuration. nil
 	// disables the inventory endpoints (handlers return 503). Typically

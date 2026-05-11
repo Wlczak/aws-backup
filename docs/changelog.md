@@ -4,6 +4,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #283 | — | Missing rows without an `s3_key` now stay labeled `missing` instead of being shown as `cloud only` |
+| — | — | Full restore scan now HEADs all uploaded/zipped object keys instead of only standalone rows |
 | — | — | Download tab now reports restored / in-progress / not-restoring counts and only estimates downloadable rows |
 | — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
 | #38 | db02540 | `MarkMissing` includes `zipped` rows |

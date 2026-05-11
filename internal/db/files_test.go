@@ -166,3 +166,57 @@ func TestParseFlexTime(t *testing.T) {
 		}
 	}
 }
+
+// TestListRestoreScanKeys keeps the full restore scan keyed to actual
+// uploaded objects: standalone uploads and zip archives are included,
+// while pending rows are skipped even if they still carry an s3_key.
+func TestListRestoreScanKeys(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+
+	standalone, err := d.UpsertFile(ctx, "solo.txt", 10, now, now)
+	if err != nil {
+		t.Fatalf("seed standalone: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, standalone.ID, "md5", "backups/solo.txt", now); err != nil {
+		t.Fatalf("mark standalone uploaded: %v", err)
+	}
+
+	zipped, err := d.UpsertFile(ctx, "docs/spec.pdf", 20, now, now)
+	if err != nil {
+		t.Fatalf("seed zipped: %v", err)
+	}
+	if err := d.SetZipName(ctx, []int64{zipped.ID}, "docs/docs_1.zip"); err != nil {
+		t.Fatalf("set zip name: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, zipped.ID, "md5", "backups/docs/docs_1.zip", now); err != nil {
+		t.Fatalf("mark zipped uploaded: %v", err)
+	}
+
+	pending, err := d.UpsertFile(ctx, "stale.txt", 30, now, now)
+	if err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("id = ?", pending.ID).Updates(map[string]any{
+		"status":   StatusPending,
+		"s3_key":   "backups/stale.zip",
+		"zip_name": "",
+	}).Error; err != nil {
+		t.Fatalf("plant stale pending row: %v", err)
+	}
+
+	keys, err := d.ListRestoreScanKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListRestoreScanKeys: %v", err)
+	}
+	want := []string{"backups/docs/docs_1.zip", "backups/solo.txt"}
+	if len(keys) != len(want) {
+		t.Fatalf("keys=%v want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("keys=%v want %v", keys, want)
+		}
+	}
+}

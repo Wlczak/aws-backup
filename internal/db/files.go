@@ -856,6 +856,20 @@ func (db *DB) ListFilesByRestoreStatus(ctx context.Context, status string) ([]st
 	return keys, err
 }
 
+// ListRestoreScanKeys returns distinct non-empty s3_keys for rows that
+// represent objects currently present in S3. The authoritative restore
+// scan needs both standalone uploads and zip archives, so this includes
+// uploaded and zipped rows.
+func (db *DB) ListRestoreScanKeys(ctx context.Context) ([]string, error) {
+	var keys []string
+	err := db.g.WithContext(ctx).Model(&File{}).
+		Where("status IN ? AND COALESCE(s3_key,'') != ''", []string{StatusUploaded, StatusZipped}).
+		Distinct("s3_key").
+		Order("s3_key").
+		Pluck("s3_key", &keys).Error
+	return keys, err
+}
+
 // ListIndividualS3Keys returns distinct s3_key values for individually-uploaded files.
 func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 	var keys []string

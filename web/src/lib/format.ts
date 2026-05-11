@@ -54,9 +54,11 @@ export function statusBadge(status: string): 'ok' | 'warn' | 'err' | 'running' {
 
 // statusLabel maps the raw db status to a human-readable badge label.
 // The DB still stores 'missing' for files gone from source but present in S3;
-// the user-facing term for that state is "cloud only".
-export function statusLabel(status: string): string {
-  if (status === 'missing') return 'cloud only';
+// the user-facing term for that state is "cloud only". Rows that are
+// missing locally but have no recorded S3 key are shown as plain "missing"
+// so never-uploaded files are not mislabeled as cloud-backed.
+export function statusLabel(status: string, s3Key?: string): string {
+  if (status === 'missing') return s3Key ? 'cloud only' : 'missing';
   return status;
 }
 

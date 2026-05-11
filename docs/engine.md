@@ -64,6 +64,7 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 
 - `Post` event → `db.MarkRestoreInProgress(s3_key)`
 - `Completed` event → `db.MarkRestored(s3_key, expiresAt)` — sets `restore_expires_at` so the UI can warn before the temporary copy expires
+- `POST /api/restore/scan/full` HEADs every uploaded/zipped object key in the index, not just standalone rows, so zip-backed files reconcile too.
 - `RestoreToDir` downloads matching rows only when `restore_status='restored'`, writes them into an operator-selected absolute directory, extracts zip members selectively, and verifies each restored file against the row's `md5` unless `SkipChecksum` is set. Rows that are still thawing or never restored are skipped and surfaced in `RestoreStats.Skipped`. The API handler wires progress into `restore_download_*` SSE events so the Download page can show live download/verify progress.
 - `/api/restore/download/estimate` uses the same DB path matching as `RestoreToDir` to split the selected rows into restored / in_progress / not_restoring buckets, estimate the number of S3 objects and indexed bytes that are actually downloadable, and then price GET requests plus outbound egress.
 - `run_logs` is auto-trimmed after every `FinishRun` (and once at process startup): the just-finished run is capped to `backup.log_max_per_run` rows (lowest-severity oldest first), and every run finished more than `backup.log_retention_days` days ago has its log rows deleted (the runs row itself is preserved). See `docs/data-model.md`
