@@ -121,6 +121,9 @@ export interface RestoreDownloadResponse {
 export interface RestoreDownloadEstimate {
   object_count: number;
   total_bytes: number;
+  restored_count: number;
+  in_progress_count: number;
+  not_restoring_count: number;
   request_fee_usd: number;
   egress_fee_usd: number;
   total_fee_usd: number;

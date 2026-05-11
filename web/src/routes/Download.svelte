@@ -68,16 +68,18 @@
   });
 
   function paths(): string[] {
-    return raw
+    const parsed = raw
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
+    if (parsed.includes('/')) return ['/'];
+    return parsed;
   }
 
   async function doDownload() {
     const p = paths();
     if (p.length === 0) {
-      toast.error('enter at least one path');
+      toast.error('enter at least one path, or / for all files');
       return;
     }
     if (downloadTargetDir.trim() === '') {
@@ -105,7 +107,7 @@
   async function doEstimate() {
     const p = paths();
     if (p.length === 0) {
-      toast.error('enter at least one path');
+      toast.error('enter at least one path, or / for all files');
       return;
     }
     estimating = true;
@@ -165,11 +167,23 @@
   {#if downloadEstimate}
     <div class="stats" style="margin-top: 0.75rem">
       <div>
+        <div class="muted">Restored files</div>
+        <div class="big">{downloadEstimate.restored_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">In progress</div>
+        <div class="big">{downloadEstimate.in_progress_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">Not restoring</div>
+        <div class="big">{downloadEstimate.not_restoring_count.toLocaleString()}</div>
+      </div>
+      <div>
         <div class="muted">S3 objects</div>
         <div class="big">{downloadEstimate.object_count.toLocaleString()}</div>
       </div>
       <div>
-        <div class="muted">Data</div>
+        <div class="muted">Downloadable data</div>
         <div class="big">{bytes(downloadEstimate.total_bytes)}</div>
       </div>
       <div>
@@ -186,7 +200,7 @@
       </div>
     </div>
     <p class="muted small" style="margin-top: 0.5rem">
-      Estimated from indexed file sizes. Zipped groups count as one S3 object for request fees.
+      Only restored files are counted as downloadable. Zipped groups still count as one S3 object for request fees.
     </p>
     {#if downloadEstimate.unknown_paths?.length}
       <details style="margin-top: 0.75rem">

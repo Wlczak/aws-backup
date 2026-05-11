@@ -44,6 +44,9 @@ func TestRestoreToDirMixed(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["notes.txt"]}, md5hex("hello"), "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +60,9 @@ func TestRestoreToDirMixed(t *testing.T) {
 	}
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"),
 		"backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/photos/photos_1.zip", now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,6 +129,12 @@ func TestRestoreToDirPrefixFilter(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/readme.md"]}, md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.MarkRestored(ctx, "backups/photos/a.jpg", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/docs/readme.md", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 
 	store := storage.NewMemStorage()
 	mustPut(t, store, "backups/photos/a.jpg", "aaa")
@@ -179,6 +191,9 @@ func TestRestoreToDirChecksumMismatch(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{id}, wrongMD5, "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 
 	store := storage.NewMemStorage()
 	mustPut(t, store, "backups/notes.txt", "hello")
@@ -220,6 +235,9 @@ func TestRestoreToDirEmitsProgress(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,6 +284,67 @@ func TestRestoreToDirEmitsProgress(t *testing.T) {
 	}
 	if got := events[2].Data["errors"].(int); got != 0 {
 		t.Fatalf("complete errors = %d want 0", got)
+	}
+}
+
+func TestRestoreToDirSkipsNonRestoredFiles(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: "ready.txt", Size: 5, ModTime: now},
+		{Path: "thawing.txt", Size: 7, ModTime: now},
+		{Path: "idle.txt", Size: 9, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("ready"), "backups/ready.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, res[1].ID, md5hex("thawing"), "backups/thawing.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, res[2].ID, md5hex("idle"), "backups/idle.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/ready.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestoreInProgress(ctx, "backups/thawing.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/ready.txt", "ready")
+	mustPut(t, store, "backups/thawing.txt", "thawing")
+	mustPut(t, store, "backups/idle.txt", "idle")
+
+	target := t.TempDir()
+	stats, err := RestoreToDir(ctx, RestoreOptions{
+		DB:        d,
+		Storage:   store,
+		KeyPrefix: "backups/",
+		TargetDir: target,
+		Paths:     []string{"/"},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1 (%+v)", stats.FilesWritten, stats)
+	}
+	if len(stats.Skipped) != 2 {
+		t.Fatalf("Skipped = %v want 2 entries", stats.Skipped)
+	}
+	if _, err := os.Stat(filepath.Join(target, "ready.txt")); err != nil {
+		t.Fatalf("ready.txt missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "thawing.txt")); !os.IsNotExist(err) {
+		t.Fatalf("thawing.txt should not have been restored, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "idle.txt")); !os.IsNotExist(err) {
+		t.Fatalf("idle.txt should not have been restored, err=%v", err)
 	}
 }
 

@@ -274,12 +274,15 @@ type restoreDownloadEstimateRequest struct {
 }
 
 type restoreDownloadEstimateResponse struct {
-	ObjectCount   int64    `json:"object_count"`
-	TotalBytes    int64    `json:"total_bytes"`
-	RequestFeeUSD float64  `json:"request_fee_usd"`
-	EgressFeeUSD  float64  `json:"egress_fee_usd"`
-	TotalFeeUSD   float64  `json:"total_fee_usd"`
-	UnknownPaths  []string `json:"unknown_paths,omitempty"`
+	ObjectCount       int64    `json:"object_count"`
+	TotalBytes        int64    `json:"total_bytes"`
+	RestoredCount     int64    `json:"restored_count"`
+	InProgressCount   int64    `json:"in_progress_count"`
+	NotRestoringCount int64    `json:"not_restoring_count"`
+	RequestFeeUSD     float64  `json:"request_fee_usd"`
+	EgressFeeUSD      float64  `json:"egress_fee_usd"`
+	TotalFeeUSD       float64  `json:"total_fee_usd"`
+	UnknownPaths      []string `json:"unknown_paths,omitempty"`
 }
 
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
@@ -359,8 +362,10 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 
 // handleRestoreDownload downloads matching files from S3 into a local
 // directory and verifies each written file against the MD5 stored in the
-// DB. Per-file checksum failures are returned in the response rather than
-// aborting the whole batch.
+// DB. Only rows currently marked restore_status='restored' are treated as
+// downloadable; thaw-pending and never-restored rows are reported as
+// skipped. Per-file checksum failures are returned in the response rather
+// than aborting the whole batch.
 func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -423,9 +428,10 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRestoreDownloadEstimate computes a download cost estimate from DB
-// metadata only. It counts actual S3 objects that will be fetched (one
-// zip archive per zip group, plus standalone objects) and estimates data
-// transfer from the indexed file sizes.
+// metadata only. It counts only rows currently marked restored as
+// downloadable, splits the rest into in-progress vs not-restoring, and
+// prices the actual S3 objects that will be fetched (one zip archive per
+// restored zip group, plus standalone objects) from the indexed file sizes.
 func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Request) {
 	var req restoreDownloadEstimateRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -482,19 +488,25 @@ func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Re
 	egress := egressGB * pricePerGBEgress
 
 	writeJSON(w, http.StatusOK, restoreDownloadEstimateResponse{
-		ObjectCount:   br.ObjectCount,
-		TotalBytes:    br.TotalBytes,
-		RequestFeeUSD: round2(request),
-		EgressFeeUSD:  round2(egress),
-		TotalFeeUSD:   round2(request + egress),
-		UnknownPaths:  unknown,
+		ObjectCount:       br.ObjectCount,
+		TotalBytes:        br.TotalBytes,
+		RestoredCount:     br.RestoredCount,
+		InProgressCount:   br.InProgressCount,
+		NotRestoringCount: br.NotRestoringCount,
+		RequestFeeUSD:     round2(request),
+		EgressFeeUSD:      round2(egress),
+		TotalFeeUSD:       round2(request + egress),
+		UnknownPaths:      unknown,
 	})
 }
 
 type downloadEstimateBreakdown struct {
-	ObjectCount  int64
-	TotalBytes   int64
-	MatchedPaths []string
+	ObjectCount       int64
+	TotalBytes        int64
+	RestoredCount     int64
+	InProgressCount   int64
+	NotRestoringCount int64
+	MatchedPaths      []string
 }
 
 func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allFiles bool) (downloadEstimateBreakdown, error) {
@@ -541,6 +553,18 @@ func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allF
 					continue
 				}
 			}
+			switch f.RestoreStatus {
+			case db.RestoreStatusRestored:
+				br.RestoredCount++
+				br.TotalBytes += f.Size
+			case db.RestoreStatusInProgress:
+				br.InProgressCount++
+			default:
+				br.NotRestoringCount++
+			}
+			if f.RestoreStatus != db.RestoreStatusRestored {
+				continue
+			}
 			key := f.S3Key
 			if f.ZipName != "" {
 				key = pathutil.JoinKey(s.storagePrefix(), f.ZipName)
@@ -552,7 +576,6 @@ func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allF
 				seenKeys[key] = struct{}{}
 				br.ObjectCount++
 			}
-			br.TotalBytes += f.Size
 		}
 		if len(rows) < pageSize {
 			break

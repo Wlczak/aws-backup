@@ -336,10 +336,11 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 	return stats, nil
 }
 
-// RestoreToDir downloads every DB file matching opts.Paths and writes it
-// beneath opts.TargetDir. Files stored individually are streamed from
-// their s3_key; files inside a zip archive are downloaded once per zip
-// and extracted selectively.
+// RestoreToDir downloads every restored DB file matching opts.Paths and
+// writes it beneath opts.TargetDir. Files stored individually are
+// streamed from their s3_key; files inside a zip archive are downloaded
+// once per zip and extracted selectively. Rows that are still thawing or
+// not marked restored are skipped rather than triggering a failing GET.
 //
 // Non-fatal per-file errors are collected in RestoreStats.Errors; the
 // function only returns a hard error for setup failures (bad target,
@@ -431,6 +432,16 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 			if f.ZipName == "" && f.S3Key == "" {
 				// Never uploaded — nothing to restore.
 				stats.Skipped = append(stats.Skipped, f.Path+" (never uploaded)")
+				continue
+			}
+			switch f.RestoreStatus {
+			case db.RestoreStatusRestored:
+				// downloadable now
+			case db.RestoreStatusInProgress:
+				stats.Skipped = append(stats.Skipped, f.Path+" (still thawing)")
+				continue
+			default:
+				stats.Skipped = append(stats.Skipped, f.Path+" (not restored yet)")
 				continue
 			}
 			byZip[f.ZipName] = append(byZip[f.ZipName], f)

@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Download tab now reports restored / in-progress / not-restoring counts and only estimates downloadable rows |
 | — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
 | #38 | db02540 | `MarkMissing` includes `zipped` rows |
 | #39 | f1880af | `currentRun` leak + `discardResponse` header on panic |

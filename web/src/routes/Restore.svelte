@@ -182,16 +182,18 @@
   }
 
   function paths(): string[] {
-    return raw
+    const parsed = raw
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
+    if (parsed.includes('/')) return ['/'];
+    return parsed;
   }
 
   async function doEstimate() {
     const p = paths();
     if (p.length === 0) {
-      toast.error('enter at least one path');
+      toast.error('enter at least one path, or / for all files');
       return;
     }
     loading = true;

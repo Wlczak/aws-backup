@@ -959,6 +959,9 @@ func TestRestoreDownloadOK(t *testing.T) {
 	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := deps.DB.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Put(ctx, "backups/notes.txt", strings.NewReader("hello"), int64(len("hello"))); err != nil {
 		t.Fatal(err)
 	}
@@ -1009,6 +1012,7 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 		{Path: "photos/a.jpg", Size: 100, ModTime: now},
 		{Path: "photos/b.jpg", Size: 200, ModTime: now},
 		{Path: "docs/readme.md", Size: 300, ModTime: now},
+		{Path: "docs/idle.txt", Size: 400, ModTime: now},
 	}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -1017,6 +1021,7 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 		"photos/a.jpg":   res[0].ID,
 		"photos/b.jpg":   res[1].ID,
 		"docs/readme.md": res[2].ID,
+		"docs/idle.txt":  res[3].ID,
 	}
 	if err := deps.DB.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
 		t.Fatal(err)
@@ -1030,8 +1035,17 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 	if err := deps.DB.MarkUploaded(ctx, ids["docs/readme.md"], md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
 		t.Fatal(err)
 	}
+	if err := deps.DB.MarkUploaded(ctx, ids["docs/idle.txt"], md5hex("idle"), "backups/docs/idle.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestored(ctx, "backups/photos/photos_1.zip", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestoreInProgress(ctx, "backups/docs/readme.md"); err != nil {
+		t.Fatal(err)
+	}
 
-	body := strings.NewReader(`{"paths":["photos","docs/readme.md","unknown/dir"]}`)
+	body := strings.NewReader(`{"paths":["photos","docs","unknown/dir"]}`)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
@@ -1045,11 +1059,20 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.ObjectCount != 2 {
-		t.Fatalf("object_count=%d want 2", got.ObjectCount)
+	if got.ObjectCount != 1 {
+		t.Fatalf("object_count=%d want 1", got.ObjectCount)
 	}
-	if got.TotalBytes != 600 {
-		t.Fatalf("total_bytes=%d want 600", got.TotalBytes)
+	if got.TotalBytes != 300 {
+		t.Fatalf("total_bytes=%d want 300", got.TotalBytes)
+	}
+	if got.RestoredCount != 2 {
+		t.Fatalf("restored_count=%d want 2", got.RestoredCount)
+	}
+	if got.InProgressCount != 1 {
+		t.Fatalf("in_progress_count=%d want 1", got.InProgressCount)
+	}
+	if got.NotRestoringCount != 1 {
+		t.Fatalf("not_restoring_count=%d want 1", got.NotRestoringCount)
 	}
 	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
 		t.Fatalf("unknown_paths=%v", got.UnknownPaths)
@@ -1078,6 +1101,9 @@ func TestRestoreDownloadRejectsRelativeTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestoreInProgress(ctx, "backups/notes.txt"); err != nil {
 		t.Fatal(err)
 	}
 
