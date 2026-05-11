@@ -132,6 +132,7 @@ aws-backup/
 | `Storage.PutIfAbsent` via S3 `IfNoneMatch=*` | Atomic dedup at the bucket; engine retries with next counter on collision (#116) |
 | Tmp resume via stable `ind-{fileID}` name | Cached copy is reused on upload retry when size+mtime match (#127) |
 | Pre-flight `ensureTmpSpace` | Cross-platform free-space check with 64 MiB margin before copy/zip (#138) |
+| Idle SQLite connection recycling | `database/sql` keeps the DB handle open but closes the underlying connection after 15 minutes of inactivity, then reopens it on demand |
 | Schedule triggers via HTTP, not in-process | The API serialises run launches; cron path uses the same 409 semantics |
 | `Deps.ConfigMu` shared with `appState.mu` | Single mutex for cfg reads/writes across both sides (#153) |
 

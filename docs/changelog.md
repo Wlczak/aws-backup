@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | SQLite connection pool now closes the idle connection after 15 minutes and transparently reopens on the next query; the DB handle itself stays alive for the process lifetime |
 | — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
 | — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
 | — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
