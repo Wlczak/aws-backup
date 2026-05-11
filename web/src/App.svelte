@@ -39,6 +39,7 @@
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />
+    {:else if $route === 'download'}<Download />
     {:else}<p class="muted">Unknown route: {$route}</p>
     {/if}
   </main>

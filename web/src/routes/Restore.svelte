@@ -40,6 +40,8 @@
     void raw;
     void days;
     confirmTrigger = false;
+    estimate = null;
+    triggerResult = null;
   });
 
   $effect(() => {
@@ -182,22 +184,28 @@
   }
 
   function paths(): string[] {
-    return raw
+    const parsed = raw
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
+    if (parsed.includes('/')) return ['/'];
+    return parsed;
   }
 
   async function doEstimate() {
     const p = paths();
     if (p.length === 0) {
-      toast.error('enter at least one path');
+      toast.error('enter at least one path, or / for all files');
+      return;
+    }
+    if (!Number.isInteger(days) || days < 1 || days > 180) {
+      toast.error('days must be an integer between 1 and 180');
       return;
     }
     loading = true;
     estimate = null;
     try {
-      estimate = await api.restoreEstimate(p, tier);
+      estimate = await api.restoreEstimate(p, days, tier);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -223,8 +231,8 @@
 
   async function doTrigger() {
     const p = paths();
-    if (!Number.isInteger(days) || days < 1 || days > 30) {
-      toast.error('days must be an integer between 1 and 30');
+    if (!Number.isInteger(days) || days < 1 || days > 180) {
+      toast.error('days must be an integer between 1 and 180');
       confirmTrigger = false;
       return;
     }
@@ -336,11 +344,12 @@
   </p>
   <textarea bind:value={raw} placeholder={"photos\ndocs/2024\nfamily-archive.zip"}></textarea>
 
-  <div class="label" style="margin-top: 0.75rem">Days to keep restored (1–30)</div>
+  <div class="label" style="margin-top: 0.75rem">Days to keep restored (1–180)</div>
   <p class="muted">
-    AWS will keep the thawed copy in standard storage for this many days. After
-    that, the object reverts to the archive class and a new restore must be
-    issued. The actual download is done out-of-band once status flips to
+    AWS will keep the thawed copy in standard storage for this many days, and
+    you'll pay S3 Standard storage for that period. After that, the object
+    reverts to the archive class and a new restore must be issued. The actual
+    download is done out-of-band once status flips to
     <code class="mono">restored</code> — track via "Drain SQS now" or
     "Scan pending only" above.
   </p>
@@ -349,7 +358,7 @@
       <option value="bulk">Bulk - lowest cost, up to 48h</option>
       <option value="standard">Standard - faster, up to 12h</option>
     </select>
-    <input type="number" bind:value={days} min="1" max="30" step="1" class="mono daysinput" />
+    <input type="number" bind:value={days} min="1" max="180" step="1" class="mono daysinput" />
   </div>
 
   <div class="actions">
@@ -467,6 +476,10 @@
         <tr>
           <td>Retrieval ({bytes(estimate.total_bytes)} × {tier === 'bulk' ? '$0.003 / GB' : '$0.02 / GB'})</td>
           <td class="mono">${estimate.retrieval_fee_usd.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td>Standard storage ({days} day(s) × $0.023 / GB-month)</td>
+          <td class="mono">${estimate.storage_fee_usd.toFixed(2)}</td>
         </tr>
         <tr><td>Egress (first 100 GB free, then $0.09 / GB)</td><td class="mono">${estimate.egress_fee_usd.toFixed(2)}</td></tr>
         <tr><td><strong>Total</strong></td><td class="mono"><strong>${estimate.total_fee_usd.toFixed(2)}</strong></td></tr>

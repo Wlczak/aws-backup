@@ -27,6 +27,7 @@ type fileEntry struct {
 	MTime            time.Time  `json:"mtime"`
 	MD5              string     `json:"md5,omitempty"`
 	Status           string     `json:"status"`
+	ZipID            *int64     `json:"zip_id,omitempty"`
 	ZipName          string     `json:"zip_name,omitempty"`
 	S3Key            string     `json:"s3_key,omitempty"`
 	UploadedAt       time.Time  `json:"uploaded_at,omitempty"`
@@ -82,7 +83,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	for _, f := range files {
 		out = append(out, fileEntry{
 			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
-			Status: f.Status, ZipName: f.ZipName, S3Key: f.S3Key,
+			Status: f.Status, ZipID: f.ZipID, ZipName: f.ZipName, S3Key: f.S3Key,
 			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
 			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
 		})
@@ -149,7 +150,7 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request) {
 	for _, f := range files {
 		resp.Files = append(resp.Files, fileEntry{
 			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
-			Status: f.Status, ZipName: f.ZipName, S3Key: f.S3Key,
+			Status: f.Status, ZipID: f.ZipID, ZipName: f.ZipName, S3Key: f.S3Key,
 			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
 			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
 		})

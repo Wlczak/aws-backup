@@ -11,6 +11,10 @@
     <span>Temp directory</span>
     <input type="text" bind:value={cfg.backup.tmp_dir} />
   </label>
+  <label>
+    <span>Download directory</span>
+    <input type="text" bind:value={cfg.backup.download_dir} />
+  </label>
   <div class="row-2">
     <label>
       <span>Chunk size (individual files per batch)</span>
@@ -31,6 +35,9 @@
       <input type="number" min="0" bind:value={cfg.backup.zip_max_bytes} />
     </label>
   </div>
+  <p class="muted">
+    Small sibling folders below the min file count are folded into the parent zip pool, including at the top level, so object-heavy trees can collapse into a few archives instead of thousands of S3 uploads.
+  </p>
   <div class="row-2">
     <label>
       <span>Copy threads (source → tmp parallelism)</span>

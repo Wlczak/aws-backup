@@ -1,29 +1,52 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import ProgressBar from '../components/ProgressBar.svelte';
-  import { api, ApiError, subscribeEvents, type RestoreToDirResult } from '../lib/api';
+  import { onMount, onDestroy } from 'svelte';
+  import { api, subscribeEvents, type RestoreDownloadEstimate, type RestoreDownloadResponse } from '../lib/api';
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
-  import { clear as clearSelection, paths as selectionPaths } from '../lib/selection';
+  import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
+  import ProgressBar from '../components/ProgressBar.svelte';
 
+  let raw = $state('');
+  let downloadTargetDir = $state('');
+  let downloadEstimate = $state<RestoreDownloadEstimate | null>(null);
+  let downloadResult = $state<RestoreDownloadResponse | null>(null);
+  let downloadBusy = $state(false);
+  let estimating = $state(false);
+  let verifyChecksum = $state(true);
+  let lastVerifyChecksum = $state(true);
   type DownloadTone = 'idle' | 'running' | 'ok' | 'warn' | 'err';
   type DownloadStatus = {
     tone: DownloadTone;
     label: string;
     detail: string;
   };
-
-  let raw = $state('');
-  let targetDir = $state('');
-  let verifyChecksum = $state(true);
-  let loading = $state(false);
-  let result = $state<RestoreToDirResult | null>(null);
-  let lastVerifyChecksum = $state(true);
-  let downloadStatus = $state<DownloadStatus>({
+  const idleStatus = (): DownloadStatus => ({
     tone: 'idle',
     label: 'Idle',
     detail: 'Select paths and a target directory to start a download.',
   });
+  const runningStatus = (detail: string): DownloadStatus => ({
+    tone: 'running',
+    label: 'Downloading',
+    detail,
+  });
+  const okStatus = (detail: string): DownloadStatus => ({
+    tone: 'ok',
+    label: 'Complete',
+    detail,
+  });
+  const warnStatus = (detail: string): DownloadStatus => ({
+    tone: 'warn',
+    label: 'Complete with warnings',
+    detail,
+  });
+  const errStatus = (detail: string): DownloadStatus => ({
+    tone: 'err',
+    label: 'Failed',
+    detail,
+  });
+  let downloadStatus = $state<DownloadStatus>(idleStatus());
+  let downloadTotalBytes = $state(0);
   let downloadProgress = $state<{
     processed: number;
     total: number;
@@ -34,7 +57,19 @@
     error?: string;
     errors: number;
   } | null>(null);
+
+  $effect(() => {
+    void raw;
+    void downloadTargetDir;
+    downloadEstimate = null;
+    downloadResult = null;
+    if (!downloadBusy && !downloadProgress) {
+      downloadStatus = idleStatus();
+    }
+  });
+
   let aborted = false;
+  onDestroy(() => { aborted = true; });
 
   onMount(() => {
     const pre = selectionPaths();
@@ -43,29 +78,12 @@
       toast.info(`Pre-filled ${pre.length} path(s) from Files selection.`);
       clearSelection();
     }
-    try {
-      const lastTarget = localStorage.getItem('aws-backup:download-target-dir');
-      if (lastTarget) targetDir = lastTarget;
-    } catch {
-      // Private mode / storage denial.
-    }
-
     const sub = subscribeEvents((type, data) => {
       if (type === 'restore_download_start') {
         const d = data as { total: number; total_bytes: number };
-        downloadProgress = {
-          processed: 0,
-          total: d.total ?? 0,
-          total_bytes: d.total_bytes ?? 0,
-          files_written: 0,
-          bytes_written: 0,
-          errors: 0,
-        };
-        downloadStatus = {
-          tone: 'running',
-          label: 'Downloading',
-          detail: `${(d.total ?? 0).toLocaleString()} file(s) queued.`,
-        };
+        downloadTotalBytes = d.total_bytes ?? 0;
+        downloadProgress = { processed: 0, total: d.total, total_bytes: downloadTotalBytes, files_written: 0, bytes_written: 0, errors: 0 };
+        downloadStatus = runningStatus(`0 / ${d.total.toLocaleString()} files checked.`);
       } else if (type === 'restore_download_progress') {
         const d = data as {
           processed: number;
@@ -80,7 +98,7 @@
         downloadProgress = {
           processed: d.processed,
           total: d.total,
-          total_bytes: d.total_bytes,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
           files_written: d.files_written,
           bytes_written: d.bytes_written,
           path: d.path,
@@ -93,221 +111,271 @@
         ];
         if (d.path) parts.push(d.path);
         if (d.error) parts.push(d.error);
-        downloadStatus = {
-          tone: 'running',
-          label: 'Downloading',
-          detail: parts.join(' · '),
-        };
+        downloadStatus = runningStatus(parts.join(' · '));
       } else if (type === 'restore_download_complete') {
         const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number };
+        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
         downloadProgress = null;
         downloadStatus = d.errors > 0
-          ? {
-            tone: 'warn',
-            label: 'Complete with warnings',
-            detail: `${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)} · ${d.errors.toLocaleString()} error(s).`,
-          }
-          : {
-            tone: 'ok',
-            label: 'Complete',
-            detail: `${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)}.`,
-          };
+          ? warnStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)} · ${d.errors.toLocaleString()} error(s).`)
+          : okStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)}.`);
       } else if (type === 'restore_download_failed') {
-        const d = data as { files_written: number; bytes_written: number; errors: number; error?: string };
+        const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number; error?: string };
+        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
         downloadProgress = null;
-        downloadStatus = {
-          tone: 'err',
-          label: 'Failed',
-          detail: [
-            `${d.files_written.toLocaleString()} written`,
-            bytes(d.bytes_written),
-            `${d.errors.toLocaleString()} error(s)`,
-            d.error,
-          ].filter(Boolean).join(' · '),
-        };
+        const detail = [
+          `${d.files_written.toLocaleString()} written`,
+          bytes(d.bytes_written),
+          `${d.errors.toLocaleString()} error(s)`,
+          d.error,
+        ].filter(Boolean).join(' · ');
+        downloadStatus = errStatus(detail);
       }
     });
-
     return () => sub.close();
   });
 
-  onDestroy(() => {
-    aborted = true;
-  });
-
   function paths(): string[] {
-    return raw
+    const parsed = raw
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
+    if (parsed.includes('/')) return ['/'];
+    return parsed;
   }
 
-  function isAbsoluteTargetDir(p: string): boolean {
-    return /^([A-Za-z]:[\\/]|[\\/]{2}|[\\/])/.test(p);
-  }
-
-  async function doRestore() {
+  async function doDownload() {
     const p = paths();
     if (p.length === 0) {
-      toast.error('enter at least one path');
+      toast.error('enter at least one path, or / for all files');
       return;
     }
-    if (!targetDir.trim()) {
-      toast.error('enter a target directory');
+    if (downloadTargetDir.trim() === '') {
+      toast.error('enter an absolute target directory');
       return;
     }
-    if (!isAbsoluteTargetDir(targetDir.trim())) {
-      toast.error('target directory must be an absolute path');
-      return;
-    }
-
-    loading = true;
-    result = null;
-    downloadProgress = null;
-    downloadStatus = {
-      tone: 'running',
-      label: 'Submitting',
-      detail: 'Starting download…',
-    };
+    downloadBusy = true;
+    downloadResult = null;
+    downloadTotalBytes = 0;
+    downloadStatus = runningStatus('Submitting download request…');
     try {
       lastVerifyChecksum = verifyChecksum;
-      const next = await api.restoreToDir(p, targetDir.trim(), verifyChecksum);
+      const r = await api.restoreDownload(p, downloadTargetDir.trim(), verifyChecksum);
       if (aborted) return;
-      result = next;
-      try {
-        localStorage.setItem('aws-backup:download-target-dir', targetDir.trim());
-      } catch {
-        // ignore storage denial
+      downloadResult = r;
+      downloadTotalBytes = r.total_bytes ?? downloadTotalBytes;
+      const skipped = r.skipped?.length ?? 0;
+      const errorCount = r.errors?.length ?? 0;
+      const parts = [
+        `${r.files_written.toLocaleString()} written`,
+        bytes(r.bytes_written),
+      ];
+      if (skipped > 0) parts.push(`${skipped.toLocaleString()} skipped`);
+      if (errorCount > 0) parts.push(`${errorCount.toLocaleString()} error(s)`);
+      downloadStatus = errorCount > 0
+        ? warnStatus(parts.join(' · '))
+        : okStatus(parts.join(' · '));
+      if (r.errors?.length) {
+        toast.info(`Downloaded ${r.files_written.toLocaleString()} file(s) with ${r.errors.length} error(s).`);
+      } else {
+        toast.success(`Downloaded ${r.files_written.toLocaleString()} file(s) to ${downloadTargetDir.trim()}.`);
       }
-      downloadStatus = next.errors?.length
-        ? {
-          tone: 'warn',
-          label: 'Complete with warnings',
-          detail: `${next.files_written.toLocaleString()} written · ${bytes(next.bytes_written)} · ${next.errors.length.toLocaleString()} error(s).`,
-        }
-        : {
-          tone: 'ok',
-          label: 'Complete',
-          detail: `${next.files_written.toLocaleString()} written · ${bytes(next.bytes_written)}.`,
-        };
-      toast.success(`Downloaded ${next.files_written.toLocaleString()} file(s).`);
     } catch (e) {
-      if (aborted || (e instanceof ApiError && e.kind === 'abort')) return;
-      downloadStatus = {
-        tone: 'err',
-        label: 'Failed',
-        detail: String(e),
-      };
+      downloadStatus = errStatus(String(e));
       toast.error(String(e));
     } finally {
-      loading = false;
+      downloadBusy = false;
+    }
+  }
+
+  async function doEstimate() {
+    const p = paths();
+    if (p.length === 0) {
+      toast.error('enter at least one path, or / for all files');
+      return;
+    }
+    estimating = true;
+    downloadEstimate = null;
+    try {
+      downloadEstimate = await api.restoreDownloadEstimate(p);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      estimating = false;
     }
   }
 </script>
 
-<h1>Download, unzip, and verify</h1>
+<h1>Download restored files</h1>
 
 <div class="card">
-  <p class="muted">
-    Enter source-relative paths from the index and an absolute local destination directory.
-    The server will download matching S3 objects, extract zip archives, and verify written
-    files against the MD5 stored in the database unless you turn verification off.
-  </p>
-
   <div class="label">Paths (one per line)</div>
-  <textarea bind:value={raw} placeholder={"photos\nnotes.txt\narchives/2024"}></textarea>
+  <p class="muted">
+    Enter top-level directories or full file paths. Prefix match is applied — e.g.
+    <code class="mono">photos</code> selects every file under <code class="mono">photos/</code>.
+    Enter <code class="mono">/</code> to select <strong>all files</strong>.
+  </p>
+  <textarea bind:value={raw} placeholder={"photos\ndocs/2024\nfamily-archive.zip"}></textarea>
 
-  <div class="grid">
-    <label>
-      Target directory
-      <input
-        type="text"
-        bind:value={targetDir}
-        placeholder={typeof window !== 'undefined' && window.navigator.platform?.startsWith('Win')
-          ? 'C:\\\\restore'
-          : '/mnt/restore'}
-        class="mono"
-      />
-    </label>
-
+  <div class="label" style="margin-top: 0.75rem">Target directory</div>
+  <p class="muted">
+    Download matching S3 objects or zip members into an absolute local directory
+    and verify each restored file against the MD5 stored in the index. Glacier
+    objects must already be available; otherwise the download reports a still
+    thawing error.
+  </p>
+  <div class="download-form">
+    <input
+      type="text"
+      bind:value={downloadTargetDir}
+      placeholder="/absolute/path/to/restore"
+      class="target-input mono"
+      aria-label="Target directory"
+    />
     <label class="verify">
       <input type="checkbox" bind:checked={verifyChecksum} />
       Verify hashes against stored MD5
     </label>
-  </div>
-
-  <div class="actions">
-    <button class="primary" onclick={doRestore} disabled={loading} type="button">
-      {loading ? 'Downloading…' : 'Download and verify'}
-    </button>
     <button
+      class="primary"
+      onclick={doDownload}
+      disabled={downloadBusy || downloadTargetDir.trim() === ''}
       type="button"
-      onclick={() => {
-        raw = '/';
-        result = null;
-      }}
     >
-      Select all
+      {#if downloadBusy}
+        Downloading…
+      {:else}
+        Download and verify
+      {/if}
+    </button>
+    <button type="button" onclick={doEstimate} disabled={estimating || downloadBusy}>
+      {estimating ? 'Estimating…' : 'Estimate cost'}
     </button>
   </div>
-
   <div class="statusline" aria-live="polite">
     <span class={`status-pill ${downloadStatus.tone}`}>{downloadStatus.label}</span>
     <span class="status-detail">{downloadStatus.detail}</span>
   </div>
-
-  {#if downloadProgress}
-    <div style="margin-top: 0.75rem">
-      <ProgressBar
-        value={downloadProgress.processed}
-        max={downloadProgress.total}
-        label="Files processed"
-      />
-      <div class="muted small" style="margin-top: 0.4rem">
-        {downloadProgress.files_written.toLocaleString()} written · {bytes(downloadProgress.bytes_written)}
-        {#if downloadProgress.path} · {downloadProgress.path}{/if}
-        {#if downloadProgress.error} · {downloadProgress.error}{/if}
+  {#if downloadEstimate}
+    <div class="stats" style="margin-top: 0.75rem">
+      <div>
+        <div class="muted">Restored files</div>
+        <div class="big">{downloadEstimate.restored_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">In progress</div>
+        <div class="big">{downloadEstimate.in_progress_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">Not restoring</div>
+        <div class="big">{downloadEstimate.not_restoring_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">S3 objects</div>
+        <div class="big">{downloadEstimate.object_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">Downloadable data</div>
+        <div class="big">{bytes(downloadEstimate.total_bytes)}</div>
+      </div>
+      <div>
+        <div class="muted">GET fee</div>
+        <div class="big">${downloadEstimate.request_fee_usd.toFixed(2)}</div>
+      </div>
+      <div>
+        <div class="muted">Egress</div>
+        <div class="big">${downloadEstimate.egress_fee_usd.toFixed(2)}</div>
+      </div>
+      <div>
+        <div class="muted">Total</div>
+        <div class="big">${downloadEstimate.total_fee_usd.toFixed(2)}</div>
       </div>
     </div>
+    <p class="muted small" style="margin-top: 0.5rem">
+      Only restored files are counted as downloadable. Zipped groups still count as one S3 object for request fees.
+    </p>
+    {#if downloadEstimate.unknown_paths?.length}
+      <details style="margin-top: 0.75rem">
+        <summary>{downloadEstimate.unknown_paths.length} unknown path(s)</summary>
+        <ul class="mono small">
+          {#each downloadEstimate.unknown_paths as p}<li>{p}</li>{/each}
+        </ul>
+      </details>
+    {/if}
+  {/if}
+  {#if downloadProgress}
+    {@const pct = downloadProgress.total > 0
+      ? Math.min(100, Math.round((downloadProgress.processed / downloadProgress.total) * 100))
+      : 0}
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct} style="margin-top: 0.75rem">
+      <div class="fill" style="width: {pct}%"></div>
+    </div>
+    <p class="muted small" style="margin-top: 0.25rem">
+      {downloadProgress.files_written.toLocaleString()} written · {bytes(downloadProgress.bytes_written)} ·
+      {downloadProgress.processed.toLocaleString()} / {downloadProgress.total.toLocaleString()} checked
+      {#if downloadProgress.path} · {downloadProgress.path}{/if}
+      {#if downloadProgress.error} · {downloadProgress.error}{/if}
+    </p>
+    {#if downloadProgress.total_bytes > 0}
+      <div style="margin-top: 0.6rem">
+        <ProgressBar
+          label="Size downloaded"
+          value={downloadProgress.bytes_written}
+          max={downloadProgress.total_bytes}
+        />
+      </div>
+    {/if}
   {/if}
 </div>
 
-{#if result}
+{#if downloadResult}
   <div class="card">
-    <div class="label">Result</div>
+    <div class="label">Download result</div>
     <div class="stats">
       <div>
         <div class="muted">Files written</div>
-        <div class="big">{result.files_written.toLocaleString()}</div>
+        <div class="big">{downloadResult.files_written.toLocaleString()}</div>
       </div>
       <div>
         <div class="muted">Bytes written</div>
-        <div class="big">{bytes(result.bytes_written)}</div>
+        <div class="big">{bytes(downloadResult.bytes_written)}</div>
+      </div>
+      <div>
+        <div class="muted">Skipped</div>
+        <div class="big">{downloadResult.skipped?.length ?? 0}</div>
+      </div>
+      <div>
+        <div class="muted">Errors</div>
+        <div class="big">{downloadResult.errors?.length ?? 0}</div>
       </div>
       <div>
         <div class="muted">Verification</div>
         <div class="big">{lastVerifyChecksum ? 'On' : 'Off'}</div>
       </div>
     </div>
-
-    {#if result.skipped?.length}
-      <details open style="margin-top: 0.75rem">
-        <summary>{result.skipped.length} skipped path(s)</summary>
-        <ul class="mono small">{#each result.skipped as p}<li>{p}</li>{/each}</ul>
+    {#if downloadTotalBytes > 0}
+      <div style="margin-top: 0.75rem">
+        <ProgressBar
+          label="Size downloaded"
+          value={downloadResult.bytes_written}
+          max={downloadTotalBytes}
+        />
+      </div>
+    {/if}
+    {#if downloadResult.skipped?.length}
+      <details style="margin-top: 0.75rem">
+        <summary>{downloadResult.skipped.length} skipped path(s)</summary>
+        <ul class="mono small">
+          {#each downloadResult.skipped as p}<li>{p}</li>{/each}
+        </ul>
       </details>
     {/if}
-
-    {#if result.blocked?.length}
-      <details open style="margin-top: 0.75rem">
-        <summary>{result.blocked.length} blocked path(s)</summary>
-        <ul class="mono small">{#each result.blocked as p}<li>{p}</li>{/each}</ul>
-      </details>
-    {/if}
-
-    {#if result.errors?.length}
+    {#if downloadResult.errors?.length}
       <details open style="margin-top: 0.75rem" class="err">
-        <summary>{result.errors.length} error(s)</summary>
-        <ul class="mono small">{#each result.errors as p}<li>{p}</li>{/each}</ul>
+        <summary>{downloadResult.errors.length} error(s)</summary>
+        <ul class="mono small">
+          {#each downloadResult.errors as p}<li>{p}</li>{/each}
+        </ul>
       </details>
     {/if}
   </div>
@@ -323,75 +391,71 @@
     font-size: 0.9rem;
     margin-top: 0.5rem;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 1rem;
-    margin-top: 1rem;
-    align-items: end;
+  .download-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.75rem;
   }
   .verify {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding-bottom: 0.45rem;
+    gap: 0.45rem;
     white-space: nowrap;
-  }
-  input[type="text"] {
-    width: 100%;
-    margin-top: 0.35rem;
-    padding: 0.45rem 0.55rem;
-    font-size: 0.95rem;
-  }
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 1rem;
   }
   .statusline {
     display: flex;
-    gap: 0.6rem;
-    align-items: center;
-    margin-top: 1rem;
     flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.85rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg, transparent);
   }
   .status-pill {
     display: inline-flex;
     align-items: center;
+    padding: 0.2rem 0.55rem;
     border-radius: 999px;
-    padding: 0.25rem 0.65rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
     border: 1px solid var(--border);
-    background: var(--bg);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
   }
   .status-pill.idle { color: var(--muted); }
   .status-pill.running { color: var(--accent); }
-  .status-pill.ok { color: var(--ok); }
+  .status-pill.ok { color: var(--ok, #1f7a3f); }
   .status-pill.warn { color: var(--warn); }
   .status-pill.err { color: var(--err); }
   .status-detail {
-    font-size: 0.92rem;
+    min-width: 0;
     color: var(--muted);
-    line-height: 1.4;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
   }
+  .target-input {
+    flex: 1 1 320px;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.9rem;
+    font-family: var(--mono, monospace);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 4px;
+  }
+  .small { font-size: 0.85rem; }
+  details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }
   .stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 0.75rem;
-    margin-top: 0.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
   }
-  .big { font-size: 1.1rem; font-weight: 600; }
-  ul {
-    margin: 0.5rem 0 0;
-    padding-left: 1.2rem;
-    max-height: 320px;
-    overflow: auto;
-  }
-  @media (max-width: 760px) {
-    .grid { grid-template-columns: 1fr; }
-    .verify { white-space: normal; }
-  }
+  .big { font-size: 1.3rem; font-weight: 500; }
+  .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
 </style>

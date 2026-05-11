@@ -61,8 +61,9 @@ type Options struct {
 	ZipMaxBytes int64
 	// MinZipDirFiles is the minimum file count a subdirectory must have
 	// to be emitted as its own group during a size-cap split. Subdirs
-	// below this threshold are folded into the parent's loose-file pool
-	// to avoid producing many tiny zips. <= 0 disables the floor.
+	// below this threshold are folded into the current level's loose-
+	// file pool so many tiny sibling folders can collapse into a small
+	// number of zip objects. <= 0 disables the floor.
 	MinZipDirFiles int
 	// EnableZipIndex, when true, uploads a STANDARD-tier
 	// `{zipKey}.index.txt` sidecar next to each zip listing its
@@ -481,7 +482,7 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 	// workCh pre-seeded with all groups; orchestrator re-feeds retries.
 	// Retries fit because each retry is enqueued only after the previous
 	// attempt's result was consumed, freeing capacity.
-	workCh   := make(chan workItem, len(groups))
+	workCh := make(chan workItem, len(groups))
 	stagedCh := make(chan stagedItem, pq)
 	// resultCh must hold results from all copy + upload workers in the
 	// worst case (all fail simultaneously) to prevent goroutine leaks.
@@ -793,8 +794,8 @@ func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
 // stagedItem is a group that has finished its source→tmp copy phase and is
 // queued for S3 upload.
 type stagedItem struct {
-	group   Group
-	isZip   bool
+	group    Group
+	isZip    bool
 	attempts int // for retry budget tracking
 
 	// Zip fields.
@@ -805,7 +806,7 @@ type stagedItem struct {
 	zipSize    int64
 	zipMD5hex  string
 	zipSHA256  string
-	zipEntries []string
+	zipEntries []ZipEntry
 
 	// Individual-file fields.
 	individuals []stagedIndividual
@@ -859,18 +860,12 @@ func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN i
 	}
 
 	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("zipping %d files into %s", len(g.Files), zipRel))
-	size, entries, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath, e.copyWrapZip(runID, key, groupTotalBytes))
+	size, entries, md5hex, zipSHA256, err := CreateZip(ctx, e.opts.Source, g.Files, zipPath, e.copyWrapZip(runID, key, groupTotalBytes))
 	if err != nil {
 		os.Remove(zipPath)
 		return stagedItem{}, fmt.Errorf("create zip %s: %w", zipRel, err)
 	}
 	e.emitCopyProgress(runID, key, groupTotalBytes, groupTotalBytes)
-
-	md5hex, zipSHA256, err := md5AndSHA256File(zipPath)
-	if err != nil {
-		os.Remove(zipPath)
-		return stagedItem{}, err
-	}
 
 	return stagedItem{
 		group:      g,
@@ -981,7 +976,11 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 	// from under it. (#240)
 	indexWrittenThisRun := false
 	if e.opts.EnableZipIndex {
-		indexBody := strings.Join(item.zipEntries, "\n") + "\n"
+		entryPaths := make([]string, 0, len(item.zipEntries))
+		for _, entry := range item.zipEntries {
+			entryPaths = append(entryPaths, entry.Path)
+		}
+		indexBody := strings.Join(entryPaths, "\n") + "\n"
 		indexSum := sha256.Sum256([]byte(indexBody))
 		indexSHA256 := hex.EncodeToString(indexSum[:])
 		if e.skipIfMatches(ctx, item.indexKey, indexSHA256) {
@@ -1000,15 +999,24 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 	}
 
 	now := e.opts.Now()
-	ids := make([]int64, 0, len(item.group.Files))
-	for _, f := range item.group.Files {
-		ids = append(ids, f.ID)
+	rows := make([]db.ZipMemberUpload, 0, len(item.group.Files))
+	for i, f := range item.group.Files {
+		rows = append(rows, db.ZipMemberUpload{ID: f.ID, MD5: item.zipEntries[i].MD5})
+	}
+	zip := db.Zip{
+		ZipName:    item.zipRel,
+		Size:       item.zipSize,
+		MD5:        item.zipMD5hex,
+		SHA256:     item.zipSHA256,
+		S3Key:      item.zipKey,
+		UploadedAt: &now,
+		LastSeenAt: now,
 	}
 
 	// Dedup: skip PutIfAbsent when S3 already holds the identical zip. (#133)
 	if e.skipIfMatches(ctx, item.zipKey, item.zipSHA256) {
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("skip zip upload %s: SHA256 matches existing object", item.zipKey))
-		if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, item.zipRel, item.zipMD5hex, item.zipKey, now); err != nil {
+		if err := e.opts.DB.MarkZipUploadedBatch(ctx, zip, rows); err != nil {
 			return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", item.zipRel, err)
 		}
 		e.emit(Event{
@@ -1065,7 +1073,7 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 		return 0, 0, fmt.Errorf("upload %s: %w", item.zipKey, err)
 	}
 
-	if err := e.opts.DB.MarkZipUploadedBatch(ctx, ids, item.zipRel, item.zipMD5hex, item.zipKey, now); err != nil {
+	if err := e.opts.DB.MarkZipUploadedBatch(ctx, zip, rows); err != nil {
 		return 0, 0, fmt.Errorf("mark uploaded (zip %s): %w", item.zipRel, err)
 	}
 

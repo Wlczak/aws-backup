@@ -349,7 +349,8 @@
       <option value="zipped">zipped</option>
       <option value="uploaded">uploaded</option>
       <option value="failed">failed</option>
-      <option value="missing">cloud only</option>
+      <option value="cloud_only">cloud only</option>
+      <option value="missing">missing</option>
     </select>
   </label>
 
@@ -478,7 +479,7 @@
               >{f.path}</td>
               <td class="mono" onclick={() => (detail = f)}>{bytes(f.size)}</td>
               <td onclick={() => (detail = f)}>{formatDate(f.mtime)}</td>
-              <td onclick={() => (detail = f)}><StatusBadge status={f.status} /></td>
+              <td onclick={() => (detail = f)}><StatusBadge status={f.status} s3Key={f.s3_key} /></td>
               <td onclick={() => (detail = f)}>
                 {#if f.restore_status}
                   <StatusBadge status={restoreLabel(f.restore_status)} />
@@ -515,7 +516,7 @@
 {#if detail}
   <div class="card">
     <div class="row"><span class="label">Path</span><span class="mono">{detail.path}</span></div>
-    <div class="row"><span class="label">Status</span><StatusBadge status={detail.status} /></div>
+    <div class="row"><span class="label">Status</span><StatusBadge status={detail.status} s3Key={detail.s3_key} /></div>
     <div class="row"><span class="label">Size</span><span>{bytes(detail.size)} ({detail.size.toLocaleString()} B)</span></div>
     <div class="row"><span class="label">Modified</span><span>{formatDate(detail.mtime)}</span></div>
     <div class="row"><span class="label">Last seen</span><span>{formatDate(detail.last_seen_at)}</span></div>

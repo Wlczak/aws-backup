@@ -10,7 +10,11 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	gsqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -21,6 +25,8 @@ import (
 type DB struct {
 	g *gorm.DB
 }
+
+const defaultConnIdleTimeout = 15 * time.Minute
 
 // Open returns a ready-to-use DB connected to path (":memory:" works for tests).
 // WAL mode and foreign keys are enabled for on-disk databases.
@@ -37,6 +43,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("get sql.DB: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxIdleTime(defaultConnIdleTimeout)
+	// database/sql will close the underlying sqlite connection after the
+	// pool has been idle for 15 minutes, and it will transparently open a
+	// fresh connection on the next query. The app still keeps the DB handle
+	// itself open for the process lifetime; only the idle connection goes away.
 
 	if path != ":memory:" {
 		if err := gdb.WithContext(ctx).Exec("PRAGMA journal_mode=WAL").Error; err != nil {
@@ -86,4 +98,18 @@ func (db *DB) Close() error {
 // .db can be uploaded to S3 as a consistent snapshot.
 func (db *DB) Checkpoint(ctx context.Context) error {
 	return db.g.WithContext(ctx).Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
+}
+
+// SnapshotTo writes a consistent copy of the live database to dst using
+// SQLite's VACUUM INTO. The resulting file can be uploaded or opened
+// independently of concurrent writes to the live DB handle.
+func (db *DB) SnapshotTo(ctx context.Context, dst string) error {
+	if dst == "" {
+		return errors.New("snapshot path is required")
+	}
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	escaped := strings.ReplaceAll(dst, "'", "''")
+	return db.g.WithContext(ctx).Exec("VACUUM INTO '" + escaped + "'").Error
 }

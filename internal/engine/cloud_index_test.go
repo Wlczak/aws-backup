@@ -14,7 +14,7 @@ func TestLoadCloudIndex(t *testing.T) {
 	mem := storage.NewMemStorage()
 
 	// Two zip archives under the "backups/" prefix, each with a sidecar
-	// index listing its entries. Also one standalone key.
+	// index listing its entries. Also two standalone keys.
 	mustPut(t, mem, "backups/photos/2024/photos_2024_1.zip", "binaryzipdata-1")
 	mustPut(t, mem, "backups/photos/2024/photos_2024_1.zip.index.txt",
 		"photos/2024/a.jpg\nphotos/2024/b.jpg\n")
@@ -22,6 +22,7 @@ func TestLoadCloudIndex(t *testing.T) {
 	mustPut(t, mem, "backups/docs/docs_1.zip.index.txt",
 		"docs/readme.md\ndocs/spec.pdf\n")
 	mustPut(t, mem, "backups/loose/notes.txt", "raw individual")
+	mustPut(t, mem, "backups/root.txt", "root individual")
 
 	idx, err := LoadCloudIndex(ctx, mem, "backups/", []string{"backups/loose/notes.txt"})
 	if err != nil {
@@ -34,12 +35,14 @@ func TestLoadCloudIndex(t *testing.T) {
 		"loose/notes.txt",
 		"photos/2024/a.jpg",
 		"photos/2024/b.jpg",
+		"root.txt",
 	}
 	got := make([]string, 0, len(idx.Files))
 	for p := range idx.Files {
 		got = append(got, p)
 	}
 	sort.Strings(got)
+	sort.Strings(wantPaths)
 	if strings.Join(got, ",") != strings.Join(wantPaths, ",") {
 		t.Fatalf("paths: got %v want %v", got, wantPaths)
 	}
@@ -50,8 +53,8 @@ func TestLoadCloudIndex(t *testing.T) {
 	if idx.ZipCount != 2 {
 		t.Errorf("ZipCount: got %d want 2", idx.ZipCount)
 	}
-	if idx.Standalone != 1 {
-		t.Errorf("Standalone: got %d want 1", idx.Standalone)
+	if idx.Standalone != 2 {
+		t.Errorf("Standalone: got %d want 2", idx.Standalone)
 	}
 
 	if z := idx.Files["photos/2024/a.jpg"].ZipKey; z != "backups/photos/2024/photos_2024_1.zip" {
@@ -59,6 +62,9 @@ func TestLoadCloudIndex(t *testing.T) {
 	}
 	if f := idx.Files["loose/notes.txt"]; f.S3Key != "backups/loose/notes.txt" || f.ZipKey != "" {
 		t.Errorf("standalone record: %+v", f)
+	}
+	if f := idx.Files["root.txt"]; f.S3Key != "backups/root.txt" || f.ZipKey != "" {
+		t.Errorf("root standalone record: %+v", f)
 	}
 }
 

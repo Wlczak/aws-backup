@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"sort"
-	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -21,12 +19,14 @@ import (
 // the UI shows the same numbers everyone else sees; real billing still
 // comes from AWS.
 const (
-	pricePerThousandRequestsStandard = 0.11  // USD; Glacier standard retrieval requests
-	pricePerGBRetrievalStandard      = 0.02  // USD/GB; Glacier standard retrieval
-	pricePerThousandRequestsBulk     = 0.025 // USD; Glacier bulk retrieval requests
-	pricePerGBRetrievalBulk          = 0.003 // USD/GB; Glacier bulk retrieval
-	pricePerGBEgress                 = 0.09  // USD/GB; internet egress after free tier
-	egressFreeGB                     = 100.0 // free tier
+	pricePerThousandRequestsStandard = 0.11   // USD; Glacier standard retrieval requests
+	pricePerGBRetrievalStandard      = 0.02   // USD/GB; Glacier standard retrieval
+	pricePerThousandRequestsBulk     = 0.025  // USD; Glacier bulk retrieval requests
+	pricePerGBRetrievalBulk          = 0.003  // USD/GB; Glacier bulk retrieval
+	pricePerGBStorageStandard        = 0.023  // USD/GB-month; restored copy billed at S3 Standard rates
+	pricePerThousandRequestsGet      = 0.0004 // USD; S3 Standard GET requests
+	pricePerGBEgress                 = 0.09   // USD/GB; internet egress after free tier
+	egressFreeGB                     = 100.0  // free tier
 )
 
 type restoreTierRequest string
@@ -56,21 +56,47 @@ func restoreTierPricing(tier storage.RestoreTier) (requestPerThousand, retrieval
 	}
 }
 
+func estimateDownloadFees(objectCount, totalBytes int64) (requestFeeUSD, egressFeeUSD, totalFeeUSD float64) {
+	requestFeeUSD = float64(objectCount) * pricePerThousandRequestsGet / 1000
+	gb := float64(totalBytes) / (1024 * 1024 * 1024)
+	egressGB := gb
+	if egressGB > egressFreeGB {
+		egressGB -= egressFreeGB
+	} else {
+		egressGB = 0
+	}
+	egressFeeUSD = egressGB * pricePerGBEgress
+	totalFeeUSD = requestFeeUSD + egressFeeUSD
+	return requestFeeUSD, egressFeeUSD, totalFeeUSD
+}
+
+func estimateRestoreStorageFee(totalBytes int64, days int) float64 {
+	if totalBytes <= 0 || days <= 0 {
+		return 0
+	}
+	gb := float64(totalBytes) / (1024 * 1024 * 1024)
+	months := float64(days) / 30.0
+	return gb * months * pricePerGBStorageStandard
+}
+
 type restoreEstimateRequest struct {
 	Paths []string `json:"paths"`
 	Tier  string   `json:"tier"`
+	Days  int      `json:"days"`
 }
 
 type restoreEstimateResponse struct {
 	// FileCount / TotalBytes count only the actual S3 objects that will
 	// be retrieved — i.e. one zip archive per zip group, plus standalone
 	// objects. Rows already in_progress or restored are excluded. The
-	// request fee is computed off FileCount; TotalBytes remains the
-	// current DB-byte estimate for the matching rows.
+	// estimate prices request, retrieval, temporary S3 Standard storage,
+	// and egress separately; TotalBytes remains the current DB-byte
+	// estimate for the matching rows.
 	FileCount       int64   `json:"file_count"`
 	TotalBytes      int64   `json:"total_bytes"`
 	RequestFeeUSD   float64 `json:"request_fee_usd"`
 	RetrievalFeeUSD float64 `json:"retrieval_fee_usd"`
+	StorageFeeUSD   float64 `json:"storage_fee_usd"`
 	EgressFeeUSD    float64 `json:"egress_fee_usd"`
 	TotalFeeUSD     float64 `json:"total_fee_usd"`
 	WaitHoursMin    int     `json:"wait_hours_min"`
@@ -96,6 +122,11 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Paths) == 0 {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+	if req.Days < restoreDaysMin || req.Days > restoreDaysMax {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("days must be in [%d, %d] (got %d)", restoreDaysMin, restoreDaysMax, req.Days))
 		return
 	}
 	tier, err := parseRestoreTier(req.Tier)
@@ -148,6 +179,7 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	gb := float64(br.RetrievableBytes) / (1024 * 1024 * 1024)
 	request := float64(objectCount) * requestPerThousand / 1000
 	retrieval := gb * retrievalPerGB
+	storage := estimateRestoreStorageFee(br.RetrievableBytes, req.Days)
 	egressGB := gb
 	if egressGB > egressFreeGB {
 		egressGB -= egressFreeGB
@@ -161,8 +193,9 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		TotalBytes:             br.RetrievableBytes,
 		RequestFeeUSD:          round2(request),
 		RetrievalFeeUSD:        round2(retrieval),
+		StorageFeeUSD:          round2(storage),
 		EgressFeeUSD:           round2(egress),
-		TotalFeeUSD:            round2(request + retrieval + egress),
+		TotalFeeUSD:            round2(request + retrieval + storage + egress),
 		WaitHoursMin:           waitHoursMin,
 		WaitHoursMax:           waitHoursMax,
 		AlreadyInProgressCount: br.AlreadyInProgressCount,
@@ -195,7 +228,7 @@ func (s *Server) restoreObjectCount(ctx context.Context, paths []string, allFile
 			break
 		}
 		for _, f := range rows {
-			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped && f.Status != db.StatusCloudOnly {
 				continue
 			}
 			if !wantAll {
@@ -234,9 +267,9 @@ type restoreTriggerRequest struct {
 	Paths []string `json:"paths"`
 	Tier  string   `json:"tier"`
 	// Days is how long the restored copy stays in the standard tier
-	// before reverting to the archive class. AWS S3 accepts 1..N (N
-	// depends on retrieval tier); we clamp to [1, 30] to keep the UI
-	// honest and avoid runaway dollar costs from a typo.
+	// before reverting to the archive class. AWS S3 accepts a wider
+	// range; we clamp to [1, 180] to keep the UI honest and avoid
+	// runaway dollar costs from a typo.
 	Days int `json:"days"`
 }
 
@@ -258,27 +291,42 @@ type restoreTriggerResponse struct {
 	Errors                 []string `json:"errors,omitempty"`
 }
 
-type restoreToDirRequest struct {
-	Paths          []string `json:"paths"`
-	TargetDir      string   `json:"target_dir"`
-	VerifyChecksum *bool    `json:"verify_checksum,omitempty"`
+type restoreDownloadRequest struct {
+	Paths     []string `json:"paths"`
+	TargetDir string   `json:"target_dir"`
 }
 
-type restoreToDirResponse struct {
+type restoreDownloadResponse struct {
 	FilesWritten int64    `json:"files_written"`
 	BytesWritten int64    `json:"bytes_written"`
+	TotalBytes   int64    `json:"total_bytes"`
 	Skipped      []string `json:"skipped,omitempty"`
-	Blocked      []string `json:"blocked,omitempty"`
 	Errors       []string `json:"errors,omitempty"`
 }
 
+type restoreDownloadEstimateRequest struct {
+	Paths []string `json:"paths"`
+}
+
+type restoreDownloadEstimateResponse struct {
+	ObjectCount       int64    `json:"object_count"`
+	TotalBytes        int64    `json:"total_bytes"`
+	RestoredCount     int64    `json:"restored_count"`
+	InProgressCount   int64    `json:"in_progress_count"`
+	NotRestoringCount int64    `json:"not_restoring_count"`
+	RequestFeeUSD     float64  `json:"request_fee_usd"`
+	EgressFeeUSD      float64  `json:"egress_fee_usd"`
+	TotalFeeUSD       float64  `json:"total_fee_usd"`
+	UnknownPaths      []string `json:"unknown_paths,omitempty"`
+}
+
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
-// AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
-// cost of a typo bounded; the operator can re-issue the restore later
-// to extend.
+// The restored copy is billed at S3 Standard rates for the full period,
+// so the 180-day ceiling keeps typo-driven costs bounded while still
+// covering the longest Deep Archive retention window.
 const (
 	restoreDaysMin = 1
-	restoreDaysMax = 30
+	restoreDaysMax = 180
 )
 
 // handleRestoreTrigger issues a Glacier restore (s3:RestoreObject) for
@@ -347,22 +395,20 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestoreToDir downloads already-readable S3 objects into a local
-// directory, extracting zip archives on the way and verifying each
-// written file against the MD5 stored in the index by default.
-func (s *Server) handleRestoreToDir(w http.ResponseWriter, r *http.Request) {
+// handleRestoreDownload downloads matching files from S3 into a local
+// directory and verifies each written file against the MD5 stored in the
+// DB. Only rows currently marked restore_status='restored' are treated as
+// downloadable; thaw-pending and never-restored rows are reported as
+// skipped. Per-file checksum failures are returned in the response rather
+// than aborting the whole batch.
+func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
 		return
 	}
-	cfg, ok := s.snapshotConfig()
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
-		return
-	}
 
-	var req restoreToDirRequest
+	var req restoreDownloadRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
 		return
@@ -371,28 +417,24 @@ func (s *Server) handleRestoreToDir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
 		return
 	}
-	if req.TargetDir == "" {
-		writeError(w, http.StatusBadRequest, errors.New("target_dir must be non-empty"))
-		return
-	}
-	if !filepath.IsAbs(req.TargetDir) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("target_dir must be an absolute path, got %q", req.TargetDir))
+	if req.TargetDir == "" || !filepath.IsAbs(req.TargetDir) {
+		writeError(w, http.StatusBadRequest, errors.New("target_dir must be an absolute path"))
 		return
 	}
 
-	downloadPaths, skipped, blocked, err := s.restoreToDirCandidates(r.Context(), req.Paths)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	s.runMu.Lock()
+	busy := s.currentRun != 0
+	s.runMu.Unlock()
+	if busy {
+		writeError(w, http.StatusConflict,
+			errors.New("a backup run is in progress — download would race engine writes; try again when idle"))
 		return
 	}
 
-	resp := restoreToDirResponse{
-		Skipped: append([]string(nil), skipped...),
-		Blocked: append([]string(nil), blocked...),
-	}
-	if len(downloadPaths) == 0 {
-		writeJSON(w, http.StatusOK, resp)
-		return
+	cfg, ok := s.snapshotConfig()
+	tmpDir := ""
+	if ok {
+		tmpDir = cfg.Backup.TmpDir
 	}
 
 	var emit engine.EventEmitter
@@ -400,51 +442,107 @@ func (s *Server) handleRestoreToDir(w http.ResponseWriter, r *http.Request) {
 		emit = s.deps.Bus.Publish
 	}
 	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
-		DB:           s.deps.DB,
-		Storage:      st,
-		KeyPrefix:    s.storagePrefix(),
-		TargetDir:    req.TargetDir,
-		Paths:        downloadPaths,
-		TmpDir:       cfg.Backup.TmpDir,
-		SkipChecksum: req.VerifyChecksum != nil && !*req.VerifyChecksum,
-		Emit:         emit,
+		DB:        s.deps.DB,
+		Storage:   st,
+		KeyPrefix: s.storagePrefix(),
+		TargetDir: req.TargetDir,
+		Paths:     req.Paths,
+		TmpDir:    tmpDir,
+		Emit:      emit,
 	})
 	if err != nil {
-		if emit != nil {
-			emit(engine.Event{
-				Type: engine.EventRestoreDownloadFailed,
-				At:   time.Now(),
-				Data: map[string]any{
-					"files_written": stats.FilesWritten,
-					"bytes_written": stats.BytesWritten,
-					"total_bytes":   stats.TotalBytes,
-					"errors":        len(stats.Errors),
-					"error":         err.Error(),
-				},
-			})
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore download: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, restoreDownloadResponse{
+		FilesWritten: stats.FilesWritten,
+		BytesWritten: stats.BytesWritten,
+		TotalBytes:   stats.TotalBytes,
+		Skipped:      stats.Skipped,
+		Errors:       stats.Errors,
+	})
+}
+
+// handleRestoreDownloadEstimate computes a download cost estimate from DB
+// metadata only. It counts only rows currently marked restored as
+// downloadable, splits the rest into in-progress vs not-restoring, and
+// prices the actual S3 objects that will be fetched (one zip archive per
+// restored zip group, plus standalone objects) from the indexed file sizes.
+func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Request) {
+	var req restoreDownloadEstimateRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+
+	allFiles := false
+	pathsForFilter := make([]string, 0, len(req.Paths))
+	seen := make(map[string]struct{}, len(req.Paths))
+	for _, p := range req.Paths {
+		if p == "/" || p == "" {
+			allFiles = true
+			continue
 		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		pathsForFilter = append(pathsForFilter, p)
+	}
+
+	br, err := s.downloadEstimateStats(r.Context(), pathsForFilter, allFiles)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	resp.FilesWritten = stats.FilesWritten
-	resp.BytesWritten = stats.BytesWritten
-	resp.Skipped = append(resp.Skipped, stats.Skipped...)
-	resp.Errors = append(resp.Errors, stats.Errors...)
-	writeJSON(w, http.StatusOK, resp)
+
+	var unknown []string
+	if !allFiles {
+		matchedSet := make(map[string]struct{}, len(br.MatchedPaths))
+		for _, p := range br.MatchedPaths {
+			matchedSet[p] = struct{}{}
+		}
+		for _, p := range pathsForFilter {
+			if _, ok := matchedSet[p]; !ok {
+				unknown = append(unknown, p)
+			}
+		}
+	}
+
+	request, egress, total := estimateDownloadFees(br.ObjectCount, br.TotalBytes)
+
+	writeJSON(w, http.StatusOK, restoreDownloadEstimateResponse{
+		ObjectCount:       br.ObjectCount,
+		TotalBytes:        br.TotalBytes,
+		RestoredCount:     br.RestoredCount,
+		InProgressCount:   br.InProgressCount,
+		NotRestoringCount: br.NotRestoringCount,
+		RequestFeeUSD:     round2(request),
+		EgressFeeUSD:      round2(egress),
+		TotalFeeUSD:       round2(total),
+		UnknownPaths:      unknown,
+	})
 }
 
-func round2(f float64) float64 {
-	return float64(int64(f*100+0.5)) / 100
+type downloadEstimateBreakdown struct {
+	ObjectCount       int64
+	TotalBytes        int64
+	RestoredCount     int64
+	InProgressCount   int64
+	NotRestoringCount int64
+	MatchedPaths      []string
 }
 
-// restoreToDirCandidates expands requested prefixes to the exact file
-// paths that are safe to pass into RestoreToDir. Rows that are not yet
-// available to download are reported separately so the UI can surface
-// them without trying to fetch them.
-func (s *Server) restoreToDirCandidates(ctx context.Context, reqPaths []string) (download []string, skipped []string, blocked []string, err error) {
-	wantAll := false
-	wantSet := make(map[string]struct{}, len(reqPaths))
-	for _, p := range reqPaths {
+func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allFiles bool) (downloadEstimateBreakdown, error) {
+	var br downloadEstimateBreakdown
+	statuses := []string{db.StatusUploaded, db.StatusZipped, db.StatusCloudOnly}
+	wantAll := allFiles
+	wantSet := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
 		if p == "" || p == "/" {
 			wantAll = true
 			break
@@ -452,19 +550,22 @@ func (s *Server) restoreToDirCandidates(ctx context.Context, reqPaths []string) 
 		wantSet[p] = struct{}{}
 	}
 
-	matched := make(map[string]struct{})
-	seen := make(map[string]struct{})
+	seenKeys := make(map[string]struct{})
+	matched := make(map[string]bool)
 	const pageSize = 1000
 	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return downloadEstimateBreakdown{}, err
+		}
 		rows, _, err := s.deps.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("list files: %w", err)
+			return downloadEstimateBreakdown{}, fmt.Errorf("list files: %w", err)
 		}
 		if len(rows) == 0 {
 			break
 		}
 		for _, f := range rows {
-			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+			if f.Status != statuses[0] && f.Status != statuses[1] {
 				continue
 			}
 			if !wantAll {
@@ -472,7 +573,7 @@ func (s *Server) restoreToDirCandidates(ctx context.Context, reqPaths []string) 
 				for req := range wantSet {
 					if pathutil.HasPrefixPath(f.Path, req) {
 						hit = true
-						matched[req] = struct{}{}
+						matched[req] = true
 						break
 					}
 				}
@@ -481,33 +582,45 @@ func (s *Server) restoreToDirCandidates(ctx context.Context, reqPaths []string) 
 				}
 			}
 			switch f.RestoreStatus {
+			case db.RestoreStatusRestored:
+				br.RestoredCount++
+				br.TotalBytes += f.Size
 			case db.RestoreStatusInProgress:
-				blocked = append(blocked, f.Path+" (restoring)")
+				br.InProgressCount++
+			default:
+				br.NotRestoringCount++
+			}
+			if f.RestoreStatus != db.RestoreStatusRestored {
 				continue
 			}
-			if _, dup := seen[f.Path]; dup {
+			key := f.S3Key
+			if f.ZipName != "" {
+				key = pathutil.JoinKey(s.storagePrefix(), f.ZipName)
+			}
+			if key == "" {
 				continue
 			}
-			seen[f.Path] = struct{}{}
-			download = append(download, f.Path)
+			if _, ok := seenKeys[key]; !ok {
+				seenKeys[key] = struct{}{}
+				br.ObjectCount++
+			}
 		}
 		if len(rows) < pageSize {
 			break
 		}
 	}
 
-	if !wantAll {
-		for req := range wantSet {
-			if _, ok := matched[req]; !ok {
-				skipped = append(skipped, req)
-			}
+	br.MatchedPaths = make([]string, 0, len(paths))
+	for _, p := range paths {
+		if matched[p] {
+			br.MatchedPaths = append(br.MatchedPaths, p)
 		}
 	}
+	return br, nil
+}
 
-	sort.Strings(download)
-	sort.Strings(skipped)
-	sort.Strings(blocked)
-	return download, skipped, blocked, nil
+func round2(f float64) float64 {
+	return float64(int64(f*100+0.5)) / 100
 }
 
 // handleRestoreSyncStatus drains the configured SQS queue of pending S3
