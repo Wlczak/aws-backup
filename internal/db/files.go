@@ -59,11 +59,12 @@ var likeEscape = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // File statuses — authoritative list.
 const (
-	StatusPending  = "pending"
-	StatusZipped   = "zipped"
-	StatusUploaded = "uploaded"
-	StatusFailed   = "failed"
-	StatusMissing  = "missing"
+	StatusPending   = "pending"
+	StatusZipped    = "zipped"
+	StatusUploaded  = "uploaded"
+	StatusFailed    = "failed"
+	StatusCloudOnly = "cloud_only"
+	StatusMissing   = "missing"
 )
 
 // Restore lifecycle states tracked separately from Status. Empty string =
@@ -183,7 +184,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				end = len(paths)
 			}
 			var rows []File
-			if err := tx.Select("id, path, size, mtime").
+			if err := tx.Select("id, path, size, mtime, status").
 				Where("path IN ?", paths[s:end]).Find(&rows).Error; err != nil {
 				return err
 			}
@@ -196,6 +197,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 		var toCreate []File
 		var toCreateIdx []int
 		var unchangedIDs []int64
+		var cloudOnlyIDs []int64
 		type changeOp struct {
 			id    int64
 			size  int64
@@ -218,7 +220,11 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				results[i].Changed = true
 				changes = append(changes, changeOp{id: ex.ID, size: e.Size, mtime: e.ModTime})
 			} else {
-				unchangedIDs = append(unchangedIDs, ex.ID)
+				if ex.Status == StatusCloudOnly {
+					cloudOnlyIDs = append(cloudOnlyIDs, ex.ID)
+				} else {
+					unchangedIDs = append(unchangedIDs, ex.ID)
+				}
 			}
 		}
 
@@ -247,6 +253,24 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 			if err := tx.Model(&File{}).
 				Where("id IN ?", unchangedIDs[s:end]).
 				Update("last_seen_at", seenAt).Error; err != nil {
+				return err
+			}
+		}
+
+		for s := 0; s < len(cloudOnlyIDs); s += sqlChunkSize {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			end := s + sqlChunkSize
+			if end > len(cloudOnlyIDs) {
+				end = len(cloudOnlyIDs)
+			}
+			if err := tx.Model(&File{}).
+				Where("id IN ?", cloudOnlyIDs[s:end]).
+				Updates(map[string]any{
+					"status":       StatusPending,
+					"last_seen_at": seenAt,
+				}).Error; err != nil {
 				return err
 			}
 		}
@@ -286,7 +310,7 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 	var res UpsertResult
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing File
-		err := tx.Select("id, size, mtime").Where("path = ?", path).First(&existing).Error
+		err := tx.Select("id, size, mtime, status").Where("path = ?", path).First(&existing).Error
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return err
 		}
@@ -312,8 +336,13 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 				"restore_expires_at": nil,
 			}).Error
 		}
-		return tx.Model(&File{}).Where("id = ?", existing.ID).
-			Update("last_seen_at", seenAt).Error
+		updates := map[string]any{
+			"last_seen_at": seenAt,
+		}
+		if existing.Status == StatusCloudOnly {
+			updates["status"] = StatusPending
+		}
+		return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(updates).Error
 	})
 	return res, err
 }
@@ -883,7 +912,7 @@ func (db *DB) ListFilesByRestoreStatus(ctx context.Context, status string) ([]st
 func (db *DB) ListRestoreScanKeys(ctx context.Context) ([]string, error) {
 	var keys []string
 	err := db.g.WithContext(ctx).Model(&File{}).
-		Where("status IN ? AND COALESCE(s3_key,'') != ''", []string{StatusUploaded, StatusZipped}).
+		Where("status IN ? AND COALESCE(s3_key,'') != ''", []string{StatusUploaded, StatusZipped, StatusCloudOnly}).
 		Distinct("s3_key").
 		Order("s3_key").
 		Pluck("s3_key", &keys).Error
@@ -1022,7 +1051,7 @@ type RestoreEstimateBreakdown struct {
 }
 
 func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles bool) (RestoreEstimateBreakdown, error) {
-	statuses := []string{StatusUploaded, StatusZipped}
+	statuses := []string{StatusUploaded, StatusZipped, StatusCloudOnly}
 
 	// Conditional aggregates so one scan per chunk yields counts + bytes
 	// for all three buckets (retrievable / in_progress / restored).
@@ -1222,7 +1251,7 @@ func markPendingByColumn(ctx context.Context, g *gorm.DB, column string, values 
 			}
 			values = values[len(chunk):]
 			result := tx.Model(&File{}).
-				Where(fmt.Sprintf("status != ? AND %s IN ?", column), StatusMissing, chunk).
+				Where(fmt.Sprintf("status NOT IN ? AND %s IN ?", column), []string{StatusMissing, StatusCloudOnly}, chunk).
 				Updates(map[string]any{
 					"status":      StatusPending,
 					"md5":         gorm.Expr("NULL"),

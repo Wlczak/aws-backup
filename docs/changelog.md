@@ -4,10 +4,10 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
-| — | — | Documented the `uploaded` / `pending` / `missing` / `cloud only` file-state semantics and their recovery rules |
+| — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
-| #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `missing`, and reset only still-local stale rows to pending |
-| — | — | Missing rows without an `s3_key` now stay labeled `missing` instead of being shown as `cloud only` |
+| #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `cloud_only`, and reset only still-local stale rows to pending |
+| — | — | `cloud_only` is now a stored state; legacy `missing` rows without an `s3_key` still stay labeled `missing` |
 | — | — | Download tab now reports restored / in-progress / not-restoring counts and only estimates downloadable rows |
 | — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
 | #38 | db02540 | `MarkMissing` includes `zipped` rows |

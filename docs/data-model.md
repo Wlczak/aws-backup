@@ -23,7 +23,7 @@ CREATE TABLE files (
     size                INTEGER NOT NULL,
     mtime               DATETIME NOT NULL,
     md5                 TEXT,
-    status              TEXT    NOT NULL DEFAULT 'pending',  -- pending | zipped | uploaded | failed | missing
+    status              TEXT    NOT NULL DEFAULT 'pending',  -- pending | zipped | uploaded | failed | cloud_only | missing
     zip_name            TEXT,                                -- relative zip path, e.g. "photos/photos_1.zip"
     s3_key              TEXT,                                -- full S3 key
     uploaded_at         DATETIME,
@@ -97,19 +97,22 @@ State terms used throughout the codebase:
 
 - `uploaded` - the file exists locally and its object exists in S3.
 - `pending` - the file exists locally, but no S3 object has been written yet.
-- `missing` - the row exists in SQLite, but the file is gone locally and there is no S3 object to recover from.
-- `cloud only` - the object exists in S3 but there is no local row for it yet; the sync pass can recreate that path in SQLite from S3.
+- `cloud only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk. The full sync can recreate or refresh this state from S3.
+- `missing` - the row exists in SQLite, but the file is gone locally and there is no recoverable S3 object for it.
 
 ```text
 pending → zipped → uploaded         (zip group)
 pending →          uploaded         (individual file)
 pending →  failed                   (upload error; retryable)
 {pending,zipped,uploaded,failed} → missing   (file gone from source)
+cloud only → pending                (local source reappears during scan)
+cloud only → missing                (S3 object deleted)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
 ```
 
+`cloud only` is a first-class stored status, not just a label derived from `missing + s3_key`.
 `missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
-`cloud only` rows are recoverable from S3 and are rebuilt by the authoritative sync when the local row is missing.
+`cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing.
 
 ## Zip naming + sidecar
 

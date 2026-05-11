@@ -168,8 +168,9 @@ func TestParseFlexTime(t *testing.T) {
 }
 
 // TestListRestoreScanKeys keeps the full restore scan keyed to actual
-// uploaded objects: standalone uploads and zip archives are included,
-// while pending rows are skipped even if they still carry an s3_key.
+// uploaded objects: standalone uploads, zip archives, and cloud_only
+// rows are included, while pending rows are skipped even if they still
+// carry an s3_key.
 func TestListRestoreScanKeys(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -194,6 +195,18 @@ func TestListRestoreScanKeys(t *testing.T) {
 		t.Fatalf("mark zipped uploaded: %v", err)
 	}
 
+	cloudOnly, err := d.UpsertFile(ctx, "recovered.txt", 40, now, now)
+	if err != nil {
+		t.Fatalf("seed cloud only: %v", err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("id = ?", cloudOnly.ID).Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/recovered.txt",
+		"uploaded_at": now,
+	}).Error; err != nil {
+		t.Fatalf("plant cloud-only row: %v", err)
+	}
+
 	pending, err := d.UpsertFile(ctx, "stale.txt", 30, now, now)
 	if err != nil {
 		t.Fatalf("seed pending: %v", err)
@@ -210,7 +223,7 @@ func TestListRestoreScanKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRestoreScanKeys: %v", err)
 	}
-	want := []string{"backups/docs/docs_1.zip", "backups/solo.txt"}
+	want := []string{"backups/docs/docs_1.zip", "backups/recovered.txt", "backups/solo.txt"}
 	if len(keys) != len(want) {
 		t.Fatalf("keys=%v want %v", keys, want)
 	}

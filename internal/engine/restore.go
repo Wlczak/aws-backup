@@ -191,7 +191,7 @@ func RequestRestore(ctx context.Context, opts RestoreRequestOptions) (RestoreReq
 			break
 		}
 		for _, f := range rows {
-			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped && f.Status != db.StatusCloudOnly {
 				continue
 			}
 			if !wantAll {

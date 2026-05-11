@@ -53,11 +53,11 @@ export function statusBadge(status: string): 'ok' | 'warn' | 'err' | 'running' {
 }
 
 // statusLabel maps the raw db status to a human-readable badge label.
-// "missing" is the DB row state for a file that is gone locally. If the row
-// still carries an s3_key, the object is recoverable from S3 and the UI shows
-// "cloud only"; if not, the file is truly gone and we keep the plain
-// "missing" label.
+// `cloud_only` is the stored recoverable state for an object that exists in
+// S3 but has no local row yet. Legacy `missing` rows that still carry an
+// s3_key keep the old label for compatibility with existing databases.
 export function statusLabel(status: string, s3Key?: string): string {
+  if (status === 'cloud_only') return 'cloud only';
   if (status === 'missing') return s3Key ? 'cloud only' : 'missing';
   return status;
 }

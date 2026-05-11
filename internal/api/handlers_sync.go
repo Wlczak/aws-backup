@@ -116,9 +116,9 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 
 // runSyncCloudCompare runs the authoritative sync pass: list the bucket,
 // download all zip indexes, compare the resulting cloud path set to the local
-// rows that are still on disk, recreate missing rows for cloud-only objects,
-// and reset only those local rows that are no longer represented in S3 back to
-// pending.
+// rows that are still on disk, recreate missing rows for cloud-only objects as
+// cloud_only, and reset only those local rows that are no longer represented in
+// S3 back to pending.
 func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
@@ -148,6 +148,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 	existingPaths := map[string]struct{}{}
 	localPaths := map[string]struct{}{}
 	missingIDs := make([]int64, 0)
+	missingPaths := make([]string, 0)
 	recreateRows := make([]db.File, 0)
 	now := time.Now().UTC()
 	const pageSize = 1000
@@ -164,9 +165,16 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		}
 		for _, f := range rows {
 			existingPaths[f.Path] = struct{}{}
-			// Missing rows are already known to be absent from the source,
-			// so they stay out of both the local diff and the reset list.
+			// Missing/cloud-only rows are already known to be absent from the
+			// source, so they stay out of the local diff. cloud_only rows remain
+			// recoverable only while their S3 object still exists.
 			if f.Status == db.StatusMissing {
+				continue
+			}
+			if f.Status == db.StatusCloudOnly {
+				if _, ok := idx.Files[f.Path]; !ok {
+					missingPaths = append(missingPaths, f.Path)
+				}
 				continue
 			}
 			localPaths[f.Path] = struct{}{}
@@ -197,7 +205,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			Path:       p,
 			Size:       0,
 			MTime:      time.Unix(0, 0).UTC(),
-			Status:     db.StatusMissing,
+			Status:     db.StatusCloudOnly,
 			LastSeenAt: now,
 		}
 		if cf.ZipKey != "" {
@@ -248,6 +256,12 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			return fullSyncResponse{}, fmt.Errorf("reset missing files: %w", err)
 		}
 		filesReset = n
+	}
+	if len(missingPaths) > 0 {
+		_, err := s.deps.DB.MarkMissingByPaths(ctx, missingPaths)
+		if err != nil {
+			return fullSyncResponse{}, fmt.Errorf("mark cloud-only files missing: %w", err)
+		}
 	}
 
 	resp := fullSyncResponse{

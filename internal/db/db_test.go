@@ -90,6 +90,46 @@ func TestUpsertFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpsertFileBatchPromotesCloudOnlyToPending(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := d.UpsertFile(ctx, "cloud.txt", 10, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("path = ?", "cloud.txt").Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/cloud.txt",
+		"uploaded_at": now,
+	}).Error; err != nil {
+		t.Fatalf("plant cloud_only row: %v", err)
+	}
+
+	seen := now.Add(10 * time.Minute)
+	res, err := d.UpsertFileBatch(ctx, []BatchEntry{{Path: "cloud.txt", Size: 10, ModTime: now}}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Created || res[0].Changed {
+		t.Fatalf("unexpected upsert result: %+v", res)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{Search: "cloud.txt", All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("want 1 file, got %d", len(files))
+	}
+	if files[0].Status != StatusPending {
+		t.Fatalf("cloud_only row should normalize to pending, got %q", files[0].Status)
+	}
+	if files[0].LastSeenAt != seen {
+		t.Fatalf("last_seen_at = %v, want %v", files[0].LastSeenAt, seen)
+	}
+}
+
 func TestSnapshotToProducesStableCopy(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -167,6 +207,15 @@ func TestMarkMissing(t *testing.T) {
 	r5, _ := d.UpsertFile(ctx, "f.txt", 1, old, new)
 	_ = d.MarkFailed(ctx, r5.ID)
 
+	// Cloud-only, old — should stay recoverable from S3 and not be
+	// collapsed back to missing by the source-side scan.
+	r6, _ := d.UpsertFile(ctx, "g.txt", 1, old, old)
+	_ = d.g.WithContext(ctx).Model(&File{}).Where("id = ?", r6.ID).Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/g.txt",
+		"uploaded_at": old,
+	}).Error
+
 	affected, err := d.MarkMissing(ctx, new)
 	if err != nil {
 		t.Fatal(err)
@@ -197,6 +246,9 @@ func TestMarkMissing(t *testing.T) {
 	}
 	if got["f.txt"] != StatusFailed {
 		t.Errorf("f.txt want failed, got %q", got["f.txt"])
+	}
+	if got["g.txt"] != StatusCloudOnly {
+		t.Errorf("g.txt want cloud_only, got %q", got["g.txt"])
 	}
 }
 

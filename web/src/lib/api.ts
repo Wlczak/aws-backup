@@ -2,7 +2,7 @@
 // so pages + components can import without pulling in Svelte.
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
-export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
+export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_only' | 'missing';
 export type RestoreStatus = '' | 'in_progress' | 'restored';
 export type RestoreTier = 'bulk' | 'standard';
 

@@ -344,6 +344,7 @@
       <option value="zipped">zipped</option>
       <option value="uploaded">uploaded</option>
       <option value="failed">failed</option>
+      <option value="cloud_only">cloud only</option>
       <option value="missing">missing</option>
     </select>
   </label>

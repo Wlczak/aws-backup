@@ -194,7 +194,7 @@ func (s *Server) restoreObjectCount(ctx context.Context, paths []string, allFile
 			break
 		}
 		for _, f := range rows {
-			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped {
+			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped && f.Status != db.StatusCloudOnly {
 				continue
 			}
 			if !wantAll {
@@ -511,7 +511,7 @@ type downloadEstimateBreakdown struct {
 
 func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allFiles bool) (downloadEstimateBreakdown, error) {
 	var br downloadEstimateBreakdown
-	statuses := []string{db.StatusUploaded, db.StatusZipped}
+	statuses := []string{db.StatusUploaded, db.StatusZipped, db.StatusCloudOnly}
 	wantAll := allFiles
 	wantSet := make(map[string]struct{}, len(paths))
 	for _, p := range paths {

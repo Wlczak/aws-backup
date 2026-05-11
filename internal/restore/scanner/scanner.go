@@ -6,10 +6,10 @@
 // Two entry points exist:
 //
 //   - RunFull walks every restorable s3_key in the index (standalone
-//     uploads plus zip archives) and issues a HEAD per object. This is
-//     the authoritative reconciliation used to recover from missed SQS
-//     notifications or to seed restore state when the SQS subscription
-//     was added late.
+//     uploads, zip archives, and cloud_only rows) and issues a HEAD per
+//     object. This is the authoritative reconciliation used to recover
+//     from missed SQS notifications or to seed restore state when the
+//     SQS subscription was added late.
 //
 //   - RunPending walks only files whose local restore_status is
 //     "in_progress". Cheap; safe to run after every SQS drain to catch
