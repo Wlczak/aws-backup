@@ -294,7 +294,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 			if err := tx.Model(&File{}).
 				Where("id IN ?", cloudOnlyIDs[s:end]).
 				Updates(map[string]any{
-					"status":       StatusPending,
+					"status":       StatusUploaded,
 					"last_seen_at": seenAt,
 				}).Error; err != nil {
 				return err
@@ -366,7 +366,7 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 			"last_seen_at": seenAt,
 		}
 		if existing.Status == StatusCloudOnly {
-			updates["status"] = StatusPending
+			updates["status"] = StatusUploaded
 		}
 		return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(updates).Error
 	})

@@ -7,8 +7,9 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 ```text
 1.  Open run row; emit run_start.
 2.  Scan phase  (modes: full | scan)
-    source.Scan → batched UpsertFileBatch, mark missing (excluding cloud_only rows
-    recreated from S3), emit scan_progress per batch, then scan_complete. Update
+    source.Scan → batched UpsertFileBatch, preserve existing bucket-backed
+    state on unchanged rows, mark missing (excluding cloud_only rows recreated
+    from S3), emit scan_progress per batch, then scan_complete. Update
     run.files_scanned. If mode=scan, jump to finalize.
 
 3.  S3 list  (modes: full | upload)

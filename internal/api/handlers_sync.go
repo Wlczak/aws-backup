@@ -148,7 +148,6 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 	existingPaths := map[string]struct{}{}
 	localPaths := map[string]struct{}{}
 	promoteUploaded := make([]db.FileUpdate, 0)
-	promoteCloudOnly := make([]db.FileUpdate, 0)
 	recreateRows := make([]db.File, 0)
 	now := time.Now().UTC()
 	const pageSize = 1000
@@ -210,7 +209,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			// recoverable only while their S3 object still exists.
 			if f.Status == db.StatusMissing {
 				if cf, ok := idx.Files[f.Path]; ok {
-					promoteCloudOnly = append(promoteCloudOnly, db.FileUpdate{
+					promoteUploaded = append(promoteUploaded, db.FileUpdate{
 						ID:     f.ID,
 						Fields: buildFields(cf, db.StatusCloudOnly),
 					})
@@ -218,7 +217,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 				continue
 			}
 			if cf, ok := idx.Files[f.Path]; ok {
-				if f.Status != db.StatusUploaded && f.Status != db.StatusCloudOnly {
+				if f.Status != db.StatusUploaded {
 					promoteUploaded = append(promoteUploaded, db.FileUpdate{
 						ID:     f.ID,
 						Fields: buildFields(cf, db.StatusUploaded),
@@ -312,13 +311,8 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 			return fullSyncResponse{}, fmt.Errorf("promote uploaded files: %w", err)
 		}
 	}
-	if len(promoteCloudOnly) > 0 {
-		if err := s.deps.DB.UpdateFiles(ctx, promoteCloudOnly); err != nil {
-			return fullSyncResponse{}, fmt.Errorf("promote cloud-only files: %w", err)
-		}
-	}
-	if len(promoteUploaded) > 0 || len(promoteCloudOnly) > 0 {
-		filesReset = int64(len(promoteUploaded) + len(promoteCloudOnly))
+	if len(promoteUploaded) > 0 {
+		filesReset = int64(len(promoteUploaded))
 	}
 
 	resp := fullSyncResponse{

@@ -90,7 +90,7 @@ func TestUpsertFileLifecycle(t *testing.T) {
 	}
 }
 
-func TestUpsertFileBatchPromotesCloudOnlyToPending(t *testing.T) {
+func TestUpsertFileBatchPromotesCloudOnlyAndPreservesUploaded(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
 
@@ -105,13 +105,23 @@ func TestUpsertFileBatchPromotesCloudOnlyToPending(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("plant cloud_only row: %v", err)
 	}
-
-	seen := now.Add(10 * time.Minute)
-	res, err := d.UpsertFileBatch(ctx, []BatchEntry{{Path: "cloud.txt", Size: 10, ModTime: now}}, seen)
+	uploadedRes, err := d.UpsertFile(ctx, "uploaded.txt", 10, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 1 || res[0].Created || res[0].Changed {
+	if err := d.MarkUploaded(ctx, uploadedRes.ID, "md5", "backups/uploaded.txt", now); err != nil {
+		t.Fatalf("plant uploaded row: %v", err)
+	}
+
+	seen := now.Add(10 * time.Minute)
+	res, err := d.UpsertFileBatch(ctx, []BatchEntry{
+		{Path: "cloud.txt", Size: 10, ModTime: now},
+		{Path: "uploaded.txt", Size: 10, ModTime: now},
+	}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 || res[0].Created || res[0].Changed || res[1].Created || res[1].Changed {
 		t.Fatalf("unexpected upsert result: %+v", res)
 	}
 
@@ -122,11 +132,22 @@ func TestUpsertFileBatchPromotesCloudOnlyToPending(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("want 1 file, got %d", len(files))
 	}
-	if files[0].Status != StatusPending {
-		t.Fatalf("cloud_only row should normalize to pending, got %q", files[0].Status)
+	if files[0].Status != StatusUploaded {
+		t.Fatalf("cloud_only row should normalize to uploaded, got %q", files[0].Status)
 	}
 	if files[0].LastSeenAt != seen {
 		t.Fatalf("last_seen_at = %v, want %v", files[0].LastSeenAt, seen)
+	}
+
+	uploadedFiles, _, err := d.ListFiles(ctx, FilesFilter{Search: "uploaded.txt", All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploadedFiles) != 1 {
+		t.Fatalf("want 1 uploaded file, got %d", len(uploadedFiles))
+	}
+	if uploadedFiles[0].Status != StatusUploaded {
+		t.Fatalf("uploaded row should stay uploaded, got %q", uploadedFiles[0].Status)
 	}
 }
 

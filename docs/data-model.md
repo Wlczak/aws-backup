@@ -105,7 +105,7 @@ pending → zipped → uploaded         (zip group)
 pending →          uploaded         (individual file)
 pending →  failed                   (upload error; retryable)
 {pending,zipped,uploaded,failed} → missing   (file gone from source)
-cloud only → pending                (local source reappears during scan)
+cloud only → uploaded               (local source reappears during scan)
 cloud only → missing                (S3 object deleted)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
 ```
@@ -113,6 +113,7 @@ uploaded → restore_status=in_progress → restored   (Glacier restore lifecycl
 `cloud only` is a first-class stored status, not just a label derived from `missing + s3_key`.
 `missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
 `cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing. The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It does not collapse S3-present rows into `missing`.
+Unchanged source rescans preserve that bucket-backed state. An unchanged `cloud_only` row is promoted to `uploaded` when the local file is seen again.
 
 ## Zip naming + sidecar
 

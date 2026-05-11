@@ -53,7 +53,7 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
-`POST /api/sync` / `/api/sync/full` do not use the bucket compare to mark S3-present rows as `missing`. Anything that exists in S3 is kept explicit as either `uploaded` or `cloud_only`; rows absent from S3 are left to source-side reconciliation.
+`POST /api/sync` / `/api/sync/full` do not use the bucket compare to mark S3-present rows as `missing`. Anything that exists in S3 is kept explicit as either `uploaded` or `cloud_only`; rows absent from S3 are left to source-side reconciliation. Standalone root objects come straight from the bucket listing, not from prior DB history.
 
 ## SSE Event Catalogue
 
