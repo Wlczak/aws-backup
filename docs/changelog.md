@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Documented the `uploaded` / `pending` / `missing` / `cloud only` file-state semantics and their recovery rules |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
 | #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `missing`, and reset only still-local stale rows to pending |
 | — | — | Missing rows without an `s3_key` now stay labeled `missing` instead of being shown as `cloud only` |

@@ -93,6 +93,13 @@ Either knob set to `0` disables that pass.
 
 ## File status transitions
 
+State terms used throughout the codebase:
+
+- `uploaded` - the file exists locally and its object exists in S3.
+- `pending` - the file exists locally, but no S3 object has been written yet.
+- `missing` - the row exists in SQLite, but the file is gone locally and there is no S3 object to recover from.
+- `cloud only` - the object exists in S3 but there is no local row for it yet; the sync pass can recreate that path in SQLite from S3.
+
 ```text
 pending → zipped → uploaded         (zip group)
 pending →          uploaded         (individual file)
@@ -101,8 +108,8 @@ pending →  failed                   (upload error; retryable)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
 ```
 
-`missing` rows are kept until the corresponding S3 object is also deleted — the index models the **bucket**, not the source. See `CLAUDE.md`.
-If the row itself disappears from SQLite, the authoritative S3 sync can recreate it from the cloud listing as a `missing` row so the bucket view can be recovered after DB corruption.
+`missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
+`cloud only` rows are recoverable from S3 and are rebuilt by the authoritative sync when the local row is missing.
 
 ## Zip naming + sidecar
 
