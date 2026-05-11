@@ -118,6 +118,15 @@ export interface RestoreDownloadResponse {
   errors?: string[];
 }
 
+export interface RestoreDownloadEstimate {
+  object_count: number;
+  total_bytes: number;
+  request_fee_usd: number;
+  egress_fee_usd: number;
+  total_fee_usd: number;
+  unknown_paths?: string[];
+}
+
 export interface TestResult {
   ok: boolean;
   message?: string;
@@ -391,6 +400,11 @@ export const api = {
     request<RestoreDownloadResponse>('/api/restore/download', {
       method: 'POST',
       body: JSON.stringify({ paths, target_dir: targetDir }),
+    }),
+  restoreDownloadEstimate: (paths: string[]) =>
+    request<RestoreDownloadEstimate>('/api/restore/download/estimate', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
     }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {

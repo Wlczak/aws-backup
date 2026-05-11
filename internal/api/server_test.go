@@ -1001,6 +1001,74 @@ func TestRestoreDownloadOK(t *testing.T) {
 	}
 }
 
+func TestRestoreDownloadEstimate(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	res, err := deps.DB.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: "photos/a.jpg", Size: 100, ModTime: now},
+		{Path: "photos/b.jpg", Size: 200, ModTime: now},
+		{Path: "docs/readme.md", Size: 300, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{
+		"photos/a.jpg":   res[0].ID,
+		"photos/b.jpg":   res[1].ID,
+		"docs/readme.md": res[2].ID,
+	}
+	if err := deps.DB.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, md5hex("aaa"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, ids["docs/readme.md"], md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"paths":["photos","docs/readme.md","unknown/dir"]}`)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	var got restoreDownloadEstimateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ObjectCount != 2 {
+		t.Fatalf("object_count=%d want 2", got.ObjectCount)
+	}
+	if got.TotalBytes != 600 {
+		t.Fatalf("total_bytes=%d want 600", got.TotalBytes)
+	}
+	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
+		t.Fatalf("unknown_paths=%v", got.UnknownPaths)
+	}
+}
+
+func TestRestoreDownloadEstimateRejectsEmptyPaths(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json",
+		strings.NewReader(`{"paths":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
 func TestRestoreDownloadRejectsRelativeTarget(t *testing.T) {
 	ts, deps, _ := newRestoreDownloadServer(t)
 	ctx := context.Background()

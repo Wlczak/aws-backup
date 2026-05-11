@@ -19,12 +19,13 @@ import (
 // the UI shows the same numbers everyone else sees; real billing still
 // comes from AWS.
 const (
-	pricePerThousandRequestsStandard = 0.11  // USD; Glacier standard retrieval requests
-	pricePerGBRetrievalStandard      = 0.02  // USD/GB; Glacier standard retrieval
-	pricePerThousandRequestsBulk     = 0.025 // USD; Glacier bulk retrieval requests
-	pricePerGBRetrievalBulk          = 0.003 // USD/GB; Glacier bulk retrieval
-	pricePerGBEgress                 = 0.09  // USD/GB; internet egress after free tier
-	egressFreeGB                     = 100.0 // free tier
+	pricePerThousandRequestsStandard = 0.11   // USD; Glacier standard retrieval requests
+	pricePerGBRetrievalStandard      = 0.02   // USD/GB; Glacier standard retrieval
+	pricePerThousandRequestsBulk     = 0.025  // USD; Glacier bulk retrieval requests
+	pricePerGBRetrievalBulk          = 0.003  // USD/GB; Glacier bulk retrieval
+	pricePerThousandRequestsGet      = 0.0004 // USD; S3 Standard GET requests
+	pricePerGBEgress                 = 0.09   // USD/GB; internet egress after free tier
+	egressFreeGB                     = 100.0  // free tier
 )
 
 type restoreTierRequest string
@@ -268,6 +269,19 @@ type restoreDownloadResponse struct {
 	Errors       []string `json:"errors,omitempty"`
 }
 
+type restoreDownloadEstimateRequest struct {
+	Paths []string `json:"paths"`
+}
+
+type restoreDownloadEstimateResponse struct {
+	ObjectCount   int64    `json:"object_count"`
+	TotalBytes    int64    `json:"total_bytes"`
+	RequestFeeUSD float64  `json:"request_fee_usd"`
+	EgressFeeUSD  float64  `json:"egress_fee_usd"`
+	TotalFeeUSD   float64  `json:"total_fee_usd"`
+	UnknownPaths  []string `json:"unknown_paths,omitempty"`
+}
+
 // restoreDaysMin / restoreDaysMax bound the operator-facing days value.
 // AWS S3 accepts a wider range, but a 30-day ceiling keeps the dollar
 // cost of a typo bounded; the operator can re-issue the restore later
@@ -406,6 +420,152 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		Skipped:      stats.Skipped,
 		Errors:       stats.Errors,
 	})
+}
+
+// handleRestoreDownloadEstimate computes a download cost estimate from DB
+// metadata only. It counts actual S3 objects that will be fetched (one
+// zip archive per zip group, plus standalone objects) and estimates data
+// transfer from the indexed file sizes.
+func (s *Server) handleRestoreDownloadEstimate(w http.ResponseWriter, r *http.Request) {
+	var req restoreDownloadEstimateRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("paths must be non-empty"))
+		return
+	}
+
+	allFiles := false
+	pathsForFilter := make([]string, 0, len(req.Paths))
+	seen := make(map[string]struct{}, len(req.Paths))
+	for _, p := range req.Paths {
+		if p == "/" || p == "" {
+			allFiles = true
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		pathsForFilter = append(pathsForFilter, p)
+	}
+
+	br, err := s.downloadEstimateStats(r.Context(), pathsForFilter, allFiles)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	var unknown []string
+	if !allFiles {
+		matchedSet := make(map[string]struct{}, len(br.MatchedPaths))
+		for _, p := range br.MatchedPaths {
+			matchedSet[p] = struct{}{}
+		}
+		for _, p := range pathsForFilter {
+			if _, ok := matchedSet[p]; !ok {
+				unknown = append(unknown, p)
+			}
+		}
+	}
+
+	gb := float64(br.TotalBytes) / (1024 * 1024 * 1024)
+	request := float64(br.ObjectCount) * pricePerThousandRequestsGet / 1000
+	egressGB := gb
+	if egressGB > egressFreeGB {
+		egressGB -= egressFreeGB
+	} else {
+		egressGB = 0
+	}
+	egress := egressGB * pricePerGBEgress
+
+	writeJSON(w, http.StatusOK, restoreDownloadEstimateResponse{
+		ObjectCount:   br.ObjectCount,
+		TotalBytes:    br.TotalBytes,
+		RequestFeeUSD: round2(request),
+		EgressFeeUSD:  round2(egress),
+		TotalFeeUSD:   round2(request + egress),
+		UnknownPaths:  unknown,
+	})
+}
+
+type downloadEstimateBreakdown struct {
+	ObjectCount  int64
+	TotalBytes   int64
+	MatchedPaths []string
+}
+
+func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allFiles bool) (downloadEstimateBreakdown, error) {
+	var br downloadEstimateBreakdown
+	statuses := []string{db.StatusUploaded, db.StatusZipped}
+	wantAll := allFiles
+	wantSet := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" || p == "/" {
+			wantAll = true
+			break
+		}
+		wantSet[p] = struct{}{}
+	}
+
+	seenKeys := make(map[string]struct{})
+	matched := make(map[string]bool)
+	const pageSize = 1000
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return downloadEstimateBreakdown{}, err
+		}
+		rows, _, err := s.deps.DB.ListFiles(ctx, db.FilesFilter{Page: page, Limit: pageSize})
+		if err != nil {
+			return downloadEstimateBreakdown{}, fmt.Errorf("list files: %w", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, f := range rows {
+			if f.Status != statuses[0] && f.Status != statuses[1] {
+				continue
+			}
+			if !wantAll {
+				hit := false
+				for req := range wantSet {
+					if pathutil.HasPrefixPath(f.Path, req) {
+						hit = true
+						matched[req] = true
+						break
+					}
+				}
+				if !hit {
+					continue
+				}
+			}
+			key := f.S3Key
+			if f.ZipName != "" {
+				key = pathutil.JoinKey(s.storagePrefix(), f.ZipName)
+			}
+			if key == "" {
+				continue
+			}
+			if _, ok := seenKeys[key]; !ok {
+				seenKeys[key] = struct{}{}
+				br.ObjectCount++
+			}
+			br.TotalBytes += f.Size
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+
+	br.MatchedPaths = make([]string, 0, len(paths))
+	for _, p := range paths {
+		if matched[p] {
+			br.MatchedPaths = append(br.MatchedPaths, p)
+		}
+	}
+	return br, nil
 }
 
 func round2(f float64) float64 {

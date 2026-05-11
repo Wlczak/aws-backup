@@ -1,14 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type RestoreDownloadResponse } from '../lib/api';
+  import { api, subscribeEvents, type RestoreDownloadEstimate, type RestoreDownloadResponse } from '../lib/api';
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
 
   let raw = $state('');
   let downloadTargetDir = $state('');
+  let downloadEstimate = $state<RestoreDownloadEstimate | null>(null);
   let downloadResult = $state<RestoreDownloadResponse | null>(null);
   let downloadBusy = $state(false);
+  let estimating = $state(false);
   let downloadProgress = $state<{
     processed: number;
     total: number;
@@ -21,7 +23,7 @@
 
   $effect(() => {
     void raw;
-    void downloadTargetDir;
+    downloadEstimate = null;
     downloadResult = null;
   });
 
@@ -99,6 +101,23 @@
       downloadBusy = false;
     }
   }
+
+  async function doEstimate() {
+    const p = paths();
+    if (p.length === 0) {
+      toast.error('enter at least one path');
+      return;
+    }
+    estimating = true;
+    downloadEstimate = null;
+    try {
+      downloadEstimate = await api.restoreDownloadEstimate(p);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      estimating = false;
+    }
+  }
 </script>
 
 <h1>Download restored files</h1>
@@ -139,7 +158,45 @@
         Download and verify
       {/if}
     </button>
+    <button type="button" onclick={doEstimate} disabled={estimating || downloadBusy}>
+      {estimating ? 'Estimating…' : 'Estimate cost'}
+    </button>
   </div>
+  {#if downloadEstimate}
+    <div class="stats" style="margin-top: 0.75rem">
+      <div>
+        <div class="muted">S3 objects</div>
+        <div class="big">{downloadEstimate.object_count.toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="muted">Data</div>
+        <div class="big">{bytes(downloadEstimate.total_bytes)}</div>
+      </div>
+      <div>
+        <div class="muted">GET fee</div>
+        <div class="big">${downloadEstimate.request_fee_usd.toFixed(2)}</div>
+      </div>
+      <div>
+        <div class="muted">Egress</div>
+        <div class="big">${downloadEstimate.egress_fee_usd.toFixed(2)}</div>
+      </div>
+      <div>
+        <div class="muted">Total</div>
+        <div class="big">${downloadEstimate.total_fee_usd.toFixed(2)}</div>
+      </div>
+    </div>
+    <p class="muted small" style="margin-top: 0.5rem">
+      Estimated from indexed file sizes. Zipped groups count as one S3 object for request fees.
+    </p>
+    {#if downloadEstimate.unknown_paths?.length}
+      <details style="margin-top: 0.75rem">
+        <summary>{downloadEstimate.unknown_paths.length} unknown path(s)</summary>
+        <ul class="mono small">
+          {#each downloadEstimate.unknown_paths as p}<li>{p}</li>{/each}
+        </ul>
+      </details>
+    {/if}
+  {/if}
   {#if downloadProgress}
     {@const pct = downloadProgress.total > 0
       ? Math.min(100, Math.round((downloadProgress.processed / downloadProgress.total) * 100))

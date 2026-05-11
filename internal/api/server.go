@@ -315,6 +315,7 @@ func (s *Server) Router() http.Handler {
 
 		r.Post("/restore/estimate", s.handleRestoreEstimate)
 		r.Post("/restore/trigger", s.handleRestoreTrigger)
+		r.Post("/restore/download/estimate", s.handleRestoreDownloadEstimate)
 		r.Post("/restore/download", s.handleRestoreDownload)
 		r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
 		r.Post("/restore/scan/full", s.handleRestoreScanFull)
