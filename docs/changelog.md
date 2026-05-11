@@ -4,7 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
-| — | — | Added `/api/restore/download` and Restore-page local download + MD5 verify flow, with `restore_download_*` SSE progress |
+| — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
 | #38 | db02540 | `MarkMissing` includes `zipped` rows |
 | #39 | f1880af | `currentRun` leak + `discardResponse` header on panic |
 | #43 | b223d84 | Reconcile DB from S3 zip indexes at backup start |

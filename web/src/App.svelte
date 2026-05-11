@@ -5,6 +5,7 @@
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
+  import Download from './routes/Download.svelte';
   import Toaster from './components/Toaster.svelte';
 
   const tabs = [
@@ -13,6 +14,7 @@
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings' },
     { id: 'restore', label: 'Restore' },
+    { id: 'download', label: 'Download' },
   ];
 </script>
 
@@ -36,6 +38,7 @@
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />
+    {:else if $route === 'download'}<Download />
     {:else}<p class="muted">Unknown route: {$route}</p>
     {/if}
   </main>
