@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats } from '../lib/api';
+  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -403,15 +403,7 @@
 
   let syncing = $state(false);
   let syncInfo = $state('');
-  let fullSyncResult = $state<{
-    local_missing_count: number;
-    local_missing_from_cloud?: string[];
-    cloud_missing_count: number;
-    cloud_missing_from_local?: string[];
-    cloud_file_count: number;
-    local_file_count: number;
-    zip_indexes_consumed: number;
-  } | null>(null);
+  let fullSyncResult = $state<FullSyncResponse | null>(null);
 
   let syncingRestore = $state(false);
   let scanningRestore = $state(false);
@@ -524,38 +516,18 @@
     syncing = true;
     syncInfo = '';
     fullSyncResult = null;
-    try {
-      const r = await api.sync();
-      const total = r.missing_zips + r.missing_individual;
-      if (total === 0) {
-        const checked = r.zip_names_in_db + r.individual_keys_in_db;
-        syncInfo = `Index in sync — ${checked} object(s) checked.`;
-      } else {
-        syncInfo = `Sync complete: ${r.missing_zips} zip(s) + ${r.missing_individual} individual file(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
-      }
-      await refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      syncing = false;
-    }
-  }
-
-  async function fullSync() {
-    syncing = true;
-    syncInfo = '';
-    fullSyncResult = null;
     resetFixState();
     try {
-      const r = await api.syncFull();
+      const r = await api.sync();
       fullSyncResult = r;
-      const existence = r.missing_zips + r.missing_individual;
+      const total = r.missing_zips + r.missing_individual;
       const parts = [
         `${r.zip_indexes_consumed} zip index(es) consumed`,
         `${r.cloud_file_count} cloud file(s) / ${r.local_file_count} local file(s)`,
       ];
-      if (existence > 0) parts.push(`${existence} S3 object(s) missing`);
-      syncInfo = `Full sync: ${parts.join(' · ')}.`;
+      if (total > 0) parts.push(`${total} S3 object(s) missing from bucket`);
+      if (r.files_reset > 0) parts.push(`${r.files_reset} file(s) reset to pending`);
+      syncInfo = `Sync complete: ${parts.join(' · ')}.`;
       await refresh();
     } catch (e) {
       toast.error(String(e));
@@ -639,17 +611,13 @@
   <div class="card">
     <div class="label">S3 sync</div>
     <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
-      Quick: existence check by S3 key — missing objects reset to pending.<br />
-      Full: also downloads every zip index and diffs local vs cloud file sets.
+      Download the full bucket file list and every zip index, then compare the
+      result to the local index DB.
     </div>
     {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
     <div class="run-actions">
       <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
         {syncing ? 'Syncing…' : 'Sync with S3'}
-      </button>
-      <button onclick={fullSync} type="button" disabled={syncing || !!status?.current}
-              title="Heavier: downloads every .index.txt sidecar and compares file contents">
-        Full sync
       </button>
     </div>
   </div>
@@ -693,7 +661,7 @@
 
 {#if fullSyncResult}
   <div class="card">
-    <div class="label">Full sync result</div>
+    <div class="label">Sync result</div>
     <div class="sync-grid">
 
       <!-- Local files not in cloud -->

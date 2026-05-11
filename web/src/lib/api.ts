@@ -130,6 +130,25 @@ export interface RestoreDownloadEstimate {
   unknown_paths?: string[];
 }
 
+export interface SyncResponse {
+  zip_names_in_db: number;
+  individual_keys_in_db: number;
+  keys_in_s3: number;
+  missing_zips: number;
+  missing_individual: number;
+  files_reset: number;
+}
+
+export interface FullSyncResponse extends SyncResponse {
+  cloud_file_count: number;
+  local_file_count: number;
+  zip_indexes_consumed: number;
+  local_missing_count: number;
+  local_missing_from_cloud?: string[];
+  cloud_missing_count: number;
+  cloud_missing_from_local?: string[];
+}
+
 export interface TestResult {
   ok: boolean;
   message?: string;
@@ -331,32 +350,9 @@ export const api = {
   testSource: () => request<TestResult>('/api/smb/test'),
   testStorage: () => request<TestResult>('/api/s3/test'),
 
-  sync: () =>
-    request<{
-      zip_names_in_db: number;
-      individual_keys_in_db: number;
-      keys_in_s3: number;
-      missing_zips: number;
-      missing_individual: number;
-      files_reset: number;
-    }>('/api/sync', { method: 'POST' }),
+  sync: () => request<FullSyncResponse>('/api/sync', { method: 'POST' }),
 
-  syncFull: () =>
-    request<{
-      zip_names_in_db: number;
-      individual_keys_in_db: number;
-      keys_in_s3: number;
-      missing_zips: number;
-      missing_individual: number;
-      files_reset: number;
-      cloud_file_count: number;
-      local_file_count: number;
-      zip_indexes_consumed: number;
-      local_missing_count: number;
-      local_missing_from_cloud?: string[];
-      cloud_missing_count: number;
-      cloud_missing_from_local?: string[];
-    }>('/api/sync/full', { method: 'POST' }),
+  syncFull: () => request<FullSyncResponse>('/api/sync/full', { method: 'POST' }),
 
   deleteCloudPaths: (paths: string[]) =>
     request<{

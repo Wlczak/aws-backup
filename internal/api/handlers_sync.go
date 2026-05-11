@@ -44,9 +44,9 @@ type fullSyncResponse struct {
 // backups.
 const fullSyncListCap = 1000
 
-// handleSync checks that every recorded S3 object still exists in the bucket.
-// Zipped files are matched by zip_name; individually-uploaded files by s3_key.
-// Missing objects are reset to pending so the next run re-uploads them.
+// handleSync runs the authoritative cloud compare: list every object in the
+// bucket, download every zip index, compare the resulting path set to the local
+// DB, and reset rows whose recorded object is no longer present.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -65,13 +65,14 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 			errors.New("a backup run is in progress — sync would race engine writes; try again when idle"))
 		return
 	}
-	// Detach the work ctx from the request: List+MarkPending* over a
-	// multi-million-key bucket can outlive a tab close, and a client
-	// disconnect that fires after List completes but mid-MarkPending
-	// would leave a partial reset. Server-controlled deadline bounds it. (#238)
+	// Detach the work ctx from the request: listing the bucket plus
+	// reconciling the DB over a multi-million-key bucket can outlive a
+	// tab close, and a client disconnect that fires after List completes
+	// but mid-reset would leave a partial update. Server-controlled
+	// deadline bounds it. (#238)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
 	defer cancel()
-	resp, err := s.runSyncExistenceCheck(ctx, st)
+	resp, err := s.runSyncCloudCompare(ctx, st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -79,11 +80,9 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-
-// handleSyncFull reports whether every local file is covered in the cloud
-// (zip indexes + standalone keys) and vice versa. This is heavier than
-// handleSync — it downloads every .index.txt sidecar — so it's exposed on
-// a separate route rather than folded into the default sync.
+// handleSyncFull reports the same authoritative cloud compare as handleSync.
+// The route remains as a compatibility alias for callers that still post to
+// /api/sync/full.
 func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -102,57 +101,92 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 	// Detach from request ctx — see handleSync. (#238)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
 	defer cancel()
-
-	// Start from the same existence check handleSync does so callers get
-	// both views in one call; reuse helpers rather than duplicating logic.
-	base, err := s.runSyncExistenceCheck(ctx, st)
+	resp, err := s.runSyncCloudCompare(ctx, st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// runSyncCloudCompare runs the authoritative sync pass: list the bucket,
+// download all zip indexes, compare the resulting cloud path set to the local
+// DB, and reset rows that are no longer represented in S3 back to pending.
+func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
+	zipNames, err := s.deps.DB.ListZipNames(ctx)
+	if err != nil {
+		return fullSyncResponse{}, fmt.Errorf("list zip names: %w", err)
+	}
 
 	indivKeys, err := s.deps.DB.ListIndividualS3Keys(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("list individual keys: %w", err))
-		return
+		return fullSyncResponse{}, fmt.Errorf("list individual keys: %w", err)
 	}
 
 	prefix := s.storagePrefix()
-	idx, err := engine.LoadCloudIndex(ctx, st, prefix, indivKeys)
+	s3Keys, err := st.List(ctx, pathutil.NormalizeS3ListPrefix(prefix))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("load cloud index: %w", err))
-		return
+		return fullSyncResponse{}, fmt.Errorf("list s3 keys: %w", err)
+	}
+	inS3 := make(map[string]struct{}, len(s3Keys))
+	for _, k := range s3Keys {
+		inS3[k] = struct{}{}
 	}
 
-	// Walk every file currently in the DB. Files that were scanned but
-	// haven't uploaded yet (status=pending/failed) still count as "local"
-	// — the user wants to know they exist on disk but not in the cloud.
+	idx, err := engine.LoadCloudIndex(ctx, st, prefix, indivKeys)
+	if err != nil {
+		return fullSyncResponse{}, fmt.Errorf("load cloud index: %w", err)
+	}
+
 	localPaths := map[string]struct{}{}
+	missingIDs := make([]int64, 0)
 	const pageSize = 1000
 	for p := 1; ; p++ {
+		if err := ctx.Err(); err != nil {
+			return fullSyncResponse{}, err
+		}
 		rows, _, err := s.deps.DB.ListFiles(ctx, db.FilesFilter{Page: p, Limit: pageSize})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Errorf("list files: %w", err))
-			return
+			return fullSyncResponse{}, fmt.Errorf("list files: %w", err)
 		}
 		if len(rows) == 0 {
 			break
 		}
 		for _, f := range rows {
-			// A file marked "missing" exists in the DB but not on disk —
-			// for sync purposes it isn't local, so skip it.
-			if f.Status == db.StatusMissing {
+			// Missing rows are not local for the purpose of the diff, but
+			// they still get reset to pending below when the cloud object is
+			// gone so the next source scan can re-evaluate them.
+			if f.Status != db.StatusMissing {
+				localPaths[f.Path] = struct{}{}
+			}
+			if _, ok := idx.Files[f.Path]; ok {
 				continue
 			}
-			localPaths[f.Path] = struct{}{}
+			if f.Status != db.StatusPending || f.MD5 != "" || f.ZipName != "" || f.S3Key != "" || !f.UploadedAt.IsZero() {
+				missingIDs = append(missingIDs, f.ID)
+			}
 		}
 		if len(rows) < pageSize {
 			break
 		}
 	}
 
+	var filesReset int64
+	if len(missingIDs) > 0 {
+		n, err := s.deps.DB.MarkPendingByIDsForce(ctx, missingIDs)
+		if err != nil {
+			return fullSyncResponse{}, fmt.Errorf("reset missing files: %w", err)
+		}
+		filesReset = n
+	}
+
 	resp := fullSyncResponse{
-		syncResponse:       base,
+		syncResponse: syncResponse{
+			ZipNamesInDB:       len(zipNames),
+			IndividualKeysInDB: len(indivKeys),
+			KeysInS3:           len(s3Keys),
+			FilesReset:         filesReset,
+		},
 		CloudFileCount:     len(idx.Files),
 		LocalFileCount:     len(localPaths),
 		ZipIndexesConsumed: idx.IndexCount,
@@ -175,7 +209,22 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	resp.MissingZips = 0
+	resp.MissingIndividual = 0
+	for _, z := range zipNames {
+		key := pathutil.JoinKey(prefix, z)
+		if _, ok := inS3[key]; ok {
+			continue
+		}
+		resp.MissingZips++
+	}
+	for _, k := range indivKeys {
+		if _, ok := inS3[k]; !ok {
+			resp.MissingIndividual++
+		}
+	}
+
+	return resp, nil
 }
 
 type deleteCloudPathsRequest struct {
@@ -319,75 +368,4 @@ func (s *Server) handleDeleteCloudPaths(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// runSyncExistenceCheck runs the cheap existence-only sync (used by both
-// POST /api/sync and POST /api/sync/full) and resets any files whose S3
-// objects have gone missing. Returns the summary fields without writing
-// an HTTP response so callers can embed it in a larger payload.
-//
-// st is taken as an argument so callers can snapshot the live storage
-// once per request and reuse the same handle here, rather than each
-// helper re-fetching from deps and risking a half-old, half-new view
-// across a concurrent settings hot-swap. (#131)
-func (s *Server) runSyncExistenceCheck(ctx context.Context, st storage.Storage) (syncResponse, error) {
-	zipNames, err := s.deps.DB.ListZipNames(ctx)
-	if err != nil {
-		return syncResponse{}, fmt.Errorf("list zip names: %w", err)
-	}
-
-	indivKeys, err := s.deps.DB.ListIndividualS3Keys(ctx)
-	if err != nil {
-		return syncResponse{}, fmt.Errorf("list individual keys: %w", err)
-	}
-
-	prefix := s.storagePrefix()
-	s3Keys, err := st.List(ctx, pathutil.NormalizeS3ListPrefix(prefix))
-	if err != nil {
-		return syncResponse{}, fmt.Errorf("list s3 keys: %w", err)
-	}
-
-	inS3 := make(map[string]struct{}, len(s3Keys))
-	for _, k := range s3Keys {
-		inS3[k] = struct{}{}
-	}
-
-	var missingZips []string
-	for _, z := range zipNames {
-		key := pathutil.JoinKey(prefix, z)
-		if _, ok := inS3[key]; !ok {
-			missingZips = append(missingZips, z)
-		}
-	}
-	var missingIndiv []string
-	for _, k := range indivKeys {
-		if _, ok := inS3[k]; !ok {
-			missingIndiv = append(missingIndiv, k)
-		}
-	}
-
-	var reset int64
-	if len(missingZips) > 0 {
-		n, err := s.deps.DB.MarkPendingByZipNames(ctx, missingZips)
-		if err != nil {
-			return syncResponse{}, fmt.Errorf("reset missing zips: %w", err)
-		}
-		reset += n
-	}
-	if len(missingIndiv) > 0 {
-		n, err := s.deps.DB.MarkPendingByS3Keys(ctx, missingIndiv)
-		if err != nil {
-			return syncResponse{}, fmt.Errorf("reset missing individual: %w", err)
-		}
-		reset += n
-	}
-
-	return syncResponse{
-		ZipNamesInDB:       len(zipNames),
-		IndividualKeysInDB: len(indivKeys),
-		KeysInS3:           len(s3Keys),
-		MissingZips:        len(missingZips),
-		MissingIndividual:  len(missingIndiv),
-		FilesReset:         reset,
-	}, nil
 }
