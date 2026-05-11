@@ -172,6 +172,9 @@ func TestDownloadMirrorToDirZipMissingMember(t *testing.T) {
 	if stats.Scanned != 2 || stats.Present != 1 || stats.Missing != 1 {
 		t.Fatalf("unexpected scan stats: %+v", stats)
 	}
+	if stats.ObjectCount != 1 {
+		t.Fatalf("ObjectCount = %d want 1", stats.ObjectCount)
+	}
 	if stats.FilesWritten != 1 {
 		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
 	}

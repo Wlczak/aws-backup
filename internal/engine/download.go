@@ -35,6 +35,7 @@ type DownloadStats struct {
 	Scanned      int64
 	Present      int64
 	Missing      int64
+	ObjectCount  int64
 	FilesWritten int64
 	BytesWritten int64
 	TotalBytes   int64
@@ -144,23 +145,6 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			break
 		}
 	}
-	if emit != nil {
-		emit(Event{
-			Type: EventDownloadMirrorScanComplete,
-			At:   time.Now(),
-			Data: map[string]any{
-				"scanned": stats.Scanned,
-				"present": stats.Present,
-				"missing": stats.Missing,
-				"total":   total,
-			},
-		})
-	}
-
-	if len(recoverableMissing) == 0 {
-		return stats, nil
-	}
-
 	byZip := map[string][]db.File{}
 	standalone := make([]db.File, 0, len(recoverableMissing))
 	for _, f := range recoverableMissing {
@@ -180,6 +164,7 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 	for _, members := range byZip {
 		downloadTotal += int64(len(members))
 	}
+	downloadObjectCount := int64(len(standalone) + len(byZip))
 	downloadBytesTotal := int64(0)
 	for _, f := range standalone {
 		downloadBytesTotal += f.Size
@@ -191,11 +176,29 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 	}
 	if emit != nil {
 		emit(Event{
+			Type: EventDownloadMirrorScanComplete,
+			At:   time.Now(),
+			Data: map[string]any{
+				"scanned":      stats.Scanned,
+				"present":      stats.Present,
+				"missing":      stats.Missing,
+				"total":        total,
+				"total_bytes":  downloadBytesTotal,
+				"object_count": downloadObjectCount,
+			},
+		})
+	}
+	if len(recoverableMissing) == 0 {
+		return stats, nil
+	}
+	if emit != nil {
+		emit(Event{
 			Type: EventDownloadMirrorStart,
 			At:   time.Now(),
 			Data: map[string]any{
-				"total":       downloadTotal,
-				"total_bytes": downloadBytesTotal,
+				"total":        downloadTotal,
+				"total_bytes":  downloadBytesTotal,
+				"object_count": downloadObjectCount,
 			},
 		})
 	}
@@ -274,10 +277,12 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 				"files_written": stats.FilesWritten,
 				"bytes_written": stats.BytesWritten,
 				"total_bytes":   downloadBytesTotal,
+				"object_count":  downloadObjectCount,
 				"errors":        len(stats.Errors),
 			},
 		})
 	}
+	stats.ObjectCount = downloadObjectCount
 	stats.TotalBytes = downloadBytesTotal
 	return stats, nil
 }

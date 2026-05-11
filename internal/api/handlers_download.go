@@ -13,22 +13,26 @@ import (
 )
 
 type downloadSummary struct {
-	ID           int64      `json:"id"`
-	StartedAt    time.Time  `json:"started_at"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	Status       string     `json:"status"`
-	Phase        string     `json:"phase"`
-	DownloadDir  string     `json:"download_dir"`
-	Total        int64      `json:"total"`
-	TotalBytes   int64      `json:"total_bytes"`
-	Scanned      int64      `json:"scanned"`
-	Present      int64      `json:"present"`
-	Missing      int64      `json:"missing"`
-	Processed    int64      `json:"processed"`
-	FilesWritten int64      `json:"files_written"`
-	BytesWritten int64      `json:"bytes_written"`
-	Errors       int64      `json:"errors"`
-	ErrorMessage string     `json:"error_message,omitempty"`
+	ID            int64      `json:"id"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	Status        string     `json:"status"`
+	Phase         string     `json:"phase"`
+	DownloadDir   string     `json:"download_dir"`
+	Total         int64      `json:"total"`
+	TotalBytes    int64      `json:"total_bytes"`
+	ObjectCount   int64      `json:"object_count"`
+	RequestFeeUSD float64    `json:"request_fee_usd"`
+	EgressFeeUSD  float64    `json:"egress_fee_usd"`
+	TotalFeeUSD   float64    `json:"total_fee_usd"`
+	Scanned       int64      `json:"scanned"`
+	Present       int64      `json:"present"`
+	Missing       int64      `json:"missing"`
+	Processed     int64      `json:"processed"`
+	FilesWritten  int64      `json:"files_written"`
+	BytesWritten  int64      `json:"bytes_written"`
+	Errors        int64      `json:"errors"`
+	ErrorMessage  string     `json:"error_message,omitempty"`
 }
 
 type downloadTriggerResponse struct {
@@ -122,6 +126,7 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 					"files_written": stats.FilesWritten,
 					"bytes_written": stats.BytesWritten,
 					"total_bytes":   stats.TotalBytes,
+					"object_count":  stats.ObjectCount,
 					"errors":        len(stats.Errors),
 					"error":         err.Error(),
 				},
@@ -133,6 +138,8 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 		s.downloadMu.Lock()
 		if cur := s.currentDownload; cur != nil && cur.ID == downloadID {
 			cur.TotalBytes = stats.TotalBytes
+			cur.ObjectCount = stats.ObjectCount
+			cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(stats.ObjectCount, stats.TotalBytes)
 			cur.FilesWritten = stats.FilesWritten
 			cur.BytesWritten = stats.BytesWritten
 			cur.Errors = int64(len(stats.Errors))
@@ -171,6 +178,8 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Phase = "scan"
 		cur.Total = intFromAny(ev.Data["total"])
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 		cur.Scanned = 0
 		cur.Present = 0
 		cur.Missing = 0
@@ -190,11 +199,15 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Missing = intFromAny(ev.Data["missing"])
 		cur.Total = intFromAny(ev.Data["total"])
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 	case engine.EventDownloadMirrorStart:
 		cur.Status = "running"
 		cur.Phase = "download"
 		cur.Total = intFromAny(ev.Data["total"])
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 		cur.Processed = 0
 		cur.FilesWritten = 0
 		cur.BytesWritten = 0
@@ -205,6 +218,8 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Processed = intFromAny(ev.Data["processed"])
 		cur.Total = intFromAny(ev.Data["total"])
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
@@ -212,6 +227,8 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Status = "completed"
 		cur.Phase = "complete"
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
@@ -221,6 +238,8 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Status = "failed"
 		cur.Phase = "failed"
 		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.ObjectCount = intFromAny(ev.Data["object_count"])
+		cur.RequestFeeUSD, cur.EgressFeeUSD, cur.TotalFeeUSD = estimateDownloadFees(cur.ObjectCount, cur.TotalBytes)
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
