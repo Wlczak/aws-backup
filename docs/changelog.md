@@ -104,6 +104,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #270 | 6c1c157 | `fetchManifest` rejects manifests whose `sourceBucket` is empty or doesn't equal the read bucket — closes the empty-bypass left by #187 |
 | #232 | ad60bd7 | `fetchManifest` rejects manifests with any empty `MD5checksum` so per-data-file verification can't be silently skipped |
 | — | — | CI `govulncheck` moved to Go 1.25.10 after GO-2026-4971 / GO-2026-4918 in 1.25.9 |
+| — | — | Post-run DB sync now uploads a `VACUUM INTO` snapshot instead of the live `index.db` file |
 | #275 | e83c614 | `fetchDataKeys` bounds compressed/uncompressed reads (8 GiB hard cap on gzip stream + manifest-Size compressed cap + 1 MiB per-field cap) — gzip-bomb hardening |
 | #274 | e438112 | `Validate` URL-parses `s3.endpoint` / `sqs.queue_url`, requires http/https + non-empty host, and rejects IMDS-class hosts to block credential exfiltration / metadata SSRF |
 | #273 | c905d34 | `originGuard` chi middleware on `/api` rejects mismatched-Origin requests so a hostile page can't read /api/events on a loopback dev server |

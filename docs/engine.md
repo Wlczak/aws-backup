@@ -44,8 +44,9 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 
 9.  Post-run (in api goroutine after currentRun cleared)
     Apply any pendingConfig queued via PUT /api/settings during the run.
-    maybeSyncDBToS3 uploads the index.db sidecar in STANDARD tier (#125)
-    when the run completed or was gracefully stopped.
+    maybeSyncDBToS3 snapshots the local index.db to a temp file and
+    uploads that sidecar in STANDARD tier (#125) when the run
+    completed or was gracefully stopped.
 ```
 
 ## Run-state Concurrency (`api.Server`)

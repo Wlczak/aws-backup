@@ -10,7 +10,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	gsqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -86,4 +89,18 @@ func (db *DB) Close() error {
 // .db can be uploaded to S3 as a consistent snapshot.
 func (db *DB) Checkpoint(ctx context.Context) error {
 	return db.g.WithContext(ctx).Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
+}
+
+// SnapshotTo writes a consistent copy of the live database to dst using
+// SQLite's VACUUM INTO. The resulting file can be uploaded or opened
+// independently of concurrent writes to the live DB handle.
+func (db *DB) SnapshotTo(ctx context.Context, dst string) error {
+	if dst == "" {
+		return errors.New("snapshot path is required")
+	}
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	escaped := strings.ReplaceAll(dst, "'", "''")
+	return db.g.WithContext(ctx).Exec("VACUUM INTO '" + escaped + "'").Error
 }

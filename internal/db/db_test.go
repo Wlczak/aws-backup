@@ -90,6 +90,52 @@ func TestUpsertFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestSnapshotToProducesStableCopy(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC()
+	r1, err := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r1.ID, "m1", "k1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	snapPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := d.SnapshotTo(ctx, snapPath); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+
+	// Mutate the live DB after the snapshot so we can prove the copy is
+	// a stable point-in-time image, not a handle to the live file.
+	r2, err := d.UpsertFile(ctx, "b.txt", 2, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r2.ID, "m2", "k2", now); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := Open(ctx, snapPath)
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	t.Cleanup(func() { _ = snap.Close() })
+
+	files, total, err := snap.ListFiles(ctx, FilesFilter{})
+	if err != nil {
+		t.Fatalf("ListFiles snapshot: %v", err)
+	}
+	if total != 1 || len(files) != 1 {
+		t.Fatalf("snapshot row count = %d/%d, want 1/1", len(files), total)
+	}
+	if files[0].Path != "a.txt" || files[0].Status != StatusUploaded {
+		t.Fatalf("snapshot row = %+v, want uploaded a.txt", files[0])
+	}
+}
+
 func TestMarkMissing(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -414,7 +460,7 @@ func TestTrimRunLogsByAge(t *testing.T) {
 	d := openTestDB(t)
 
 	now := time.Now().UTC().Truncate(time.Second)
-	old := now.Add(-60 * 24 * time.Hour)  // 60 days ago
+	old := now.Add(-60 * 24 * time.Hour)   // 60 days ago
 	recent := now.Add(-1 * 24 * time.Hour) // 1 day ago
 
 	oldID, err := d.CreateRun(ctx, old)
