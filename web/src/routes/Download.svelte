@@ -4,6 +4,7 @@
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
+  import ProgressBar from '../components/ProgressBar.svelte';
 
   let raw = $state('');
   let downloadTargetDir = $state('');
@@ -43,9 +44,11 @@
     detail,
   });
   let downloadStatus = $state<DownloadStatus>(idleStatus());
+  let downloadTotalBytes = $state(0);
   let downloadProgress = $state<{
     processed: number;
     total: number;
+    total_bytes: number;
     files_written: number;
     bytes_written: number;
     path?: string;
@@ -75,13 +78,15 @@
     }
     const sub = subscribeEvents((type, data) => {
       if (type === 'restore_download_start') {
-        const d = data as { total: number };
-        downloadProgress = { processed: 0, total: d.total, files_written: 0, bytes_written: 0, errors: 0 };
+        const d = data as { total: number; total_bytes: number };
+        downloadTotalBytes = d.total_bytes ?? 0;
+        downloadProgress = { processed: 0, total: d.total, total_bytes: downloadTotalBytes, files_written: 0, bytes_written: 0, errors: 0 };
         downloadStatus = runningStatus(`0 / ${d.total.toLocaleString()} files checked.`);
       } else if (type === 'restore_download_progress') {
         const d = data as {
           processed: number;
           total: number;
+          total_bytes: number;
           files_written: number;
           bytes_written: number;
           path?: string;
@@ -91,6 +96,7 @@
         downloadProgress = {
           processed: d.processed,
           total: d.total,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
           files_written: d.files_written,
           bytes_written: d.bytes_written,
           path: d.path,
@@ -105,13 +111,15 @@
         if (d.error) parts.push(d.error);
         downloadStatus = runningStatus(parts.join(' · '));
       } else if (type === 'restore_download_complete') {
-        const d = data as { files_written: number; bytes_written: number; errors: number };
+        const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number };
+        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
         downloadProgress = null;
         downloadStatus = d.errors > 0
           ? warnStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)} · ${d.errors.toLocaleString()} error(s).`)
           : okStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)}.`);
       } else if (type === 'restore_download_failed') {
-        const d = data as { files_written: number; bytes_written: number; errors: number; error?: string };
+        const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number; error?: string };
+        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
         downloadProgress = null;
         const detail = [
           `${d.files_written.toLocaleString()} written`,
@@ -146,11 +154,13 @@
     }
     downloadBusy = true;
     downloadResult = null;
+    downloadTotalBytes = 0;
     downloadStatus = runningStatus('Submitting download request…');
     try {
       const r = await api.restoreDownload(p, downloadTargetDir.trim());
       if (aborted) return;
       downloadResult = r;
+      downloadTotalBytes = r.total_bytes ?? downloadTotalBytes;
       const skipped = r.skipped?.length ?? 0;
       const errorCount = r.errors?.length ?? 0;
       const parts = [
@@ -299,6 +309,15 @@
       {#if downloadProgress.path} · {downloadProgress.path}{/if}
       {#if downloadProgress.error} · {downloadProgress.error}{/if}
     </p>
+    {#if downloadProgress.total_bytes > 0}
+      <div style="margin-top: 0.6rem">
+        <ProgressBar
+          label="Size downloaded"
+          value={downloadProgress.bytes_written}
+          max={downloadProgress.total_bytes}
+        />
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -323,6 +342,15 @@
         <div class="big">{downloadResult.errors?.length ?? 0}</div>
       </div>
     </div>
+    {#if downloadTotalBytes > 0}
+      <div style="margin-top: 0.75rem">
+        <ProgressBar
+          label="Size downloaded"
+          value={downloadResult.bytes_written}
+          max={downloadTotalBytes}
+        />
+      </div>
+    {/if}
     {#if downloadResult.skipped?.length}
       <details style="margin-top: 0.75rem">
         <summary>{downloadResult.skipped.length} skipped path(s)</summary>

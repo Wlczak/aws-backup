@@ -317,6 +317,7 @@
           status: 'running',
           phase: 'scan',
           total: payload.total ?? 0,
+          total_bytes: payload.total_bytes ?? 0,
           scanned: 0,
           present: 0,
           missing: 0,
@@ -338,6 +339,7 @@
           present: payload.present ?? downloadCurrent?.present ?? 0,
           missing: payload.missing ?? downloadCurrent?.missing ?? 0,
           total: payload.total ?? downloadCurrent?.total ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
         });
       }
       if (type === 'download_mirror_scan_complete') {
@@ -348,6 +350,7 @@
           present: payload.present ?? downloadCurrent?.present ?? 0,
           missing: payload.missing ?? downloadCurrent?.missing ?? 0,
           total: payload.total ?? downloadCurrent?.total ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
         });
       }
       if (type === 'download_mirror_start') {
@@ -355,6 +358,7 @@
           status: 'running',
           phase: 'download',
           total: payload.total ?? downloadCurrent?.total ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
           processed: 0,
           files_written: 0,
           bytes_written: 0,
@@ -366,6 +370,7 @@
           status: 'running',
           phase: 'download',
           total: payload.total ?? downloadCurrent?.total ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
           processed: payload.processed ?? downloadCurrent?.processed ?? 0,
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
@@ -377,6 +382,7 @@
           status: 'completed',
           phase: 'complete',
           total: payload.total ?? downloadCurrent?.total ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
           processed: payload.processed ?? downloadCurrent?.processed ?? 0,
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
@@ -392,6 +398,7 @@
           phase: 'failed',
           files_written: downloadCurrent?.files_written ?? 0,
           bytes_written: downloadCurrent?.bytes_written ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
           errors: downloadCurrent?.errors ?? 0,
           error_message: payload.error ?? 'full download failed during scan',
         });
@@ -405,6 +412,7 @@
           phase: 'failed',
           files_written: payload.files_written ?? downloadCurrent?.files_written ?? 0,
           bytes_written: payload.bytes_written ?? downloadCurrent?.bytes_written ?? 0,
+          total_bytes: payload.total_bytes ?? downloadCurrent?.total_bytes ?? 0,
           errors: payload.errors ?? downloadCurrent?.errors ?? 0,
           error_message: payload.error ?? 'full download failed',
         });
@@ -461,6 +469,7 @@
       phase: 'scan',
       download_dir: '',
       total: 0,
+      total_bytes: 0,
       scanned: 0,
       present: 0,
       missing: 0,
@@ -509,6 +518,14 @@
       return Math.min(100, Math.round((job.processed / job.total) * 100));
     }
     return job.status === 'completed' ? 100 : 0;
+  }
+
+  function downloadBytesValue(job: DownloadJobSummary | null | undefined): number {
+    return job?.bytes_written ?? 0;
+  }
+
+  function downloadBytesMax(job: DownloadJobSummary | null | undefined): number {
+    return job?.total_bytes ?? 0;
   }
 
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
@@ -836,6 +853,18 @@
         · {downloadCurrent.files_written.toLocaleString()} written · {bytes(downloadCurrent.bytes_written)}
         {#if downloadCurrent.errors > 0} · {downloadCurrent.errors.toLocaleString()} error(s){/if}
       </div>
+    {/if}
+    {#if downloadCurrent || downloadLast}
+      {@const job = downloadCurrent ?? downloadLast}
+      {#if job && job.total_bytes > 0}
+        <div style="margin-top: 0.6rem">
+          <ProgressBar
+            label="Size downloaded"
+            value={downloadBytesValue(job)}
+            max={downloadBytesMax(job)}
+          />
+        </div>
+      {/if}
     {/if}
     <div class="run-actions">
       <button

@@ -59,6 +59,7 @@ type RestoreOptions struct {
 type RestoreStats struct {
 	FilesWritten int64
 	BytesWritten int64
+	TotalBytes   int64
 	Skipped      []string
 	Errors       []string
 }
@@ -366,6 +367,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 	if emit == nil {
 		emit = DiscardEvents
 	}
+	totalBytes := int64(0)
 	started := false
 	defer func() {
 		if !started {
@@ -375,6 +377,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 		data := map[string]any{
 			"files_written": stats.FilesWritten,
 			"bytes_written": stats.BytesWritten,
+			"total_bytes":   totalBytes,
 			"errors":        len(stats.Errors),
 		}
 		if err != nil {
@@ -446,6 +449,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 			}
 			byZip[f.ZipName] = append(byZip[f.ZipName], f)
 			total++
+			totalBytes += f.Size
 		}
 		if len(rows) < pageSize {
 			break
@@ -463,7 +467,8 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 		Type: EventRestoreDownloadStart,
 		At:   time.Now(),
 		Data: map[string]any{
-			"total": total,
+			"total":       total,
+			"total_bytes": totalBytes,
 		},
 	})
 	started = true
@@ -491,6 +496,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 						"path":          f.Path,
 						"processed":     processed,
 						"total":         total,
+						"total_bytes":   totalBytes,
 						"files_written": stats.FilesWritten,
 						"bytes_written": stats.BytesWritten,
 						"errors":        len(stats.Errors),
@@ -508,6 +514,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 					"path":          f.Path,
 					"processed":     processed,
 					"total":         total,
+					"total_bytes":   totalBytes,
 					"files_written": stats.FilesWritten,
 					"bytes_written": stats.BytesWritten,
 					"errors":        len(stats.Errors),
@@ -529,13 +536,14 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		written, bytes, errs, nextProcessed := restoreZipMembers(ctx, opts, cleanTarget, z, byZip[z], processed, total, emit)
+		written, bytes, errs, nextProcessed := restoreZipMembers(ctx, opts, cleanTarget, z, byZip[z], processed, total, totalBytes, emit)
 		processed = nextProcessed
 		stats.FilesWritten += written
 		stats.BytesWritten += bytes
 		stats.Errors = append(stats.Errors, errs...)
 	}
 
+	stats.TotalBytes = totalBytes
 	return stats, nil
 }
 
@@ -560,7 +568,7 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 // restoreZipMembers downloads the zip at zipName once and extracts every
 // matching member listed in members. Errors are returned per-member so a
 // corrupt entry doesn't poison the rest of the archive.
-func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File, processed, total int, emit EventEmitter) (written, bytes int64, errs []string, nextProcessed int) {
+func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName string, members []db.File, processed, total int, totalBytes int64, emit EventEmitter) (written, bytes int64, errs []string, nextProcessed int) {
 	key := pathutil.JoinKey(opts.KeyPrefix, zipName)
 	tmp, err := os.CreateTemp(opts.TmpDir, "aws-backup-restore-*.zip")
 	if err != nil {
@@ -582,16 +590,17 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		errs = append(errs, zipName+": close temp zip: "+err.Error())
 		return written, bytes, errs, processed
 	}
-	return extractZipMembers(ctx, target, zipName, tmpPath, members, processed, total, emit, opts.SkipChecksum, nil)
+	return extractZipMembers(ctx, target, zipName, tmpPath, members, processed, total, totalBytes, emit, opts.SkipChecksum, nil)
 }
 
 // extractZipMembers opens a zip file already present on disk and
 // extracts every matching member listed in members. Errors are returned
 // per-member so a corrupt entry doesn't poison the rest of the archive.
-func extractZipMembers(ctx context.Context, target, zipName, zipPath string, members []db.File, processed, total int, emit EventEmitter, skipChecksum bool, onWritten func(db.File) error) (written, bytes int64, errs []string, nextProcessed int) {
+func extractZipMembers(ctx context.Context, target, zipName, zipPath string, members []db.File, processed, total int, totalBytes int64, emit EventEmitter, skipChecksum bool, onWritten func(db.File) error) (written, bytes int64, errs []string, nextProcessed int) {
 	if emit == nil {
 		emit = DiscardEvents
 	}
+	_ = totalBytes
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		errs = append(errs, zipName+": open zip: "+err.Error())

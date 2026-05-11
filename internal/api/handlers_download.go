@@ -20,6 +20,7 @@ type downloadSummary struct {
 	Phase        string     `json:"phase"`
 	DownloadDir  string     `json:"download_dir"`
 	Total        int64      `json:"total"`
+	TotalBytes   int64      `json:"total_bytes"`
 	Scanned      int64      `json:"scanned"`
 	Present      int64      `json:"present"`
 	Missing      int64      `json:"missing"`
@@ -120,6 +121,7 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 				Data: map[string]any{
 					"files_written": stats.FilesWritten,
 					"bytes_written": stats.BytesWritten,
+					"total_bytes":   stats.TotalBytes,
 					"errors":        len(stats.Errors),
 					"error":         err.Error(),
 				},
@@ -130,6 +132,7 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 		}
 		s.downloadMu.Lock()
 		if cur := s.currentDownload; cur != nil && cur.ID == downloadID {
+			cur.TotalBytes = stats.TotalBytes
 			cur.FilesWritten = stats.FilesWritten
 			cur.BytesWritten = stats.BytesWritten
 			cur.Errors = int64(len(stats.Errors))
@@ -167,6 +170,7 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Status = "running"
 		cur.Phase = "scan"
 		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 		cur.Scanned = 0
 		cur.Present = 0
 		cur.Missing = 0
@@ -177,6 +181,7 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Present = intFromAny(ev.Data["present"])
 		cur.Missing = intFromAny(ev.Data["missing"])
 		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 	case engine.EventDownloadMirrorScanComplete:
 		cur.Status = "running"
 		cur.Phase = "download"
@@ -184,10 +189,12 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Present = intFromAny(ev.Data["present"])
 		cur.Missing = intFromAny(ev.Data["missing"])
 		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 	case engine.EventDownloadMirrorStart:
 		cur.Status = "running"
 		cur.Phase = "download"
 		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 		cur.Processed = 0
 		cur.FilesWritten = 0
 		cur.BytesWritten = 0
@@ -197,12 +204,14 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 		cur.Phase = "download"
 		cur.Processed = intFromAny(ev.Data["processed"])
 		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
 	case engine.EventDownloadMirrorComplete:
 		cur.Status = "completed"
 		cur.Phase = "complete"
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
@@ -211,6 +220,7 @@ func (s *Server) applyDownloadEvent(ev engine.Event) {
 	case engine.EventDownloadMirrorFailed:
 		cur.Status = "failed"
 		cur.Phase = "failed"
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])

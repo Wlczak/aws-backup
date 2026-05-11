@@ -37,6 +37,7 @@ type DownloadStats struct {
 	Missing      int64
 	FilesWritten int64
 	BytesWritten int64
+	TotalBytes   int64
 	Skipped      []string
 	Errors       []string
 }
@@ -179,12 +180,22 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 	for _, members := range byZip {
 		downloadTotal += int64(len(members))
 	}
+	downloadBytesTotal := int64(0)
+	for _, f := range standalone {
+		downloadBytesTotal += f.Size
+	}
+	for _, members := range byZip {
+		for _, f := range members {
+			downloadBytesTotal += f.Size
+		}
+	}
 	if emit != nil {
 		emit(Event{
 			Type: EventDownloadMirrorStart,
 			At:   time.Now(),
 			Data: map[string]any{
-				"total": downloadTotal,
+				"total":       downloadTotal,
+				"total_bytes": downloadBytesTotal,
 			},
 		})
 	}
@@ -206,6 +217,7 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 						"path":          f.Path,
 						"processed":     processed,
 						"total":         downloadTotal,
+						"total_bytes":   downloadBytesTotal,
 						"files_written": stats.FilesWritten,
 						"bytes_written": stats.BytesWritten,
 						"errors":        len(stats.Errors),
@@ -228,6 +240,7 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 					"path":          f.Path,
 					"processed":     processed,
 					"total":         downloadTotal,
+					"total_bytes":   downloadBytesTotal,
 					"files_written": stats.FilesWritten,
 					"bytes_written": stats.BytesWritten,
 					"errors":        len(stats.Errors),
@@ -246,7 +259,7 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			return stats, err
 		}
 		members := byZip[key]
-		membersWritten, bytesWritten, errs, nextProcessed := downloadZipMembersMirror(ctx, opts, key, members, processed, downloadTotal, emit)
+		membersWritten, bytesWritten, errs, nextProcessed := downloadZipMembersMirror(ctx, opts, key, members, processed, downloadTotal, downloadBytesTotal, emit)
 		processed = nextProcessed
 		stats.FilesWritten += membersWritten
 		stats.BytesWritten += bytesWritten
@@ -260,10 +273,12 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			Data: map[string]any{
 				"files_written": stats.FilesWritten,
 				"bytes_written": stats.BytesWritten,
+				"total_bytes":   downloadBytesTotal,
 				"errors":        len(stats.Errors),
 			},
 		})
 	}
+	stats.TotalBytes = downloadBytesTotal
 	return stats, nil
 }
 
@@ -309,6 +324,7 @@ func downloadZipMembersMirror(
 	key string,
 	members []db.File,
 	processed, total int64,
+	totalBytes int64,
 	emit EventEmitter,
 ) (written, bytes int64, errs []string, nextProcessed int64) {
 	zipPath := mirrorZipCachePath(opts.TmpDir, key)
@@ -320,7 +336,7 @@ func downloadZipMembersMirror(
 		}
 		return 0, 0, errs, processed
 	}
-	w, b, innerErrs, next := extractZipMembers(ctx, opts.DownloadDir, key, zipPath, members, int(processed), int(total), emit, false, func(f db.File) error {
+	w, b, innerErrs, next := extractZipMembers(ctx, opts.DownloadDir, key, zipPath, members, int(processed), int(total), totalBytes, emit, false, func(f db.File) error {
 		return opts.DB.MarkDownloadMirrorBatch(ctx, []int64{f.ID}, nil, time.Now().UTC())
 	})
 	for _, e := range innerErrs {

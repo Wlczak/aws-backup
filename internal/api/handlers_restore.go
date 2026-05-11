@@ -265,6 +265,7 @@ type restoreDownloadRequest struct {
 type restoreDownloadResponse struct {
 	FilesWritten int64    `json:"files_written"`
 	BytesWritten int64    `json:"bytes_written"`
+	TotalBytes   int64    `json:"total_bytes"`
 	Skipped      []string `json:"skipped,omitempty"`
 	Errors       []string `json:"errors,omitempty"`
 }
@@ -422,6 +423,7 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, restoreDownloadResponse{
 		FilesWritten: stats.FilesWritten,
 		BytesWritten: stats.BytesWritten,
+		TotalBytes:   stats.TotalBytes,
 		Skipped:      stats.Skipped,
 		Errors:       stats.Errors,
 	})

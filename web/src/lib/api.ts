@@ -104,6 +104,7 @@ export interface DownloadJobSummary {
   phase: 'scan' | 'download' | 'complete' | 'failed';
   download_dir: string;
   total: number;
+  total_bytes: number;
   scanned: number;
   present: number;
   missing: number;
@@ -140,6 +141,7 @@ export interface RestoreEstimate {
 export interface RestoreDownloadResponse {
   files_written: number;
   bytes_written: number;
+  total_bytes: number;
   skipped?: string[];
   errors?: string[];
 }
