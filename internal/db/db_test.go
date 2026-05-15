@@ -204,7 +204,7 @@ func TestMarkMissing(t *testing.T) {
 	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	new := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
 
-	// Uploaded, old last_seen_at — should be marked missing.
+	// Uploaded, old last_seen_at — should become cloud_only.
 	r, _ := d.UpsertFile(ctx, "a.txt", 1, old, old)
 	_ = d.MarkUploaded(ctx, r.ID, "m", "k", old)
 
@@ -216,7 +216,7 @@ func TestMarkMissing(t *testing.T) {
 	// rows don't sit in the queue forever.
 	_, _ = d.UpsertFile(ctx, "c.txt", 1, old, old)
 
-	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should be marked missing.
+	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should become cloud_only.
 	r3, _ := d.UpsertFile(ctx, "d.txt", 1, old, old)
 	_ = d.SetZipName(ctx, []int64{r3.ID}, "z.zip")
 
@@ -241,8 +241,8 @@ func TestMarkMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if affected != 4 {
-		t.Errorf("want 4 affected, got %d", affected)
+	if affected != 2 {
+		t.Errorf("want 2 missing rows affected, got %d", affected)
 	}
 
 	files, _, _ := d.ListFiles(ctx, FilesFilter{All: true})
@@ -250,8 +250,8 @@ func TestMarkMissing(t *testing.T) {
 	for _, f := range files {
 		got[f.Path] = f.Status
 	}
-	if got["a.txt"] != StatusMissing {
-		t.Errorf("a.txt want missing, got %q", got["a.txt"])
+	if got["a.txt"] != StatusCloudOnly {
+		t.Errorf("a.txt want cloud_only, got %q", got["a.txt"])
 	}
 	if got["b.txt"] != StatusUploaded {
 		t.Errorf("b.txt want uploaded, got %q", got["b.txt"])
@@ -259,8 +259,8 @@ func TestMarkMissing(t *testing.T) {
 	if got["c.txt"] != StatusMissing {
 		t.Errorf("c.txt want missing, got %q", got["c.txt"])
 	}
-	if got["d.txt"] != StatusMissing {
-		t.Errorf("d.txt want missing, got %q", got["d.txt"])
+	if got["d.txt"] != StatusCloudOnly {
+		t.Errorf("d.txt want cloud_only, got %q", got["d.txt"])
 	}
 	if got["e.txt"] != StatusMissing {
 		t.Errorf("e.txt want missing, got %q", got["e.txt"])

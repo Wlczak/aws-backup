@@ -66,7 +66,7 @@ aws-backup/
 │   │   ├── factory.go           # NewSource / FromConfig — picks SMB or LocalDir
 │   │   ├── localdir.go          # LocalDir source (filepath.Walk)
 │   │   ├── smb.go               # SMB source (go-smb2, transparent reconnect)
-│   │   └── scan.go              # Scan: upsert in batches, mark missing, emit progress
+│   │   └── scan.go              # Scan: upsert in batches, reclassify disappearance by prior state, emit progress
 │   └── storage/
 │       ├── storage.go           # Storage interface + types (PutResult, HeadResult)
 │       ├── s3.go                # AWS SDK v2 backend, multipart, ChecksumSHA256, IfNoneMatch

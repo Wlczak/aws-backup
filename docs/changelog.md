@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
 | — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |
 | — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
 | — | — | Full-download dashboard job now carries an object-count + GET/egress cost estimate for the missing set, so the dashboard can show the expected download cost once the mirror scan has determined what is actually missing |
