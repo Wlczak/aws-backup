@@ -166,3 +166,132 @@ func TestParseFlexTime(t *testing.T) {
 		}
 	}
 }
+
+// TestListRestoreScanKeys keeps the full restore scan keyed to actual
+// uploaded objects: standalone uploads, zip archives, and cloud_only
+// rows are included, while pending rows are skipped even if they still
+// carry an s3_key.
+func TestListRestoreScanKeys(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC()
+
+	standalone, err := d.UpsertFile(ctx, "solo.txt", 10, now, now)
+	if err != nil {
+		t.Fatalf("seed standalone: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, standalone.ID, "md5", "backups/solo.txt", now); err != nil {
+		t.Fatalf("mark standalone uploaded: %v", err)
+	}
+
+	zipped, err := d.UpsertFile(ctx, "docs/spec.pdf", 20, now, now)
+	if err != nil {
+		t.Fatalf("seed zipped: %v", err)
+	}
+	if err := d.SetZipName(ctx, []int64{zipped.ID}, "docs/docs_1.zip"); err != nil {
+		t.Fatalf("set zip name: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, zipped.ID, "md5", "backups/docs/docs_1.zip", now); err != nil {
+		t.Fatalf("mark zipped uploaded: %v", err)
+	}
+
+	cloudOnly, err := d.UpsertFile(ctx, "recovered.txt", 40, now, now)
+	if err != nil {
+		t.Fatalf("seed cloud only: %v", err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("id = ?", cloudOnly.ID).Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/recovered.txt",
+		"uploaded_at": now,
+	}).Error; err != nil {
+		t.Fatalf("plant cloud-only row: %v", err)
+	}
+
+	pending, err := d.UpsertFile(ctx, "stale.txt", 30, now, now)
+	if err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("id = ?", pending.ID).Updates(map[string]any{
+		"status":   StatusPending,
+		"s3_key":   "backups/stale.zip",
+		"zip_name": "",
+	}).Error; err != nil {
+		t.Fatalf("plant stale pending row: %v", err)
+	}
+
+	keys, err := d.ListRestoreScanKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListRestoreScanKeys: %v", err)
+	}
+	want := []string{"backups/docs/docs_1.zip", "backups/recovered.txt", "backups/solo.txt"}
+	if len(keys) != len(want) {
+		t.Fatalf("keys=%v want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("keys=%v want %v", keys, want)
+		}
+	}
+}
+
+// TestMarkZipUploadedBatchCreatesZipRow verifies the new archive table and
+// per-file checksum split: the zip row carries archive metadata while each
+// member row keeps its own MD5 and points at the zip record.
+func TestMarkZipUploadedBatchCreatesZipRow(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	a, err := d.UpsertFile(ctx, "photos/a.jpg", 10, now, now)
+	if err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+	b, err := d.UpsertFile(ctx, "photos/b.jpg", 20, now, now)
+	if err != nil {
+		t.Fatalf("seed b: %v", err)
+	}
+
+	zipTime := now.Add(2 * time.Minute)
+	if err := d.MarkZipUploadedBatch(ctx, Zip{
+		ZipName:    "photos/photos_1.zip",
+		Size:       1234,
+		MD5:        "archive-md5",
+		SHA256:     "archive-sha",
+		S3Key:      "backups/photos/photos_1.zip",
+		UploadedAt: &zipTime,
+		LastSeenAt: zipTime,
+	}, []ZipMemberUpload{
+		{ID: a.ID, MD5: "md5-a"},
+		{ID: b.ID, MD5: "md5-b"},
+	}); err != nil {
+		t.Fatalf("MarkZipUploadedBatch: %v", err)
+	}
+
+	var zipRow Zip
+	if err := d.g.WithContext(ctx).Where("zip_name = ?", "photos/photos_1.zip").First(&zipRow).Error; err != nil {
+		t.Fatalf("load zip row: %v", err)
+	}
+	if zipRow.MD5 != "archive-md5" || zipRow.SHA256 != "archive-sha" || zipRow.S3Key != "backups/photos/photos_1.zip" {
+		t.Fatalf("zip row = %+v", zipRow)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{Search: "photos/", All: true})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("want 2 files, got %d", len(files))
+	}
+	for _, f := range files {
+		if f.ZipID == nil {
+			t.Fatalf("%s missing zip_id", f.Path)
+		}
+		if f.ZipName != "photos/photos_1.zip" {
+			t.Fatalf("%s zip_name=%q", f.Path, f.ZipName)
+		}
+		wantMD5 := map[string]string{"photos/a.jpg": "md5-a", "photos/b.jpg": "md5-b"}[f.Path]
+		if f.MD5 != wantMD5 {
+			t.Fatalf("%s md5=%q want %q", f.Path, f.MD5, wantMD5)
+		}
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 
 func TestSSEDeliversEvents(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus, slog.Default(), nil))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -53,7 +52,7 @@ func TestSSEDeliversEvents(t *testing.T) {
 
 func TestSSECleansUpOnDisconnect(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := httptest.NewServer(sseHandler(bus, slog.Default(), nil))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -116,7 +115,7 @@ func TestSSEReplayOnConnect(t *testing.T) {
 		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan complete"}},
 	}
 	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, time.Time{} }
-	srv := httptest.NewServer(sseHandler(bus, slog.Default(), replay))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), replay))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL)
@@ -196,7 +195,7 @@ func TestSSEReplayDedupesRunLogOverlap(t *testing.T) {
 			Data: map[string]any{"level": "info", "message": "replayed"}},
 	}
 	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, cutoff }
-	srv := httptest.NewServer(sseHandler(bus, slog.Default(), replay))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), replay))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL)
@@ -281,7 +280,7 @@ func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	srv := httptest.NewServer(sseHandler(bus, log, nil))
+	srv := newInProcServer(sseHandler(bus, log, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -289,6 +288,11 @@ func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	streamDone := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, resp.Body)
+		streamDone <- err
+	}()
 
 	waitFor(t, func() bool { return bus.SubscriberCount() == 1 }, 500*time.Millisecond)
 
@@ -298,6 +302,12 @@ func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
 		RunID: 7,
 		Data:  map[string]any{"bad": make(chan int)},
 	})
+
+	select {
+	case <-streamDone:
+	case <-time.After(time.Second):
+		t.Fatal("stream did not close after marshal error")
+	}
 
 	// The handler should close the stream after the marshal error.
 	waitFor(t, func() bool { return bus.SubscriberCount() == 0 }, time.Second)

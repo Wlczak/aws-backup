@@ -1,7 +1,7 @@
 // Cross-page selection state: the user multi-selects rows on the Files
-// page, then the Restore page reads the saved paths to pre-fill its
-// textarea. A tiny Svelte store keeps the data accessible without
-// prop-drilling or router plumbing.
+// pages, then the Restore / Download pages read the saved paths to
+// pre-fill their textareas. A tiny Svelte store keeps the data
+// accessible without prop-drilling or router plumbing.
 import { writable, get } from 'svelte/store';
 
 export interface SelectedFile {
@@ -34,4 +34,3 @@ export function paths(): string[] {
 export function ids(): number[] {
   return get(selection).map((f) => f.id);
 }
-

@@ -5,10 +5,11 @@
 //
 // Two entry points exist:
 //
-//   - RunFull walks every individually-uploaded s3_key in the index and
-//     issues a HEAD per object. This is the authoritative reconciliation
-//     used to recover from missed SQS notifications or to seed restore
-//     state when the SQS subscription was added late.
+//   - RunFull walks every restorable s3_key in the index (standalone
+//     uploads, zip archives, and cloud_only rows) and issues a HEAD per
+//     object. This is the authoritative reconciliation used to recover
+//     from missed SQS notifications or to seed restore state when the
+//     SQS subscription was added late.
 //
 //   - RunPending walks only files whose local restore_status is
 //     "in_progress". Cheap; safe to run after every SQS drain to catch
@@ -55,7 +56,7 @@ const progressEmitEvery = 50
 
 // DB is the slice of *db.DB the scanner needs.
 type DB interface {
-	ListIndividualS3Keys(ctx context.Context) ([]string, error)
+	ListRestoreScanKeys(ctx context.Context) ([]string, error)
 	ListFilesByRestoreStatus(ctx context.Context, status string) ([]string, error)
 	MarkRestoreInProgress(ctx context.Context, s3Key string) (int64, error)
 	MarkRestored(ctx context.Context, s3Key string, expiresAt time.Time) (int64, error)
@@ -108,10 +109,10 @@ func New(db DB, storageFn func() storage.Storage, bus *events.Bus, logger *slog.
 // should surface this as 409 to the UI.
 var ErrBusy = errors.New("scanner: another restore scan is already running")
 
-// RunFull HEADs every individually-uploaded file and updates restore
+// RunFull HEADs every uploaded or zipped object key and updates restore
 // status accordingly.
 func (s *Scanner) RunFull(ctx context.Context) (Result, error) {
-	keys, err := s.db.ListIndividualS3Keys(ctx)
+	keys, err := s.db.ListRestoreScanKeys(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("list keys: %w", err)
 	}

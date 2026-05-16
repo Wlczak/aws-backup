@@ -3,11 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/Wlczak/aws-backup/internal/config"
+	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
@@ -89,5 +94,103 @@ func TestRefreshDBFromS3_LocalNewerKept(t *testing.T) {
 	got, _ := os.ReadFile(dst)
 	if string(got) != "local-new" {
 		t.Errorf("got %q, expected local to win", got)
+	}
+}
+
+func TestSyncDBToS3UploadsReadableSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "index.db")
+
+	d, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	now := time.Now().UTC()
+	r, err := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r.ID, "m1", "k1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	a := &appState{
+		db:     d,
+		dbPath: dbPath,
+		store:  store,
+		cfg:    config.Config{},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := a.syncDBToS3(ctx, 7, "complete"); err != nil {
+		t.Fatalf("syncDBToS3: %v", err)
+	}
+
+	raw, ok := store.GetBytes("index.db")
+	if !ok {
+		t.Fatal("missing uploaded index.db")
+	}
+	snapPath := filepath.Join(t.TempDir(), "uploaded.db")
+	if err := os.WriteFile(snapPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := db.Open(ctx, snapPath)
+	if err != nil {
+		t.Fatalf("open uploaded snapshot: %v", err)
+	}
+	t.Cleanup(func() { _ = snap.Close() })
+	files, total, err := snap.ListFiles(ctx, db.FilesFilter{})
+	if err != nil {
+		t.Fatalf("list uploaded snapshot: %v", err)
+	}
+	if total != 1 || len(files) != 1 || files[0].Path != "a.txt" {
+		t.Fatalf("uploaded snapshot rows = %d/%d %+v", len(files), total, files)
+	}
+}
+
+func TestEnsureConfigFileCreatesDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	created, err := ensureConfigFile(path)
+	if err != nil {
+		t.Fatalf("ensureConfigFile: %v", err)
+	}
+	if !created {
+		t.Fatal("expected config file to be created")
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load created config: %v", err)
+	}
+	want := config.Default()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("created config mismatch:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+func TestEnsureConfigFileDoesNotOverwriteExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("sentinel"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	created, err := ensureConfigFile(path)
+	if err != nil {
+		t.Fatalf("ensureConfigFile: %v", err)
+	}
+	if created {
+		t.Fatal("expected existing config to be preserved")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved config: %v", err)
+	}
+	if string(got) != "sentinel" {
+		t.Fatalf("config was overwritten: %q", got)
 	}
 }

@@ -90,6 +90,113 @@ func TestUpsertFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpsertFileBatchPromotesCloudOnlyAndPreservesUploaded(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := d.UpsertFile(ctx, "cloud.txt", 10, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.g.WithContext(ctx).Model(&File{}).Where("path = ?", "cloud.txt").Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/cloud.txt",
+		"uploaded_at": now,
+	}).Error; err != nil {
+		t.Fatalf("plant cloud_only row: %v", err)
+	}
+	uploadedRes, err := d.UpsertFile(ctx, "uploaded.txt", 10, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, uploadedRes.ID, "md5", "backups/uploaded.txt", now); err != nil {
+		t.Fatalf("plant uploaded row: %v", err)
+	}
+
+	seen := now.Add(10 * time.Minute)
+	res, err := d.UpsertFileBatch(ctx, []BatchEntry{
+		{Path: "cloud.txt", Size: 10, ModTime: now},
+		{Path: "uploaded.txt", Size: 10, ModTime: now},
+	}, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 || res[0].Created || res[0].Changed || res[1].Created || res[1].Changed {
+		t.Fatalf("unexpected upsert result: %+v", res)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{Search: "cloud.txt", All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("want 1 file, got %d", len(files))
+	}
+	if files[0].Status != StatusUploaded {
+		t.Fatalf("cloud_only row should normalize to uploaded, got %q", files[0].Status)
+	}
+	if files[0].LastSeenAt != seen {
+		t.Fatalf("last_seen_at = %v, want %v", files[0].LastSeenAt, seen)
+	}
+
+	uploadedFiles, _, err := d.ListFiles(ctx, FilesFilter{Search: "uploaded.txt", All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploadedFiles) != 1 {
+		t.Fatalf("want 1 uploaded file, got %d", len(uploadedFiles))
+	}
+	if uploadedFiles[0].Status != StatusUploaded {
+		t.Fatalf("uploaded row should stay uploaded, got %q", uploadedFiles[0].Status)
+	}
+}
+
+func TestSnapshotToProducesStableCopy(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC()
+	r1, err := d.UpsertFile(ctx, "a.txt", 1, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r1.ID, "m1", "k1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	snapPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := d.SnapshotTo(ctx, snapPath); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+
+	// Mutate the live DB after the snapshot so we can prove the copy is
+	// a stable point-in-time image, not a handle to the live file.
+	r2, err := d.UpsertFile(ctx, "b.txt", 2, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, r2.ID, "m2", "k2", now); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := Open(ctx, snapPath)
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	t.Cleanup(func() { _ = snap.Close() })
+
+	files, total, err := snap.ListFiles(ctx, FilesFilter{})
+	if err != nil {
+		t.Fatalf("ListFiles snapshot: %v", err)
+	}
+	if total != 1 || len(files) != 1 {
+		t.Fatalf("snapshot row count = %d/%d, want 1/1", len(files), total)
+	}
+	if files[0].Path != "a.txt" || files[0].Status != StatusUploaded {
+		t.Fatalf("snapshot row = %+v, want uploaded a.txt", files[0])
+	}
+}
+
 func TestMarkMissing(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -97,7 +204,7 @@ func TestMarkMissing(t *testing.T) {
 	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	new := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
 
-	// Uploaded, old last_seen_at — should be marked missing.
+	// Uploaded, old last_seen_at — should become cloud_only.
 	r, _ := d.UpsertFile(ctx, "a.txt", 1, old, old)
 	_ = d.MarkUploaded(ctx, r.ID, "m", "k", old)
 
@@ -109,7 +216,7 @@ func TestMarkMissing(t *testing.T) {
 	// rows don't sit in the queue forever.
 	_, _ = d.UpsertFile(ctx, "c.txt", 1, old, old)
 
-	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should be marked missing.
+	// Zipped (SetZipName succeeded, MarkUploadedBatch not yet), old — should become cloud_only.
 	r3, _ := d.UpsertFile(ctx, "d.txt", 1, old, old)
 	_ = d.SetZipName(ctx, []int64{r3.ID}, "z.zip")
 
@@ -121,12 +228,21 @@ func TestMarkMissing(t *testing.T) {
 	r5, _ := d.UpsertFile(ctx, "f.txt", 1, old, new)
 	_ = d.MarkFailed(ctx, r5.ID)
 
+	// Cloud-only, old — should stay recoverable from S3 and not be
+	// collapsed back to missing by the source-side scan.
+	r6, _ := d.UpsertFile(ctx, "g.txt", 1, old, old)
+	_ = d.g.WithContext(ctx).Model(&File{}).Where("id = ?", r6.ID).Updates(map[string]any{
+		"status":      StatusCloudOnly,
+		"s3_key":      "backups/g.txt",
+		"uploaded_at": old,
+	}).Error
+
 	affected, err := d.MarkMissing(ctx, new)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if affected != 4 {
-		t.Errorf("want 4 affected, got %d", affected)
+	if affected != 2 {
+		t.Errorf("want 2 missing rows affected, got %d", affected)
 	}
 
 	files, _, _ := d.ListFiles(ctx, FilesFilter{All: true})
@@ -134,8 +250,8 @@ func TestMarkMissing(t *testing.T) {
 	for _, f := range files {
 		got[f.Path] = f.Status
 	}
-	if got["a.txt"] != StatusMissing {
-		t.Errorf("a.txt want missing, got %q", got["a.txt"])
+	if got["a.txt"] != StatusCloudOnly {
+		t.Errorf("a.txt want cloud_only, got %q", got["a.txt"])
 	}
 	if got["b.txt"] != StatusUploaded {
 		t.Errorf("b.txt want uploaded, got %q", got["b.txt"])
@@ -143,14 +259,17 @@ func TestMarkMissing(t *testing.T) {
 	if got["c.txt"] != StatusMissing {
 		t.Errorf("c.txt want missing, got %q", got["c.txt"])
 	}
-	if got["d.txt"] != StatusMissing {
-		t.Errorf("d.txt want missing, got %q", got["d.txt"])
+	if got["d.txt"] != StatusCloudOnly {
+		t.Errorf("d.txt want cloud_only, got %q", got["d.txt"])
 	}
 	if got["e.txt"] != StatusMissing {
 		t.Errorf("e.txt want missing, got %q", got["e.txt"])
 	}
 	if got["f.txt"] != StatusFailed {
 		t.Errorf("f.txt want failed, got %q", got["f.txt"])
+	}
+	if got["g.txt"] != StatusCloudOnly {
+		t.Errorf("g.txt want cloud_only, got %q", got["g.txt"])
 	}
 }
 
@@ -279,6 +398,56 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestDownloadMirrorBatchAndStats(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	keep, err := d.UpsertFile(ctx, "keep.txt", 10, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := d.UpsertFile(ctx, "missing.txt", 20, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkedAt := now.Add(time.Minute)
+	if err := d.MarkDownloadMirrorBatch(ctx, []int64{keep.ID}, []int64{missing.ID}, checkedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		switch f.Path {
+		case "keep.txt":
+			if !f.DownloadPresent || f.DownloadCheckedAt == nil || !f.DownloadCheckedAt.Equal(checkedAt) {
+				t.Fatalf("keep row not marked present: %+v", f)
+			}
+		case "missing.txt":
+			if f.DownloadPresent || f.DownloadCheckedAt == nil || !f.DownloadCheckedAt.Equal(checkedAt) {
+				t.Fatalf("missing row not marked missing: %+v", f)
+			}
+		default:
+			t.Fatalf("unexpected row %q", f.Path)
+		}
+	}
+
+	stats, err := d.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.ByDownloadPresent["present"]; got != 1 {
+		t.Fatalf("present count = %d, want 1", got)
+	}
+	if got := stats.ByDownloadPresent["missing"]; got != 1 {
+		t.Fatalf("missing count = %d, want 1", got)
+	}
+}
+
 func TestRunLifecycle(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -330,6 +499,47 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	if total != 1 || len(runs) != 1 {
 		t.Errorf("want 1/1 runs, got %d/%d", len(runs), total)
+	}
+}
+
+func TestDeleteRunLogs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	started := time.Now().UTC().Truncate(time.Second)
+	id1, err := d.CreateRun(ctx, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := d.CreateRun(ctx, started.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id1, LogInfo, "hello", started); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id2, LogError, "boom", started.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := d.DeleteRunLogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted=%d want 2", deleted)
+	}
+	if _, total, err := d.ListLogs(ctx, id1, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run1 logs = %d err=%v", total, err)
+	}
+	if _, total, err := d.ListLogs(ctx, id2, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run2 logs = %d err=%v", total, err)
+	}
+	if _, err := d.GetRun(ctx, id1); err != nil {
+		t.Fatalf("run1 missing after delete: %v", err)
+	}
+	if _, err := d.GetRun(ctx, id2); err != nil {
+		t.Fatalf("run2 missing after delete: %v", err)
 	}
 }
 
@@ -414,7 +624,7 @@ func TestTrimRunLogsByAge(t *testing.T) {
 	d := openTestDB(t)
 
 	now := time.Now().UTC().Truncate(time.Second)
-	old := now.Add(-60 * 24 * time.Hour)  // 60 days ago
+	old := now.Add(-60 * 24 * time.Hour)   // 60 days ago
 	recent := now.Add(-1 * 24 * time.Hour) // 1 day ago
 
 	oldID, err := d.CreateRun(ctx, old)

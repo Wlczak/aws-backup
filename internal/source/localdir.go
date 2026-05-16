@@ -50,8 +50,9 @@ func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 			// A read error on the walk root itself (e.g. NFS dropped, root
 			// permissions changed after NewLocalDir) must abort the walk:
 			// swallowing it returns nil with zero entries, after which a
-			// full Scan would MarkMissing every previously-uploaded row
-			// from a transient I/O blip. (#253)
+			// full Scan would reclassify every previously-uploaded row as
+			// cloud_only and every pending/failed row as missing from a
+			// transient I/O blip. (#253)
 			if path == l.root {
 				return fmt.Errorf("walk root %s unreadable: %w", l.root, err)
 			}

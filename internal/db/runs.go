@@ -209,6 +209,14 @@ func (db *DB) TrimRunLogsByAge(ctx context.Context, cutoff time.Time) (int64, er
 	return res.RowsAffected, res.Error
 }
 
+// DeleteRunLogs removes every row from run_logs while leaving runs intact.
+// Used by the Logs page's "clear all" action. Returns the number of rows
+// deleted.
+func (db *DB) DeleteRunLogs(ctx context.Context) (int64, error) {
+	res := db.g.WithContext(ctx).Exec(`DELETE FROM run_logs`)
+	return res.RowsAffected, res.Error
+}
+
 // ListLogs returns up to limit log lines for a run, ordered by id, with
 // a 1-based page offset. limit <= 0 selects a 500-row default and is
 // capped at ListLogsMaxLimit. Returns the rows + the total count for
@@ -240,4 +248,3 @@ func (db *DB) ListLogs(ctx context.Context, runID int64, page, limit int) ([]Run
 		Find(&logs).Error
 	return logs, total, err
 }
-

@@ -2,7 +2,7 @@
 // so pages + components can import without pulling in Svelte.
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
-export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'missing';
+export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_only' | 'missing';
 export type RestoreStatus = '' | 'in_progress' | 'restored';
 export type RestoreTier = 'bulk' | 'standard';
 
@@ -31,6 +31,7 @@ export interface FileRow {
   mtime: string;
   md5?: string;
   status: FileStatus;
+  zip_id?: number;
   zip_name?: string;
   s3_key?: string;
   uploaded_at?: string;
@@ -81,6 +82,7 @@ export interface RunDetail {
 export interface FileStats {
   by_status: Record<string, number>;
   by_restore_status: Record<string, number>;
+  by_download_present: Record<string, number>;
   restore_soonest_expires_at?: string;
   total_count: number;
   total_size: number;
@@ -89,7 +91,36 @@ export interface FileStats {
 export interface Status {
   current?: Run;
   last?: Run;
+  download_current?: DownloadJobSummary;
+  download_last?: DownloadJobSummary;
   stop_requested?: boolean;
+}
+
+export interface DownloadJobSummary {
+  id: number;
+  started_at: string;
+  finished_at?: string;
+  status: 'running' | 'completed' | 'failed';
+  phase: 'scan' | 'download' | 'complete' | 'failed';
+  download_dir: string;
+  total: number;
+  total_bytes: number;
+  object_count: number;
+  request_fee_usd: number;
+  egress_fee_usd: number;
+  total_fee_usd: number;
+  scanned: number;
+  present: number;
+  missing: number;
+  processed: number;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error_message?: string;
+}
+
+export interface DownloadFullResponse {
+  download_id: number;
 }
 
 export interface RestoreEstimate {
@@ -100,6 +131,7 @@ export interface RestoreEstimate {
   total_bytes: number;
   request_fee_usd: number;
   retrieval_fee_usd: number;
+  storage_fee_usd: number;
   egress_fee_usd: number;
   total_fee_usd: number;
   wait_hours_min: number;
@@ -109,6 +141,46 @@ export interface RestoreEstimate {
   already_restored_count: number;
   already_restored_bytes: number;
   unknown_paths?: string[];
+}
+
+export interface RestoreDownloadResponse {
+  files_written: number;
+  bytes_written: number;
+  total_bytes: number;
+  skipped?: string[];
+  errors?: string[];
+}
+
+export interface RestoreDownloadEstimate {
+  object_count: number;
+  total_bytes: number;
+  restored_count: number;
+  in_progress_count: number;
+  not_restoring_count: number;
+  request_fee_usd: number;
+  egress_fee_usd: number;
+  total_fee_usd: number;
+  unknown_paths?: string[];
+}
+
+export interface SyncResponse {
+  zip_names_in_db: number;
+  individual_keys_in_db: number;
+  keys_in_s3: number;
+  missing_zips: number;
+  missing_individual: number;
+  files_created: number;
+  files_reset: number;
+}
+
+export interface FullSyncResponse extends SyncResponse {
+  cloud_file_count: number;
+  local_file_count: number;
+  zip_indexes_consumed: number;
+  local_missing_count: number;
+  local_missing_from_cloud?: string[];
+  cloud_missing_count: number;
+  cloud_missing_from_local?: string[];
 }
 
 export interface TestResult {
@@ -146,6 +218,7 @@ export interface S3Config {
 export interface BackupConfig {
   chunk_size: number;
   tmp_dir: string;
+  download_dir: string;
   schedule: string;
   zip_threshold: number;
   min_zip_dir_files: number;
@@ -248,6 +321,10 @@ export const api = {
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   stopRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/stop`, { method: 'POST' }),
   continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
+  deleteRunLogs: () =>
+    request<{ affected: number }>('/api/run-logs', {
+      method: 'DELETE',
+    }),
 
   files: (
     opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {},
@@ -312,32 +389,9 @@ export const api = {
   testSource: () => request<TestResult>('/api/smb/test'),
   testStorage: () => request<TestResult>('/api/s3/test'),
 
-  sync: () =>
-    request<{
-      zip_names_in_db: number;
-      individual_keys_in_db: number;
-      keys_in_s3: number;
-      missing_zips: number;
-      missing_individual: number;
-      files_reset: number;
-    }>('/api/sync', { method: 'POST' }),
+  sync: () => request<FullSyncResponse>('/api/sync', { method: 'POST' }),
 
-  syncFull: () =>
-    request<{
-      zip_names_in_db: number;
-      individual_keys_in_db: number;
-      keys_in_s3: number;
-      missing_zips: number;
-      missing_individual: number;
-      files_reset: number;
-      cloud_file_count: number;
-      local_file_count: number;
-      zip_indexes_consumed: number;
-      local_missing_count: number;
-      local_missing_from_cloud?: string[];
-      cloud_missing_count: number;
-      cloud_missing_from_local?: string[];
-    }>('/api/sync/full', { method: 'POST' }),
+  syncFull: () => request<FullSyncResponse>('/api/sync/full', { method: 'POST' }),
 
   deleteCloudPaths: (paths: string[]) =>
     request<{
@@ -350,10 +404,10 @@ export const api = {
       body: JSON.stringify({ paths }),
     }),
 
-  restoreEstimate: (paths: string[], tier: RestoreTier) =>
+  restoreEstimate: (paths: string[], days: number, tier: RestoreTier) =>
     request<RestoreEstimate>('/api/restore/estimate', {
       method: 'POST',
-      body: JSON.stringify({ paths, tier }),
+      body: JSON.stringify({ paths, days, tier }),
     }),
   /**
    * Issue a Glacier restore request for every unique S3 key covering the
@@ -379,6 +433,20 @@ export const api = {
     }>('/api/restore/trigger', {
       method: 'POST',
       body: JSON.stringify({ paths, days, tier }),
+    }),
+  restoreDownload: (paths: string[], targetDir: string, verifyChecksum = true) =>
+    request<RestoreDownloadResponse>('/api/restore/download', {
+      method: 'POST',
+      body: JSON.stringify({ paths, target_dir: targetDir, verify_checksum: verifyChecksum }),
+    }),
+  downloadFull: () =>
+    request<DownloadFullResponse>('/api/download/full', {
+      method: 'POST',
+    }),
+  restoreDownloadEstimate: (paths: string[]) =>
+    request<RestoreDownloadEstimate>('/api/restore/download/estimate', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
     }),
   restoreSyncStatus: () =>
     request<{ processed: number }>('/api/restore/sync-status', {
@@ -450,6 +518,9 @@ export function subscribeEvents(
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
+    'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',
+    'download_mirror_scan_start', 'download_mirror_scan_progress', 'download_mirror_scan_complete', 'download_mirror_scan_failed',
+    'download_mirror_start', 'download_mirror_progress', 'download_mirror_complete', 'download_mirror_failed',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so

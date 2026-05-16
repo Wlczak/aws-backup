@@ -299,6 +299,11 @@
     go('restore');
   }
 
+  function downloadSelected() {
+    if (paths().length === 0) return;
+    go('download');
+  }
+
   async function rescanSelected() {
     const sel = paths();
     if (sel.length === 0) return;
@@ -344,7 +349,8 @@
       <option value="zipped">zipped</option>
       <option value="uploaded">uploaded</option>
       <option value="failed">failed</option>
-      <option value="missing">cloud only</option>
+      <option value="cloud_only">cloud only</option>
+      <option value="missing">missing</option>
     </select>
   </label>
 
@@ -375,13 +381,14 @@
   {/if}
 </div>
 
-{#if $selection.length > 0}
-  <div class="card selectionbar">
-    <span><strong>{$selection.length}</strong> selected</span>
-    <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
-    <button onclick={rescanSelected} disabled={busy} type="button" title="Re-scan selected paths for changes">Rescan</button>
-    <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
-    <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
+  {#if $selection.length > 0}
+    <div class="card selectionbar">
+      <span><strong>{$selection.length}</strong> selected</span>
+      <button onclick={restoreSelected} disabled={busy} type="button">Restore selected</button>
+      <button onclick={downloadSelected} disabled={busy} type="button">Download selected</button>
+      <button onclick={rescanSelected} disabled={busy} type="button" title="Re-scan selected paths for changes">Rescan</button>
+      <button onclick={retrySelected} disabled={busy} type="button">Retry</button>
+      <button onclick={deleteSelected} disabled={busy} type="button" class="danger">Delete</button>
     <button onclick={clear} disabled={busy} type="button">Clear</button>
   </div>
 {/if}
@@ -472,7 +479,7 @@
               >{f.path}</td>
               <td class="mono" onclick={() => (detail = f)}>{bytes(f.size)}</td>
               <td onclick={() => (detail = f)}>{formatDate(f.mtime)}</td>
-              <td onclick={() => (detail = f)}><StatusBadge status={f.status} /></td>
+              <td onclick={() => (detail = f)}><StatusBadge status={f.status} s3Key={f.s3_key} /></td>
               <td onclick={() => (detail = f)}>
                 {#if f.restore_status}
                   <StatusBadge status={restoreLabel(f.restore_status)} />
@@ -509,7 +516,7 @@
 {#if detail}
   <div class="card">
     <div class="row"><span class="label">Path</span><span class="mono">{detail.path}</span></div>
-    <div class="row"><span class="label">Status</span><StatusBadge status={detail.status} /></div>
+    <div class="row"><span class="label">Status</span><StatusBadge status={detail.status} s3Key={detail.s3_key} /></div>
     <div class="row"><span class="label">Size</span><span>{bytes(detail.size)} ({detail.size.toLocaleString()} B)</span></div>
     <div class="row"><span class="label">Modified</span><span>{formatDate(detail.mtime)}</span></div>
     <div class="row"><span class="label">Last seen</span><span>{formatDate(detail.last_seen_at)}</span></div>

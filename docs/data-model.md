@@ -23,18 +23,34 @@ CREATE TABLE files (
     size                INTEGER NOT NULL,
     mtime               DATETIME NOT NULL,
     md5                 TEXT,
-    status              TEXT    NOT NULL DEFAULT 'pending',  -- pending | zipped | uploaded | failed | missing
+    status              TEXT    NOT NULL DEFAULT 'pending',  -- pending | zipped | uploaded | failed | cloud_only | missing
+    zip_id              INTEGER,                             -- nullable link to zips.id when the row belongs to an archive
     zip_name            TEXT,                                -- relative zip path, e.g. "photos/photos_1.zip"
     s3_key              TEXT,                                -- full S3 key
     uploaded_at         DATETIME,
     last_seen_at        DATETIME NOT NULL,
     restore_status      TEXT,                                -- '' | in_progress | restored
-    restore_expires_at  DATETIME                             -- when the Glacier restore copy expires
+    restore_expires_at  DATETIME,                            -- when the Glacier restore copy expires
+    download_present    INTEGER NOT NULL DEFAULT 0,          -- whether the file exists in the dashboard mirror dir
+    download_checked_at DATETIME                             -- last scan timestamp for the mirror dir
 );
 CREATE INDEX idx_files_status              ON files(status);
+CREATE INDEX idx_files_zip_id              ON files(zip_id);
 CREATE INDEX idx_files_zip_name            ON files(zip_name);
 CREATE INDEX idx_files_last_seen_at        ON files(last_seen_at);
 CREATE INDEX idx_files_restore_status      ON files(restore_status);
+CREATE INDEX idx_files_download_present    ON files(download_present);
+
+CREATE TABLE zips (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    zip_name        TEXT    NOT NULL UNIQUE,
+    size            INTEGER NOT NULL DEFAULT 0,
+    md5             TEXT,                                    -- archive checksum
+    sha256          TEXT,
+    s3_key          TEXT,                                    -- full S3 key for the archive object
+    uploaded_at     DATETIME,
+    last_seen_at    DATETIME NOT NULL
+);
 
 CREATE TABLE runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,17 +107,35 @@ CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE z
 
 Either knob set to `0` disables that pass.
 
+The Logs page also exposes a manual clear-all action that truncates `run_logs` directly (`db.DeleteRunLogs` / `DELETE /api/run-logs`). It removes log rows only; the `runs` history remains.
+
 ## File status transitions
 
+State terms used throughout the codebase:
+
+- `pending` - the file exists locally, but no S3 object has been written yet.
+- `uploaded` - the file exists locally and its object exists in S3.
+- `cloud_only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk.
+- `missing` - the row exists in SQLite, but the file is gone locally and there is no recoverable S3 object for it.
+
 ```text
-pending → zipped → uploaded         (zip group)
-pending →          uploaded         (individual file)
-pending →  failed                   (upload error; retryable)
-{pending,zipped,uploaded,failed} → missing   (file gone from source)
+pending → zipped → uploaded                  (zip group)
+pending →          uploaded                  (individual file)
+pending →  failed                            (upload error; retryable)
+{pending,failed} → missing                   (file gone from source before upload)
+{uploaded,zipped} → cloud_only               (file gone from source; S3 copy still recoverable)
+cloud_only → uploaded                        (local source reappears during scan)
+cloud_only → missing                         (authoritative sync proves the S3 object is gone)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
 ```
 
-`missing` rows are kept until the corresponding S3 object is also deleted — the index models the **bucket**, not the source. See `CLAUDE.md`.
+`cloud_only` is a first-class stored status, not just a label derived from `missing + s3_key`.
+`missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
+Source rescans preserve bucket-backed state on unchanged rows. A vanished `uploaded`/`zipped` row becomes `cloud_only`, a vanished `pending`/`failed` row becomes `missing`, and a previously `missing` row that reappears locally returns to `pending`.
+The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It turns `cloud_only` into `missing` only when the S3 object is actually gone.
+Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
+
+`download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
 
 ## Zip naming + sidecar
 

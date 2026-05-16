@@ -31,10 +31,10 @@ type CloudIndex struct {
 }
 
 // LoadCloudIndex walks every object under prefix, downloads the per-zip
-// `.index.txt` sidecars, and combines their entries with the supplied
-// standalone S3 keys into a single path → location map. `prefix` MUST
-// match the engine's KeyPrefix so standalone keys round-trip to their
-// source-relative path.
+// `.index.txt` sidecars, and combines their entries with standalone S3
+// objects into a single path → location map. `prefix` MUST match the
+// engine's KeyPrefix so standalone keys round-trip to their source-relative
+// path.
 func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, standaloneKeys []string) (CloudIndex, error) {
 	idx := CloudIndex{Files: map[string]CloudFile{}}
 	if s == nil {
@@ -76,21 +76,39 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 		idx.ZipCount++
 	}
 
-	for _, key := range standaloneKeys {
-		if _, ok := inS3[key]; !ok {
-			continue
+	addStandalone := func(key string, requirePresent bool) {
+		if !strings.HasPrefix(key, listPrefix) {
+			return
+		}
+		if strings.HasSuffix(key, ZipIndexSuffix) {
+			return
+		}
+		if requirePresent {
+			if _, ok := inS3[key]; !ok {
+				return
+			}
+		}
+		// If a zip's sidecar is present, the zip key is represented through
+		// the indexed member list instead of as a standalone object.
+		if _, ok := inS3[key+ZipIndexSuffix]; ok {
+			return
 		}
 		rel := strings.TrimPrefix(strings.TrimPrefix(key, prefix), "/")
 		if rel == "" {
-			continue
+			return
 		}
-		// A zipped file shouldn't also be a standalone, but if both match
-		// we keep whichever we saw first so counts stay honest.
 		if _, seen := idx.Files[rel]; seen {
-			continue
+			return
 		}
 		idx.Files[rel] = CloudFile{Path: rel, S3Key: key}
 		idx.Standalone++
+	}
+
+	for _, key := range keys {
+		addStandalone(key, false)
+	}
+	for _, key := range standaloneKeys {
+		addStandalone(key, true)
 	}
 
 	return idx, nil

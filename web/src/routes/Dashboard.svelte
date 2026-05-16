@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats } from '../lib/api';
+  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -54,6 +54,12 @@
   };
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
+  const usd = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
   // Cap retained terminal (done/failed) items so a 50k-file run doesn't
   // keep every row in $state for the tab lifetime — itemList re-sorts the
@@ -403,15 +409,7 @@
 
   let syncing = $state(false);
   let syncInfo = $state('');
-  let fullSyncResult = $state<{
-    local_missing_count: number;
-    local_missing_from_cloud?: string[];
-    cloud_missing_count: number;
-    cloud_missing_from_local?: string[];
-    cloud_file_count: number;
-    local_file_count: number;
-    zip_indexes_consumed: number;
-  } | null>(null);
+  let fullSyncResult = $state<FullSyncResponse | null>(null);
 
   let syncingRestore = $state(false);
   let scanningRestore = $state(false);
@@ -493,8 +491,8 @@
 
   async function restoreMissing() {
     if (!fullSyncResult?.cloud_missing_from_local?.length) return;
-    if (!Number.isInteger(restoreDays) || restoreDays < 1 || restoreDays > 30) {
-      toast.error('days must be an integer between 1 and 30');
+    if (!Number.isInteger(restoreDays) || restoreDays < 1 || restoreDays > 180) {
+      toast.error('days must be an integer between 1 and 180');
       return;
     }
     restoring = true; restoreResult = null;
@@ -524,15 +522,19 @@
     syncing = true;
     syncInfo = '';
     fullSyncResult = null;
+    resetFixState();
     try {
       const r = await api.sync();
+      fullSyncResult = r;
       const total = r.missing_zips + r.missing_individual;
-      if (total === 0) {
-        const checked = r.zip_names_in_db + r.individual_keys_in_db;
-        syncInfo = `Index in sync — ${checked} object(s) checked.`;
-      } else {
-        syncInfo = `Sync complete: ${r.missing_zips} zip(s) + ${r.missing_individual} individual file(s) missing from S3, ${r.files_reset} file(s) reset to pending.`;
-      }
+      const parts = [
+        `${r.zip_indexes_consumed} zip index(es) consumed`,
+        `${r.cloud_file_count} cloud file(s) / ${r.local_file_count} local file(s)`,
+      ];
+      if (r.files_created > 0) parts.push(`${r.files_created} cloud file(s) recreated as cloud only`);
+      if (total > 0) parts.push(`${total} S3 object(s) missing from bucket`);
+      if (r.files_reset > 0) parts.push(`${r.files_reset} file(s) reset to pending`);
+      syncInfo = `Sync complete: ${parts.join(' · ')}.`;
       await refresh();
     } catch (e) {
       toast.error(String(e));
@@ -541,28 +543,6 @@
     }
   }
 
-  async function fullSync() {
-    syncing = true;
-    syncInfo = '';
-    fullSyncResult = null;
-    resetFixState();
-    try {
-      const r = await api.syncFull();
-      fullSyncResult = r;
-      const existence = r.missing_zips + r.missing_individual;
-      const parts = [
-        `${r.zip_indexes_consumed} zip index(es) consumed`,
-        `${r.cloud_file_count} cloud file(s) / ${r.local_file_count} local file(s)`,
-      ];
-      if (existence > 0) parts.push(`${existence} S3 object(s) missing`);
-      syncInfo = `Full sync: ${parts.join(' · ')}.`;
-      await refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      syncing = false;
-    }
-  }
 </script>
 
 <h1>Dashboard</h1>
@@ -626,6 +606,9 @@
   <div class="card">
     <div class="label">Index</div>
     {#if stats}
+      {@const restored = stats.by_restore_status?.['restored'] ?? 0}
+      {@const mirrored = stats.by_download_present?.['present'] ?? 0}
+      {@const notMirrored = stats.by_download_present?.['missing'] ?? 0}
       <div class="big">{stats.total_count.toLocaleString()} files</div>
       <div class="muted">{bytes(stats.total_size)} total</div>
       <div class="pills">
@@ -633,23 +616,25 @@
           <span class="pill"><StatusBadge status={k} /> {v.toLocaleString()}</span>
         {/each}
       </div>
+      <div class="muted small" style="margin-top: 0.4rem">
+        {restored.toLocaleString()} restored file(s)
+      </div>
+      <div class="muted small" style="margin-top: 0.2rem">
+        Download mirror: {mirrored.toLocaleString()} present, {notMirrored.toLocaleString()} missing
+      </div>
     {/if}
   </div>
 
   <div class="card">
     <div class="label">S3 sync</div>
     <div class="muted" style="margin-bottom: 0.5rem; font-size: 0.85rem">
-      Quick: existence check by S3 key — missing objects reset to pending.<br />
-      Full: also downloads every zip index and diffs local vs cloud file sets.
+      Download the full bucket file list and every zip index, then compare the
+      result to the rows that are still local on disk.
     </div>
     {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
     <div class="run-actions">
       <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
         {syncing ? 'Syncing…' : 'Sync with S3'}
-      </button>
-      <button onclick={fullSync} type="button" disabled={syncing || !!status?.current}
-              title="Heavier: downloads every .index.txt sidecar and compares file contents">
-        Full sync
       </button>
     </div>
   </div>
@@ -693,7 +678,7 @@
 
 {#if fullSyncResult}
   <div class="card">
-    <div class="label">Full sync result</div>
+    <div class="label">Sync result</div>
     <div class="sync-grid">
 
       <!-- Local files not in cloud -->
@@ -765,7 +750,7 @@
                     type="number"
                     bind:value={restoreDays}
                     min="1"
-                    max="30"
+                    max="180"
                     step="1"
                     class="path-input"
                     style="width: 5rem"
