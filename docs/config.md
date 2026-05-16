@@ -34,7 +34,7 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
   "backup": {
     "chunk_size": 100,                   // batch size for source.Scan upserts
     "tmp_dir": "",                       // empty = OS temp
-    "download_dir": "",                  // local mirror target used by the dashboard full-download job
+    "download_dir": "",                  // local mirror target used by the full-download mirror job
     "schedule": "",                      // empty = manual only; otherwise standard cron
     "zip_threshold": 50,                 // files-per-dir threshold for zipping
     "min_zip_dir_files": 0,              // optional floor on per-zip file count; folds tiny sibling folders into the current zip pool
@@ -60,7 +60,7 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
 
 Successive PUTs during one run compose against the pending config (not the live one) so a redacted-secret echo doesn't blank a credential the operator just queued.
 
-`backup.download_dir` is the persistent local mirror target used by the dashboard's full-download job. It must be an absolute path and is scanned before each mirror sync so the job can skip rows that are already present on disk.
+`backup.download_dir` is the persistent local mirror target used by the full-download mirror job. It must be an absolute path and is scanned before each mirror sync so the job can skip rows that are already present on disk.
 
 ## Default config path
 

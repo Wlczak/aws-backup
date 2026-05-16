@@ -107,32 +107,35 @@ CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE z
 
 Either knob set to `0` disables that pass.
 
+The Logs page also exposes a manual clear-all action that truncates `run_logs` directly (`db.DeleteRunLogs` / `DELETE /api/run-logs`). It removes log rows only; the `runs` history remains.
+
 ## File status transitions
 
 State terms used throughout the codebase:
 
-- `uploaded` - the file exists locally and its object exists in S3.
 - `pending` - the file exists locally, but no S3 object has been written yet.
-- `cloud only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk. The authoritative S3 sync can recreate or refresh this state from S3.
+- `uploaded` - the file exists locally and its object exists in S3.
+- `cloud_only` - the row is stored in SQLite and the object exists in S3, but the file is not currently present on disk.
 - `missing` - the row exists in SQLite, but the file is gone locally and there is no recoverable S3 object for it.
 
 ```text
-pending → zipped → uploaded         (zip group)
-pending →          uploaded         (individual file)
-pending →  failed                   (upload error; retryable)
-{pending,zipped,uploaded,failed} → missing   (file gone from source)
-cloud only → uploaded               (local source reappears during scan)
-cloud only → missing                (S3 object deleted)
+pending → zipped → uploaded                  (zip group)
+pending →          uploaded                  (individual file)
+pending →  failed                            (upload error; retryable)
+{pending,failed} → missing                   (file gone from source before upload)
+{uploaded,zipped} → cloud_only               (file gone from source; S3 copy still recoverable)
+cloud_only → uploaded                        (local source reappears during scan)
+cloud_only → missing                         (authoritative sync proves the S3 object is gone)
 uploaded → restore_status=in_progress → restored   (Glacier restore lifecycle)
 ```
 
-`cloud only` is a first-class stored status, not just a label derived from `missing + s3_key`.
+`cloud_only` is a first-class stored status, not just a label derived from `missing + s3_key`.
 `missing` rows are kept until the corresponding S3 object is also deleted - the index models the **bucket**, not the source. See `CLAUDE.md`.
-`cloud only` rows are recoverable from S3 and are rebuilt or refreshed by the authoritative sync when the local row is missing. The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It does not collapse S3-present rows into `missing`.
-Unchanged source rescans preserve that bucket-backed state. An unchanged `cloud_only` row is promoted to `uploaded` when the local file is seen again.
+Source rescans preserve bucket-backed state on unchanged rows. A vanished `uploaded`/`zipped` row becomes `cloud_only`, a vanished `pending`/`failed` row becomes `missing`, and a previously `missing` row that reappears locally returns to `pending`.
+The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It turns `cloud_only` into `missing` only when the S3 object is actually gone.
 Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
 
-`download_present` / `download_checked_at` are mirror-metadata columns used by the dashboard-triggered full-download job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
+`download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
 
 ## Zip naming + sidecar
 

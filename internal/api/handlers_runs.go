@@ -107,6 +107,18 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runDetailResponse{Run: toSummary(run), Logs: out})
 }
 
+// handleDeleteRunLogs truncates the entire run_logs table while leaving
+// the runs table intact. Intended for the Logs page's global cleanup
+// action.
+func (s *Server) handleDeleteRunLogs(w http.ResponseWriter, r *http.Request) {
+	n, err := s.deps.DB.DeleteRunLogs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
 type triggerRunRequest struct {
 	// Mode controls which phases run: "full" (default), "scan", or "upload".
 	Mode string `json:"mode"`

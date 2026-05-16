@@ -344,9 +344,7 @@ func downloadZipMembersMirror(
 	w, b, innerErrs, next := extractZipMembers(ctx, opts.DownloadDir, key, zipPath, members, int(processed), int(total), totalBytes, emit, false, func(f db.File) error {
 		return opts.DB.MarkDownloadMirrorBatch(ctx, []int64{f.ID}, nil, time.Now().UTC())
 	})
-	for _, e := range innerErrs {
-		errs = append(errs, e)
-	}
+	errs = append(errs, innerErrs...)
 	return w, b, errs, int64(next)
 }
 

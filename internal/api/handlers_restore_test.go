@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -212,8 +213,8 @@ func TestRestoreToDirDownloadsMixedStandaloneAndZip(t *testing.T) {
 	if out.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
 		t.Fatalf("bytes_written=%d want %d", out.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
 	}
-	if len(out.Blocked) != 1 || !strings.Contains(out.Blocked[0], "pending.txt") {
-		t.Fatalf("blocked=%v want pending.txt", out.Blocked)
+	if len(out.Skipped) != 1 || !strings.Contains(out.Skipped[0], "pending.txt") {
+		t.Fatalf("skipped=%v want pending.txt", out.Skipped)
 	}
 }
 
@@ -497,6 +498,16 @@ func TestRestoreEstimateUsesObjectCountForRequestFee(t *testing.T) {
 	}
 	if out.RequestFeeUSD != 0 {
 		t.Fatalf("request_fee_usd=%v want 0.00 at this scale after rounding", out.RequestFeeUSD)
+	}
+}
+
+func TestEstimateDownloadFeesUsesFullEgressBytes(t *testing.T) {
+	_, egress, total := estimateDownloadFees(250, 150*1024*1024*1024)
+	if diff := math.Abs(egress - 13.5); diff > 0.0001 {
+		t.Fatalf("egress_fee_usd=%v want 13.5 (diff=%v)", egress, diff)
+	}
+	if diff := math.Abs(total - (13.5 + 250*0.0004/1000)); diff > 0.0001 {
+		t.Fatalf("total_fee_usd=%v unexpected total (diff=%v)", total, diff)
 	}
 }
 

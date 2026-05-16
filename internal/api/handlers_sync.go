@@ -117,8 +117,9 @@ func (s *Server) handleSyncFull(w http.ResponseWriter, r *http.Request) {
 // runSyncCloudCompare runs the authoritative sync pass: list the bucket,
 // download all zip indexes, compare the resulting cloud path set to the local
 // rows that are still on disk, recreate missing rows for cloud-only objects as
-// cloud_only, and promote any S3-present local rows into either uploaded or
-// cloud_only so the bucket-backed state is always explicit.
+// cloud_only, promote any S3-present local rows into either uploaded or
+// cloud_only, and convert cloud_only rows whose object is gone into missing so
+// the bucket-backed state is always explicit.
 func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (fullSyncResponse, error) {
 	zipNames, err := s.deps.DB.ListZipNames(ctx)
 	if err != nil {
@@ -246,6 +247,27 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 						Fields: fields,
 					})
 				}
+				continue
+			}
+			if f.Status == db.StatusCloudOnly {
+				cf, ok := idx.Files[f.Path]
+				if !ok {
+					promoteUploaded = append(promoteUploaded, db.FileUpdate{
+						ID: f.ID,
+						Fields: map[string]any{
+							"status": db.StatusMissing,
+						},
+					})
+					continue
+				}
+				fields, err := buildFields(cf, db.StatusUploaded)
+				if err != nil {
+					return fullSyncResponse{}, fmt.Errorf("build uploaded fields for %s: %w", f.Path, err)
+				}
+				promoteUploaded = append(promoteUploaded, db.FileUpdate{
+					ID:     f.ID,
+					Fields: fields,
+				})
 				continue
 			}
 			if cf, ok := idx.Files[f.Path]; ok {
