@@ -17,6 +17,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
 | — | — | Cloud-index sync now ignores standalone DB keys that no longer exist in S3, so the authoritative compare stays bucket-grounded instead of counting stale local metadata as cloud-backed |
 | — | — | Staticcheck cleanup removed an unused mirror helper and simplified the mirror zip error accumulation loop to satisfy `S1011`/`U1000` |
+| — | — | CI lint job now runs frontend ESLint via `web/npm run lint`, with a checked-in flat config covering JS, TS, and Svelte sources |
+| — | — | CI test job now restores the Go module and build caches explicitly before `go test -race -short ./...` |
 | — | — | Zip archives now live in a dedicated `zips` table, `files.md5` stores per-file hashes again, and zip-backed files point at the archive row via `files.zip_id` |
 | — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
