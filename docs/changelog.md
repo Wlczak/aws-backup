@@ -4,12 +4,12 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
-| — | — | Download cost estimates now use the full outbound byte total with no free-tier deduction, so the dashboard shows the maximum likely egress cost and leaves any AWS free-tier savings for the operator to verify |
+| — | — | Download tab now prefills its target directory from `backup.download_dir`, and the dashboard no longer exposes the full-download trigger; the mirror job still exists server-side for direct use |
 | — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
 | — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
 | — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |
 | — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
-| — | — | Full-download dashboard job now carries an object-count + GET/egress cost estimate for the missing set, so the dashboard can show the expected download cost once the mirror scan has determined what is actually missing |
+| — | — | Full-download mirror job now carries an object-count + GET/egress cost estimate for the missing set, so the UI can show the expected download cost once the mirror scan has determined what is actually missing |
 | — | — | SQLite connection pool now closes the idle connection after 15 minutes and transparently reopens on the next query; the DB handle itself stays alive for the process lifetime |
 | — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
 | — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
