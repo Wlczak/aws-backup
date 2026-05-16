@@ -7,7 +7,7 @@ aws-backup config init        write a default config.json (won't overwrite)
 aws-backup config path        print the resolved config file path
 aws-backup config validate    check config well-formedness
 aws-backup run                execute one backup run, then exit
-aws-backup serve              run HTTP API + scheduler (SIGINT-safe shutdown)
+aws-backup serve              run HTTP API + scheduler (SIGINT-safe shutdown); auto-writes a starter config on first launch
 aws-backup -version           print baked-in version
 ```
 

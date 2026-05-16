@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
 | — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
 | — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |
 | — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
