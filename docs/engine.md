@@ -65,6 +65,7 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 - The download phase then fetches only rows still missing from the cached mirror snapshot.
 - Standalone files are fetched directly into the mirror directory with MD5 verification.
 - Zip-backed rows are grouped by archive key. The job reuses a cached zip from `backup.tmp_dir` when present; otherwise it downloads the archive once, then extracts only the missing members and marks each extracted row present.
+- Restore-download jobs seed their total byte budget in the HTTP handler before the worker starts, so `/api/status` can replay the full size immediately after a refresh.
 - Progress is published with `download_mirror_*` SSE events so the dashboard can show scan and download phases separately. `download_mirror_scan_*` events include a `download_after` flag so the API can distinguish the bootstrap scan that leads into a download from a scan-only rescan.
 
 ## Run-state Concurrency (`api.Server`)

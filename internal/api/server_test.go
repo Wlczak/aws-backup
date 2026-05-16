@@ -1037,6 +1037,29 @@ func TestRestoreDownloadOK(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 
+	statusResp, err := ts.Client().Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var early struct {
+		RestoreDownloadCurrent *restoreDownloadSummary `json:"restore_download_current"`
+		RestoreDownloadLast    *restoreDownloadSummary `json:"restore_download_last"`
+	}
+	if err := json.NewDecoder(statusResp.Body).Decode(&early); err != nil {
+		statusResp.Body.Close()
+		t.Fatalf("decode early status: %v", err)
+	}
+	statusResp.Body.Close()
+	if early.RestoreDownloadCurrent == nil && early.RestoreDownloadLast == nil {
+		t.Fatal("restore download summary missing before first progress update")
+	}
+	if early.RestoreDownloadCurrent != nil && early.RestoreDownloadCurrent.TotalBytes != int64(len("hello")) {
+		t.Fatalf("early current total bytes=%d want %d", early.RestoreDownloadCurrent.TotalBytes, len("hello"))
+	}
+	if early.RestoreDownloadLast != nil && early.RestoreDownloadLast.TotalBytes != int64(len("hello")) {
+		t.Fatalf("early last total bytes=%d want %d", early.RestoreDownloadLast.TotalBytes, len("hello"))
+	}
+
 	deadline := time.Now().Add(2 * time.Second)
 	var got struct {
 		RestoreDownloadCurrent *restoreDownloadSummary `json:"restore_download_current"`

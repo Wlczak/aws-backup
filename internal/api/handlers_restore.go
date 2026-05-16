@@ -456,6 +456,29 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		tmpDir = cfg.Backup.TmpDir
 	}
 
+	// Seed the job summary before the worker starts so /api/status can
+	// replay the final byte budget immediately on refresh, instead of
+	// waiting for the engine's first SSE frame.
+	allFiles := false
+	pathsForEstimate := make([]string, 0, len(req.Paths))
+	seen := make(map[string]struct{}, len(req.Paths))
+	for _, p := range req.Paths {
+		if p == "" || p == "/" {
+			allFiles = true
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		pathsForEstimate = append(pathsForEstimate, p)
+	}
+	estimate, err := s.downloadEstimateStats(r.Context(), pathsForEstimate, allFiles)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	s.restoreDownloadMu.Lock()
 	if s.currentRestoreDownload != nil {
 		cur := *s.currentRestoreDownload
@@ -468,11 +491,13 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job := &restoreDownloadSummary{
-		ID:        s.restoreDownloadSeq.Add(1),
-		StartedAt: time.Now().UTC(),
-		Status:    "running",
-		Phase:     "download",
-		TargetDir: req.TargetDir,
+		ID:         s.restoreDownloadSeq.Add(1),
+		StartedAt:  time.Now().UTC(),
+		Status:     "running",
+		Phase:      "download",
+		TargetDir:  req.TargetDir,
+		Total:      estimate.RestoredCount,
+		TotalBytes: estimate.TotalBytes,
 	}
 	s.currentRestoreDownload = job
 	s.restoreDownloadMu.Unlock()
