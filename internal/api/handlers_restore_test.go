@@ -199,22 +199,41 @@ func TestRestoreToDirDownloadsMixedStandaloneAndZip(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.handleRestoreToDir(rr, req)
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	var out restoreToDirResponse
+	var out struct {
+		RestoreDownloadID int64 `json:"restore_download_id"`
+	}
 	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.FilesWritten != 3 {
-		t.Fatalf("files_written=%d want 3 (%+v)", out.FilesWritten, out)
+	if out.RestoreDownloadID == 0 {
+		t.Fatalf("restore_download_id missing in %+v", out)
 	}
-	if out.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
-		t.Fatalf("bytes_written=%d want %d", out.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	var final *restoreDownloadSummary
+	for time.Now().Before(deadline) {
+		srv.restoreDownloadMu.Lock()
+		if srv.lastRestoreDownload != nil {
+			copy := *srv.lastRestoreDownload
+			final = &copy
+			srv.restoreDownloadMu.Unlock()
+			break
+		}
+		srv.restoreDownloadMu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
-	if len(out.Skipped) != 1 || !strings.Contains(out.Skipped[0], "pending.txt") {
-		t.Fatalf("skipped=%v want pending.txt", out.Skipped)
+	if final == nil {
+		t.Fatal("restore download did not finish")
+	}
+	if final.FilesWritten != 3 {
+		t.Fatalf("files_written=%d want 3 (%+v)", final.FilesWritten, final)
+	}
+	if final.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
+		t.Fatalf("bytes_written=%d want %d", final.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
 	}
 }
 

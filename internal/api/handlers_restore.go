@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -288,6 +290,22 @@ type restoreDownloadRequest struct {
 	VerifyChecksum *bool    `json:"verify_checksum,omitempty"`
 }
 
+type restoreDownloadSummary struct {
+	ID           int64      `json:"id"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	Status       string     `json:"status"`
+	Phase        string     `json:"phase"`
+	TargetDir    string     `json:"target_dir"`
+	Total        int64      `json:"total"`
+	TotalBytes   int64      `json:"total_bytes"`
+	Processed    int64      `json:"processed"`
+	FilesWritten int64      `json:"files_written"`
+	BytesWritten int64      `json:"bytes_written"`
+	Errors       int64      `json:"errors"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+}
+
 type restoreDownloadResponse struct {
 	FilesWritten int64    `json:"files_written"`
 	BytesWritten int64    `json:"bytes_written"`
@@ -392,12 +410,12 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestoreDownload downloads matching files from S3 into a local
-// directory and verifies each written file against the MD5 stored in the
-// DB. Only rows currently marked restore_status='restored' are treated as
-// downloadable; thaw-pending and never-restored rows are reported as
-// skipped. Per-file checksum failures are returned in the response rather
-// than aborting the whole batch.
+// handleRestoreDownload starts a background job that downloads matching
+// files from S3 into a local directory and verifies each written file
+// against the MD5 stored in the DB. Only rows currently marked
+// restore_status='restored' are treated as downloadable; thaw-pending
+// and never-restored rows are reported as skipped. Progress is exposed
+// through SSE plus /api/status so the Download tab can survive reloads.
 func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 	st := s.storage()
 	if st == nil {
@@ -434,31 +452,152 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		tmpDir = cfg.Backup.TmpDir
 	}
 
-	var emit engine.EventEmitter
-	if s.deps.Bus != nil {
-		emit = s.deps.Bus.Publish
-	}
-	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
-		DB:           s.deps.DB,
-		Storage:      st,
-		KeyPrefix:    s.storagePrefix(),
-		TargetDir:    req.TargetDir,
-		Paths:        req.Paths,
-		TmpDir:       tmpDir,
-		SkipChecksum: req.VerifyChecksum != nil && !*req.VerifyChecksum,
-		Emit:         emit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore download: %w", err))
+	s.restoreDownloadMu.Lock()
+	if s.currentRestoreDownload != nil {
+		cur := *s.currentRestoreDownload
+		s.restoreDownloadMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                  "a restore download is already in progress",
+			"restore_download_id":    cur.ID,
+			"restore_download_phase": cur.Phase,
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, restoreDownloadResponse{
-		FilesWritten: stats.FilesWritten,
-		BytesWritten: stats.BytesWritten,
-		TotalBytes:   stats.TotalBytes,
-		Skipped:      stats.Skipped,
-		Errors:       stats.Errors,
+	job := &restoreDownloadSummary{
+		ID:        s.restoreDownloadSeq.Add(1),
+		StartedAt: time.Now().UTC(),
+		Status:    "running",
+		Phase:     "download",
+		TargetDir: req.TargetDir,
+	}
+	s.currentRestoreDownload = job
+	s.restoreDownloadMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.restoreDownloadMu.Lock()
+	s.currentRestoreDownloadCancel = cancel
+	s.restoreDownloadMu.Unlock()
+
+	apply := func(ev engine.Event) {
+		if s.deps.Bus != nil {
+			s.deps.Bus.Publish(ev)
+		}
+		s.applyRestoreDownloadEvent(ev)
+	}
+
+	var logger *slog.Logger
+	if s.deps.Logger != nil {
+		logger = s.deps.Logger
+	}
+
+	s.restoreDownloadWg.Add(1)
+	go func(downloadID int64, cfg restoreDownloadSummary, storage storage.Storage, tmpDir string) {
+		defer s.restoreDownloadWg.Done()
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-s.shutdownCh:
+				cancel()
+			case <-done:
+			}
+		}()
+		defer close(done)
+
+		stats, err := engine.RestoreToDir(ctx, engine.RestoreOptions{
+			DB:           s.deps.DB,
+			Storage:      storage,
+			KeyPrefix:    s.storagePrefix(),
+			TargetDir:    cfg.TargetDir,
+			Paths:        req.Paths,
+			TmpDir:       tmpDir,
+			SkipChecksum: req.VerifyChecksum != nil && !*req.VerifyChecksum,
+			Emit:         apply,
+		})
+		if err != nil {
+			if logger != nil {
+				logger.Warn("restore download failed", "error", err)
+			}
+		}
+		s.restoreDownloadMu.Lock()
+		if cur := s.currentRestoreDownload; cur != nil && cur.ID == downloadID {
+			cur.TotalBytes = stats.TotalBytes
+			cur.Processed = stats.FilesWritten
+			cur.FilesWritten = stats.FilesWritten
+			cur.BytesWritten = stats.BytesWritten
+			cur.Errors = int64(len(stats.Errors))
+			if err != nil {
+				cur.Status = "failed"
+				cur.Phase = "failed"
+				cur.ErrorMessage = err.Error()
+			} else {
+				cur.Status = "completed"
+				cur.Phase = "complete"
+				cur.ErrorMessage = ""
+			}
+			finishedAt := time.Now().UTC()
+			final := *cur
+			final.FinishedAt = &finishedAt
+			s.lastRestoreDownload = &final
+			s.currentRestoreDownload = nil
+			s.currentRestoreDownloadCancel = nil
+		}
+		s.restoreDownloadMu.Unlock()
+	}(job.ID, *job, st, tmpDir)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"restore_download_id": job.ID,
 	})
+}
+
+func (s *Server) applyRestoreDownloadEvent(ev engine.Event) {
+	s.restoreDownloadMu.Lock()
+	defer s.restoreDownloadMu.Unlock()
+	cur := s.currentRestoreDownload
+	if cur == nil {
+		return
+	}
+	switch ev.Type {
+	case engine.EventRestoreDownloadStart:
+		cur.Status = "running"
+		cur.Phase = "download"
+		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.Processed = 0
+		cur.FilesWritten = 0
+		cur.BytesWritten = 0
+		cur.Errors = 0
+	case engine.EventRestoreDownloadProgress:
+		cur.Status = "running"
+		cur.Phase = "download"
+		cur.Processed = intFromAny(ev.Data["processed"])
+		cur.Total = intFromAny(ev.Data["total"])
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.FilesWritten = intFromAny(ev.Data["files_written"])
+		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
+		cur.Errors = intFromAny(ev.Data["errors"])
+	case engine.EventRestoreDownloadComplete:
+		cur.Status = "completed"
+		cur.Phase = "complete"
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.FilesWritten = intFromAny(ev.Data["files_written"])
+		cur.Processed = cur.FilesWritten
+		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
+		cur.Errors = intFromAny(ev.Data["errors"])
+		finishedAt := time.Now().UTC()
+		cur.FinishedAt = &finishedAt
+	case engine.EventRestoreDownloadFailed:
+		cur.Status = "failed"
+		cur.Phase = "failed"
+		cur.TotalBytes = intFromAny(ev.Data["total_bytes"])
+		cur.FilesWritten = intFromAny(ev.Data["files_written"])
+		cur.Processed = cur.FilesWritten
+		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
+		cur.Errors = intFromAny(ev.Data["errors"])
+		cur.ErrorMessage = stringFromAny(ev.Data["error"])
+		finishedAt := time.Now().UTC()
+		cur.FinishedAt = &finishedAt
+	}
 }
 
 // handleRestoreToDir is the legacy handler name for the restore download

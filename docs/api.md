@@ -6,7 +6,7 @@ Routes mounted in `internal/api/server.go`. JSON over HTTP; the SPA at `/` is se
 
 ```text
 # Run lifecycle
-GET    /api/status                    current + last run, stop_requested flag
+GET    /api/status                    current + last run, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
 GET    /api/runs/{id}                 detail + logs
 POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}
@@ -38,7 +38,7 @@ GET    /api/s3/test                   HeadBucket round-trip
 POST   /api/restore/estimate          {paths: [], tier: bulk|standard, days: 1..180} → cost + wait estimate (request fee counts actual S3 objects, zip groups count once)
 POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..180} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
 POST   /api/restore/download/estimate {paths: []} → restored-file estimate for the Download tab (breaks out restored / in_progress / not_restoring; request fee counts actual downloadable S3 objects, zip groups count once)
-POST   /api/restore/download          {paths: [], target_dir: "/abs/path", verify_checksum?: bool} → downloads only restored S3 objects / zip members to disk and verifies each file against files.md5 unless disabled
+POST   /api/restore/download          {paths: [], target_dir: "/abs/path", verify_checksum?: bool} → starts a background local download/verify job; live progress is exposed through `/api/status` and SSE `restore_download_*`
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
 POST   /api/restore/scan/full          HEADs every uploaded/zipped/cloud_only S3 object key and reconciles restore status authoritatively
 POST   /api/restore/scan/pending       HEADs only rows currently marked `in_progress`
@@ -56,6 +56,8 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
 `POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase.
+
+`POST /api/restore/download` now starts a background restore-download job instead of holding the request open. The live `/api/status` payload exposes `restore_download_current` / `restore_download_last`, and the SSE stream emits `restore_download_*` events so the Download tab can show progress, survive reloads, and render the final counts after completion or failure.
 
 `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/standard-storage/egress cost breakdown plus expected wait window. Files whose `restore_status` is already `in_progress` or `restored` are excluded from the estimate; the request-fee count is based on distinct S3 objects, so multiple rows inside one zip still count as one restore request. The skipped rows are surfaced separately as `already_in_progress_*` / `already_restored_*`.
 

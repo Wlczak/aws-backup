@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type RestoreDownloadEstimate, type RestoreDownloadResponse } from '../lib/api';
+  import {
+    api,
+    subscribeEvents,
+    type RestoreDownloadEstimate,
+    type RestoreDownloadSummary,
+  } from '../lib/api';
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
@@ -9,7 +14,13 @@
   let raw = $state('');
   let downloadTargetDir = $state('');
   let downloadEstimate = $state<RestoreDownloadEstimate | null>(null);
-  let downloadResult = $state<RestoreDownloadResponse | null>(null);
+  type DownloadResult = {
+    files_written: number;
+    bytes_written: number;
+    total_bytes: number;
+    errors: number;
+  };
+  let downloadResult = $state<DownloadResult | null>(null);
   let downloadBusy = $state(false);
   let estimating = $state(false);
   let verifyChecksum = $state(true);
@@ -47,16 +58,21 @@
   });
   let downloadStatus = $state<DownloadStatus>(idleStatus());
   let downloadTotalBytes = $state(0);
-  let downloadProgress = $state<{
+  type DownloadProgress = {
     processed: number;
     total: number;
     total_bytes: number;
     files_written: number;
     bytes_written: number;
+    phase: 'download';
+    status: 'active' | 'done' | 'failed';
     path?: string;
     error?: string;
     errors: number;
-  } | null>(null);
+  };
+  let downloadProgress = $state<DownloadProgress | null>(null);
+  let pollTimer: number | undefined;
+  let pollDestroyed = false;
 
   $effect(() => {
     void raw;
@@ -68,8 +84,80 @@
     }
   });
 
+  function applyDownloadProgress(next: DownloadProgress | null) {
+    downloadProgress = next;
+    if (!next) {
+      if (!downloadBusy) downloadStatus = idleStatus();
+      return;
+    }
+    downloadTotalBytes = next.total_bytes ?? downloadTotalBytes;
+    if (next.status === 'active') {
+      const parts = [
+        `${next.files_written.toLocaleString()} written`,
+        `${next.processed.toLocaleString()} / ${next.total.toLocaleString()} checked`,
+      ];
+      if (next.path) parts.push(next.path);
+      if (next.error) parts.push(next.error);
+      downloadStatus = runningStatus(parts.join(' · '));
+      return;
+    }
+
+    const parts = [
+      `${next.files_written.toLocaleString()} written`,
+      bytes(next.bytes_written),
+    ];
+    parts.push(`${next.processed.toLocaleString()} checked`);
+    if (next.errors > 0) parts.push(`${next.errors.toLocaleString()} error(s)`);
+    if (next.error) parts.push(next.error);
+    downloadStatus = next.status === 'failed'
+      ? errStatus(parts.join(' · '))
+      : next.errors > 0
+        ? warnStatus(parts.join(' · '))
+        : okStatus(parts.join(' · '));
+  }
+
+  function progressFromSummary(summary: RestoreDownloadSummary): DownloadProgress {
+    return {
+      processed: summary.processed,
+      total: summary.total,
+      total_bytes: summary.total_bytes,
+      files_written: summary.files_written,
+      bytes_written: summary.bytes_written,
+      phase: 'download',
+      status: summary.status === 'running'
+        ? 'active'
+        : summary.status === 'failed'
+          ? 'failed'
+          : 'done',
+      error: summary.error_message,
+      errors: summary.errors,
+    };
+  }
+
+  function resultFromProgress(next: DownloadProgress): DownloadResult {
+    return {
+      files_written: next.files_written,
+      bytes_written: next.bytes_written,
+      total_bytes: next.total_bytes,
+      errors: next.errors,
+    };
+  }
+
   let aborted = false;
   onDestroy(() => { aborted = true; });
+  onDestroy(() => {
+    pollDestroyed = true;
+    if (pollTimer) clearTimeout(pollTimer);
+  });
+
+  function scheduleNextPoll() {
+    if (pollDestroyed) return;
+    const delay = downloadProgress?.status === 'active' ? 1000 : 30000;
+    pollTimer = window.setTimeout(async () => {
+      await refresh();
+      scheduleNextPoll();
+    }, delay);
+  }
 
   onMount(() => {
     void (async () => {
@@ -90,12 +178,21 @@
       toast.info(`Pre-filled ${pre.length} path(s) from Files selection.`);
       clearSelection();
     }
+    void refresh().then(() => scheduleNextPoll());
     const sub = subscribeEvents((type, data) => {
       if (type === 'restore_download_start') {
         const d = data as { total: number; total_bytes: number };
         downloadTotalBytes = d.total_bytes ?? 0;
-        downloadProgress = { processed: 0, total: d.total, total_bytes: downloadTotalBytes, files_written: 0, bytes_written: 0, errors: 0 };
-        downloadStatus = runningStatus(`0 / ${d.total.toLocaleString()} files checked.`);
+        applyDownloadProgress({
+          processed: 0,
+          total: d.total,
+          total_bytes: downloadTotalBytes,
+          files_written: 0,
+          bytes_written: 0,
+          phase: 'download',
+          status: 'active',
+          errors: 0,
+        });
       } else if (type === 'restore_download_progress') {
         const d = data as {
           processed: number;
@@ -107,41 +204,66 @@
           error?: string;
           errors: number;
         };
-        downloadProgress = {
+        applyDownloadProgress({
           processed: d.processed,
           total: d.total,
           total_bytes: d.total_bytes ?? downloadTotalBytes,
           files_written: d.files_written,
           bytes_written: d.bytes_written,
+          phase: 'download',
+          status: 'active',
           path: d.path,
           error: d.error,
           errors: d.errors,
-        };
-        const parts = [
-          `${d.files_written.toLocaleString()} written`,
-          `${d.processed.toLocaleString()} / ${d.total.toLocaleString()} checked`,
-        ];
-        if (d.path) parts.push(d.path);
-        if (d.error) parts.push(d.error);
-        downloadStatus = runningStatus(parts.join(' · '));
+        });
       } else if (type === 'restore_download_complete') {
         const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number };
         downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
-        downloadProgress = null;
-        downloadStatus = d.errors > 0
-          ? warnStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)} · ${d.errors.toLocaleString()} error(s).`)
-          : okStatus(`${d.files_written.toLocaleString()} written · ${bytes(d.bytes_written)}.`);
+        applyDownloadProgress({
+          processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
+          total: downloadProgress?.total ?? 0,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
+          files_written: d.files_written,
+          bytes_written: d.bytes_written,
+          phase: 'download',
+          status: 'done',
+          errors: d.errors,
+        });
+        downloadResult = resultFromProgress({
+          processed: downloadProgress?.processed ?? d.files_written,
+          total: downloadProgress?.total ?? d.files_written,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
+          files_written: d.files_written,
+          bytes_written: d.bytes_written,
+          phase: 'download',
+          status: 'done',
+          errors: d.errors,
+        });
       } else if (type === 'restore_download_failed') {
         const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number; error?: string };
         downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
-        downloadProgress = null;
-        const detail = [
-          `${d.files_written.toLocaleString()} written`,
-          bytes(d.bytes_written),
-          `${d.errors.toLocaleString()} error(s)`,
-          d.error,
-        ].filter(Boolean).join(' · ');
-        downloadStatus = errStatus(detail);
+        applyDownloadProgress({
+          processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
+          total: downloadProgress?.total ?? 0,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
+          files_written: d.files_written,
+          bytes_written: d.bytes_written,
+          phase: 'download',
+          status: 'failed',
+          errors: d.errors,
+          error: d.error,
+        });
+        downloadResult = resultFromProgress({
+          processed: downloadProgress?.processed ?? d.files_written,
+          total: downloadProgress?.total ?? d.files_written,
+          total_bytes: d.total_bytes ?? downloadTotalBytes,
+          files_written: d.files_written,
+          bytes_written: d.bytes_written,
+          phase: 'download',
+          status: 'failed',
+          errors: d.errors,
+          error: d.error,
+        });
       }
     });
     return () => sub.close();
@@ -167,6 +289,7 @@
       return;
     }
     downloadBusy = true;
+    downloadProgress = null;
     downloadResult = null;
     downloadTotalBytes = 0;
     downloadStatus = runningStatus('Submitting download request…');
@@ -174,29 +297,44 @@
       lastVerifyChecksum = verifyChecksum;
       const r = await api.restoreDownload(p, downloadTargetDir.trim(), verifyChecksum);
       if (aborted) return;
-      downloadResult = r;
-      downloadTotalBytes = r.total_bytes ?? downloadTotalBytes;
-      const skipped = r.skipped?.length ?? 0;
-      const errorCount = r.errors?.length ?? 0;
-      const parts = [
-        `${r.files_written.toLocaleString()} written`,
-        bytes(r.bytes_written),
-      ];
-      if (skipped > 0) parts.push(`${skipped.toLocaleString()} skipped`);
-      if (errorCount > 0) parts.push(`${errorCount.toLocaleString()} error(s)`);
-      downloadStatus = errorCount > 0
-        ? warnStatus(parts.join(' · '))
-        : okStatus(parts.join(' · '));
-      if (r.errors?.length) {
-        toast.info(`Downloaded ${r.files_written.toLocaleString()} file(s) with ${r.errors.length} error(s).`);
-      } else {
-        toast.success(`Downloaded ${r.files_written.toLocaleString()} file(s) to ${downloadTargetDir.trim()}.`);
+      downloadStatus = runningStatus(`Download ${r.restore_download_id.toLocaleString()} accepted. Waiting for progress…`);
+      if (!downloadProgress) {
+        applyDownloadProgress({
+          processed: 0,
+          total: 0,
+          total_bytes: 0,
+          files_written: 0,
+          bytes_written: 0,
+          phase: 'download',
+          status: 'active',
+          errors: 0,
+        });
       }
+      toast.success(`Download queued for ${downloadTargetDir.trim()}.`);
     } catch (e) {
       downloadStatus = errStatus(String(e));
       toast.error(String(e));
     } finally {
       downloadBusy = false;
+    }
+  }
+
+  async function refresh() {
+    try {
+      const s = await api.status();
+      const cur = s.restore_download_current;
+      const last = s.restore_download_last;
+      const nextSummary = cur ?? last ?? null;
+      if (nextSummary) {
+        applyDownloadProgress(progressFromSummary(nextSummary));
+        if (nextSummary.status === 'completed' || nextSummary.status === 'failed') {
+          downloadResult = resultFromProgress(progressFromSummary(nextSummary));
+        }
+      } else if (!downloadBusy) {
+        applyDownloadProgress(null);
+      }
+    } catch (e) {
+      toast.error(String(e));
     }
   }
 
@@ -252,16 +390,16 @@
     <button
       class="primary"
       onclick={doDownload}
-      disabled={downloadBusy || downloadTargetDir.trim() === ''}
+      disabled={(downloadBusy || downloadProgress?.status === 'active') || downloadTargetDir.trim() === ''}
       type="button"
     >
-      {#if downloadBusy}
+      {#if downloadBusy || downloadProgress?.status === 'active'}
         Downloading…
       {:else}
         Download and verify
       {/if}
     </button>
-    <button type="button" onclick={doEstimate} disabled={estimating || downloadBusy}>
+    <button type="button" onclick={doEstimate} disabled={estimating || downloadBusy || downloadProgress?.status === 'active'}>
       {estimating ? 'Estimating…' : 'Estimate cost'}
     </button>
   </div>
@@ -317,6 +455,7 @@
     {/if}
   {/if}
   {#if downloadProgress}
+    <div class="label" style="margin-top: 0.75rem">Live download progress</div>
     {@const pct = downloadProgress.total > 0
       ? Math.min(100, Math.round((downloadProgress.processed / downloadProgress.total) * 100))
       : 0}
@@ -354,12 +493,8 @@
         <div class="big">{bytes(downloadResult.bytes_written)}</div>
       </div>
       <div>
-        <div class="muted">Skipped</div>
-        <div class="big">{downloadResult.skipped?.length ?? 0}</div>
-      </div>
-      <div>
         <div class="muted">Errors</div>
-        <div class="big">{downloadResult.errors?.length ?? 0}</div>
+        <div class="big">{downloadResult.errors}</div>
       </div>
       <div>
         <div class="muted">Verification</div>
@@ -374,22 +509,6 @@
           max={downloadTotalBytes}
         />
       </div>
-    {/if}
-    {#if downloadResult.skipped?.length}
-      <details style="margin-top: 0.75rem">
-        <summary>{downloadResult.skipped.length} skipped path(s)</summary>
-        <ul class="mono small">
-          {#each downloadResult.skipped as p}<li>{p}</li>{/each}
-        </ul>
-      </details>
-    {/if}
-    {#if downloadResult.errors?.length}
-      <details open style="margin-top: 0.75rem" class="err">
-        <summary>{downloadResult.errors.length} error(s)</summary>
-        <ul class="mono small">
-          {#each downloadResult.errors as p}<li>{p}</li>{/each}
-        </ul>
-      </details>
     {/if}
   </div>
 {/if}

@@ -93,6 +93,8 @@ export interface Status {
   last?: Run;
   download_current?: DownloadJobSummary;
   download_last?: DownloadJobSummary;
+  restore_download_current?: RestoreDownloadSummary;
+  restore_download_last?: RestoreDownloadSummary;
   stop_requested?: boolean;
 }
 
@@ -121,6 +123,26 @@ export interface DownloadJobSummary {
 
 export interface DownloadFullResponse {
   download_id: number;
+}
+
+export interface RestoreDownloadSummary {
+  id: number;
+  started_at: string;
+  finished_at?: string;
+  status: 'running' | 'completed' | 'failed';
+  phase: 'download' | 'complete' | 'failed';
+  target_dir: string;
+  total: number;
+  total_bytes: number;
+  processed: number;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error_message?: string;
+}
+
+export interface RestoreDownloadTriggerResponse {
+  restore_download_id: number;
 }
 
 export interface RestoreEstimate {
@@ -435,7 +457,7 @@ export const api = {
       body: JSON.stringify({ paths, days, tier }),
     }),
   restoreDownload: (paths: string[], targetDir: string, verifyChecksum = true) =>
-    request<RestoreDownloadResponse>('/api/restore/download', {
+    request<RestoreDownloadTriggerResponse>('/api/restore/download', {
       method: 'POST',
       body: JSON.stringify({ paths, target_dir: targetDir, verify_checksum: verifyChecksum }),
     }),

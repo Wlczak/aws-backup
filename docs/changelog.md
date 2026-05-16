@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Download tab now starts restore downloads in the background, tracks live progress through `/api/status` + `restore_download_*`, and keeps the terminal summary visible after reloads |
 | — | — | Logs page now has a clear-all action that truncates `run_logs` via `DELETE /api/run-logs` while preserving the `runs` table history |
 | — | — | Download tab now prefills its target directory from `backup.download_dir`, and the dashboard no longer exposes the full-download trigger; the mirror job still exists server-side for direct use |
 | — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |

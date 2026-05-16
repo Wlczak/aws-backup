@@ -107,6 +107,9 @@ type Server struct {
 	// downloadWg tracks the background full-download job so Shutdown can
 	// wait for its goroutine before tearing down DB / storage.
 	downloadWg sync.WaitGroup
+	// restoreDownloadWg tracks the background restore-download job so
+	// Shutdown can wait for its goroutine before tearing down DB / storage.
+	restoreDownloadWg sync.WaitGroup
 	// pendingConfig holds a validated, on-disk-persisted Config that the
 	// operator saved while a backup run was in flight. The post-run
 	// goroutine drains it and calls ApplySettings + updateConfig once the
@@ -126,6 +129,12 @@ type Server struct {
 	currentDownload       *downloadSummary
 	currentDownloadCancel context.CancelFunc
 	lastDownload          *downloadSummary
+	// restoreDownloadMu guards restore-download job state for /api/status.
+	restoreDownloadMu            sync.Mutex
+	restoreDownloadSeq           atomic.Int64
+	currentRestoreDownload       *restoreDownloadSummary
+	currentRestoreDownloadCancel context.CancelFunc
+	lastRestoreDownload          *restoreDownloadSummary
 	// shutdownCh is closed once at the top of Shutdown. The post-run
 	// DB-sync goroutine watches it so an in-flight DB upload aborts
 	// promptly when the service is shutting down — otherwise a 600 s
@@ -263,11 +272,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.currentDownloadCancel()
 	}
 	s.downloadMu.Unlock()
+	s.restoreDownloadMu.Lock()
+	if s.currentRestoreDownloadCancel != nil {
+		s.currentRestoreDownloadCancel()
+	}
+	s.restoreDownloadMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
 		s.runWg.Wait()
 		s.downloadWg.Wait()
+		s.restoreDownloadWg.Wait()
 		close(done)
 	}()
 	select {
