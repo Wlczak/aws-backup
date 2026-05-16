@@ -283,8 +283,9 @@ type restoreTriggerResponse struct {
 }
 
 type restoreDownloadRequest struct {
-	Paths     []string `json:"paths"`
-	TargetDir string   `json:"target_dir"`
+	Paths          []string `json:"paths"`
+	TargetDir      string   `json:"target_dir"`
+	VerifyChecksum *bool    `json:"verify_checksum,omitempty"`
 }
 
 type restoreDownloadResponse struct {
@@ -433,13 +434,14 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		emit = s.deps.Bus.Publish
 	}
 	stats, err := engine.RestoreToDir(r.Context(), engine.RestoreOptions{
-		DB:        s.deps.DB,
-		Storage:   st,
-		KeyPrefix: s.storagePrefix(),
-		TargetDir: req.TargetDir,
-		Paths:     req.Paths,
-		TmpDir:    tmpDir,
-		Emit:      emit,
+		DB:           s.deps.DB,
+		Storage:      st,
+		KeyPrefix:    s.storagePrefix(),
+		TargetDir:    req.TargetDir,
+		Paths:        req.Paths,
+		TmpDir:       tmpDir,
+		SkipChecksum: req.VerifyChecksum != nil && !*req.VerifyChecksum,
+		Emit:         emit,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("restore download: %w", err))

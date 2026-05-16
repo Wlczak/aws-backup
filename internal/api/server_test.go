@@ -970,7 +970,7 @@ func TestRestoreDownloadOK(t *testing.T) {
 	}
 
 	target := filepath.Join(t.TempDir(), "restore-out")
-	body := fmt.Sprintf(`{"paths":["notes.txt"],"target_dir":%q}`, target)
+	body := fmt.Sprintf(`{"paths":["notes.txt"],"target_dir":%q,"verify_checksum":true}`, target)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
