@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Logs page now has a clear-all action that truncates `run_logs` via `DELETE /api/run-logs` while preserving the `runs` table history |
 | — | — | Download tab now prefills its target directory from `backup.download_dir`, and the dashboard no longer exposes the full-download trigger; the mirror job still exists server-side for direct use |
 | — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
 | — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |

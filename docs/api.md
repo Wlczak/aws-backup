@@ -13,6 +13,7 @@ POST   /api/runs                      trigger run; body {mode: full|scan|upload,
 POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
+DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
 POST   /api/download/full             full mirror download using backup.download_dir; the live job summary includes object count + estimated GET/egress cost for the missing set
 
 # File index

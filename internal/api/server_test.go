@@ -1278,6 +1278,40 @@ func TestDeleteFilesBulk(t *testing.T) {
 	}
 }
 
+func TestDeleteRunLogs(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	r1, _ := deps.DB.CreateRun(ctx, now)
+	r2, _ := deps.DB.CreateRun(ctx, now.Add(time.Minute))
+	_ = deps.DB.AppendLog(ctx, r1, db.LogInfo, "hello", now)
+	_ = deps.DB.AppendLog(ctx, r2, db.LogError, "boom", now.Add(time.Minute))
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/run-logs", nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	var res affectedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if res.Affected != 2 {
+		t.Fatalf("affected=%d want 2", res.Affected)
+	}
+	if _, total, err := deps.DB.ListLogs(ctx, r1, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run1 logs=%d err=%v", total, err)
+	}
+	if _, total, err := deps.DB.ListLogs(ctx, r2, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run2 logs=%d err=%v", total, err)
+	}
+}
+
 func TestRestoreTriggerWithoutStorage(t *testing.T) {
 	// newTestServer doesn't wire Deps.Storage, so the handler should
 	// refuse the request rather than attempt a download.

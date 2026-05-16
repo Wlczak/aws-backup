@@ -107,6 +107,8 @@ CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE z
 
 Either knob set to `0` disables that pass.
 
+The Logs page also exposes a manual clear-all action that truncates `run_logs` directly (`db.DeleteRunLogs` / `DELETE /api/run-logs`). It removes log rows only; the `runs` history remains.
+
 ## File status transitions
 
 State terms used throughout the codebase:
