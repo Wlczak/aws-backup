@@ -654,6 +654,14 @@ func runServe(cfgPath string) {
 	// handler as the rest of the server.
 	slog.SetDefault(logger)
 
+	created, err := ensureConfigFile(cfgPath)
+	if err != nil {
+		fatalf("prepare config %s: %v", cfgPath, err)
+	}
+	if created {
+		logger.Info("created default config", "path", cfgPath)
+	}
+
 	app, err := loadAppState(ctx, cfgPath, true)
 	if err != nil {
 		fatalf("%v", err)
@@ -857,6 +865,18 @@ func runConfig(path string, args []string) {
 		fmt.Fprintf(os.Stderr, "unknown config subcommand %q\n", args[0])
 		os.Exit(2)
 	}
+}
+
+func ensureConfigFile(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := config.Save(path, config.Default()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func fatalf(format string, args ...any) {

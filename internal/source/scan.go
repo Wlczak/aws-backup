@@ -17,7 +17,7 @@ type ScanStats struct {
 	New       int64 // rows inserted into DB
 	Changed   int64 // existing rows whose size/mtime differed
 	Unchanged int64 // existing rows with no size/mtime change
-	Missing   int64 // previously uploaded rows no longer present
+	Missing   int64 // rows reclassified to missing by a full local scan
 }
 
 // Logger is a minimal sink for scan-level messages. nil is fine.
@@ -215,8 +215,8 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 		return stats, walkErr
 	}
 
-	// Only detect missing files on a full scan; partial scans only walked a
-	// subset so any unvisited files should not be marked as missing.
+	// Only classify disappearances on a full scan; partial scans only walked a
+	// subset so any unvisited files should not be reclassified.
 	if len(paths) == 0 {
 		missing, err := d.MarkMissing(ctx, scanStart)
 		if err != nil {
@@ -247,4 +247,3 @@ func matchesAnyPath(relPath string, targets []string) bool {
 	}
 	return false
 }
-

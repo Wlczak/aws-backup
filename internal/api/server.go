@@ -312,6 +312,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/runs/{id}/cancel", s.handleCancelRun)
 		r.Post("/runs/{id}/stop", s.handleStopRun)
 		r.Post("/runs/{id}/continue", s.handleContinueRun)
+		r.Delete("/run-logs", s.handleDeleteRunLogs)
 
 		r.Get("/files", s.handleListFiles)
 		r.Get("/files/tree", s.handleListTree)
