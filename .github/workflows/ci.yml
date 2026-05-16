@@ -91,6 +91,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Cache node_modules
+        id: cache-nm-lint
+        uses: actions/cache@v5
+        with:
+          path: web/node_modules
+          key: node-modules-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install frontend dependencies
+        if: steps.cache-nm-lint.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit
+        working-directory: web
+
+      - name: Run ESLint
+        run: npm run lint
+        working-directory: web
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
