@@ -21,8 +21,8 @@ make dev-up
 # 2. Build the single binary (npm build + go build)
 make build
 
-# 3. Write a default config.json
-./aws-backup config init
+# 3. Start serve once to bootstrap config.json if it does not exist yet
+./aws-backup serve
 ./aws-backup config path         # prints where it ended up
 
 # 4. Edit the config — at minimum, set source.localdir.root to a
@@ -46,7 +46,7 @@ aws-backup [--config PATH] <command>
   config path       print the resolved config file path
   config validate   check the config is well-formed
   run               execute one backup run and exit
-  serve             run the HTTP API + scheduler (Ctrl-C to stop)
+  serve             run the HTTP API + scheduler; auto-writes a starter config on first launch
   --version         print version
 ```
 
@@ -97,20 +97,20 @@ Pure Go stack (modernc.org/sqlite) — no CGO required.
 
 ## Make targets
 
-| Target                                    | What it does                                  |
-| ----------------------------------------- | --------------------------------------------- |
-| `make build`                              | Build SPA then Go binary                      |
-| `make build-go`                           | Go-only build (assumes `web/dist` is ready)   |
-| `make build-linux` / `make build-windows` | Cross-compile                                 |
-| `make test`                               | Run Go test suite                             |
-| `make web`                                | Build the SPA into `web/dist/`                |
-| `make web-dev`                            | Vite dev server (proxies `/api` to `:8080`)   |
-| `make web-install`                        | Install npm deps without building             |
-| `make dev`                                | Build + run `aws-backup serve`                |
-| `make dev-up` / `make dev-down`           | Start/stop MinIO via docker compose           |
-| `make dev-logs`                           | Tail MinIO logs                               |
-| `make clean`                              | Remove built binaries + `web/dist` artifacts  |
-| `make fmt` / `make vet` / `make tidy`     | Standard Go housekeeping                      |
+| Target                                    | What it does                                 |
+| ----------------------------------------- | -------------------------------------------- |
+| `make build`                              | Build SPA then Go binary                     |
+| `make build-go`                           | Go-only build (assumes `web/dist` is ready)  |
+| `make build-linux` / `make build-windows` | Cross-compile                                |
+| `make test`                               | Run Go test suite                            |
+| `make web`                                | Build the SPA into `web/dist/`               |
+| `make web-dev`                            | Vite dev server (proxies `/api` to `:8080`)  |
+| `make web-install`                        | Install npm deps without building            |
+| `make dev`                                | Build + run `aws-backup serve`               |
+| `make dev-up` / `make dev-down`           | Start/stop MinIO via docker compose          |
+| `make dev-logs`                           | Tail MinIO logs                              |
+| `make clean`                              | Remove built binaries + `web/dist` artifacts |
+| `make fmt` / `make vet` / `make tidy`     | Standard Go housekeeping                     |
 
 ## Testing against real infrastructure
 

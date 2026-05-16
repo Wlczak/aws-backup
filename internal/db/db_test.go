@@ -502,6 +502,47 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeleteRunLogs(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	started := time.Now().UTC().Truncate(time.Second)
+	id1, err := d.CreateRun(ctx, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := d.CreateRun(ctx, started.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id1, LogInfo, "hello", started); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AppendLog(ctx, id2, LogError, "boom", started.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := d.DeleteRunLogs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted=%d want 2", deleted)
+	}
+	if _, total, err := d.ListLogs(ctx, id1, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run1 logs = %d err=%v", total, err)
+	}
+	if _, total, err := d.ListLogs(ctx, id2, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run2 logs = %d err=%v", total, err)
+	}
+	if _, err := d.GetRun(ctx, id1); err != nil {
+		t.Fatalf("run1 missing after delete: %v", err)
+	}
+	if _, err := d.GetRun(ctx, id2); err != nil {
+		t.Fatalf("run2 missing after delete: %v", err)
+	}
+}
+
 func TestTrimRunLogsForRun(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

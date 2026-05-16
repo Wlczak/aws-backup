@@ -107,6 +107,8 @@ CREATE UNIQUE INDEX idx_mpu_zip_key_unique ON multipart_uploads(zip_key) WHERE z
 
 Either knob set to `0` disables that pass.
 
+The Logs page also exposes a manual clear-all action that truncates `run_logs` directly (`db.DeleteRunLogs` / `DELETE /api/run-logs`). It removes log rows only; the `runs` history remains.
+
 ## File status transitions
 
 State terms used throughout the codebase:
@@ -133,7 +135,7 @@ Source rescans preserve bucket-backed state on unchanged rows. A vanished `uploa
 The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It turns `cloud_only` into `missing` only when the S3 object is actually gone.
 Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
 
-`download_present` / `download_checked_at` are mirror-metadata columns used by the dashboard-triggered full-download job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
+`download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
 
 ## Zip naming + sidecar
 

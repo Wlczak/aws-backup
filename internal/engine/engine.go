@@ -1401,23 +1401,6 @@ func copyAndHash(ctx context.Context, src source.Source, rel, tmp string, wrap f
 	return n, hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), nil
 }
 
-// md5AndSHA256File returns hex MD5 and hex SHA256 in a single pass
-// through the file, so a multi-GiB staged zip isn't read off disk
-// twice on the hot copy→upload path. (#254)
-func md5AndSHA256File(p string) (md5hex string, sha256hex string, err error) {
-	f, ferr := os.Open(p)
-	if ferr != nil {
-		return "", "", ferr
-	}
-	defer f.Close()
-	hMD5 := md5.New()
-	hSHA := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(hMD5, hSHA), f); err != nil {
-		return "", "", err
-	}
-	return hex.EncodeToString(hMD5.Sum(nil)), hex.EncodeToString(hSHA.Sum(nil)), nil
-}
-
 // skipIfMatches reports whether S3 already holds an object at key whose
 // ChecksumSHA256 equals sha256hex — the signal callers use to skip a
 // byte-identical re-upload. Any other outcome (object missing, checksum

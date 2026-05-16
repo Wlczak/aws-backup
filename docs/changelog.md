@@ -4,14 +4,19 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Logs page now has a clear-all action that truncates `run_logs` via `DELETE /api/run-logs` while preserving the `runs` table history |
+| — | — | Download tab now prefills its target directory from `backup.download_dir`, and the dashboard no longer exposes the full-download trigger; the mirror job still exists server-side for direct use |
+| — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
 | — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
 | — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |
 | — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
-| — | — | Full-download dashboard job now carries an object-count + GET/egress cost estimate for the missing set, so the dashboard can show the expected download cost once the mirror scan has determined what is actually missing |
+| — | — | Full-download mirror job now carries an object-count + GET/egress cost estimate for the missing set, so the UI can show the expected download cost once the mirror scan has determined what is actually missing |
 | — | — | SQLite connection pool now closes the idle connection after 15 minutes and transparently reopens on the next query; the DB handle itself stays alive for the process lifetime |
 | — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
 | — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
 | — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
+| — | — | Cloud-index sync now ignores standalone DB keys that no longer exist in S3, so the authoritative compare stays bucket-grounded instead of counting stale local metadata as cloud-backed |
+| — | — | Staticcheck cleanup removed an unused mirror helper and simplified the mirror zip error accumulation loop to satisfy `S1011`/`U1000` |
 | — | — | Zip archives now live in a dedicated `zips` table, `files.md5` stores per-file hashes again, and zip-backed files point at the archive row via `files.zip_id` |
 | — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
 | — | — | Dashboard Index card now shows the restored-file count from restore_status stats |

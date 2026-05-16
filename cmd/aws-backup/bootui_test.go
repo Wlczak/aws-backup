@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,31 +26,38 @@ func TestBootDownload_ServesHTMLAndCompletes(t *testing.T) {
 	}
 	dst := filepath.Join(t.TempDir(), "index.db")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	state := &bootState{total: int64(len(body))}
+	var cancelHit atomic.Bool
+	cancelDownload := func() {
+		if cancelHit.CompareAndSwap(false, true) {
+			cancel()
+		}
 	}
-	addr := ln.Addr().String()
+	mux := bootMux(state, cancelDownload)
 
 	// Drive the download from a goroutine so the main test body can
 	// exercise the HTTP handlers concurrently.
 	done := make(chan error, 1)
 	go func() {
-		done <- runBootDownload(context.Background(), ln, store, "", dst, int64(len(body)))
+		dlErr := downloadDBFromS3(ctx, store, "", dst, int64(len(body)), state.update)
+		if cancelHit.Load() && ctx.Err() == nil {
+			dlErr = nil
+		}
+		state.finish(dlErr, false)
+		done <- dlErr
 	}()
 
 	// GET / should serve the HTML page.
-	res, err := http.Get("http://" + addr + "/")
-	if err != nil {
-		t.Fatalf("GET /: %v", err)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET / status=%d want 200", rr.Code)
 	}
-	pageBody, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	if res.StatusCode != 200 {
-		t.Errorf("GET / status=%d want 200", res.StatusCode)
-	}
+	pageBody := rr.Body.String()
 	for _, want := range []string{"Downloading index.db from S3", "/progress", "/cancel"} {
-		if !strings.Contains(string(pageBody), want) {
+		if !strings.Contains(pageBody, want) {
 			t.Errorf("HTML missing %q", want)
 		}
 	}
@@ -58,10 +66,10 @@ func TestBootDownload_ServesHTMLAndCompletes(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runBootDownload: %v", err)
+			t.Fatalf("downloadDBFromS3: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("runBootDownload did not return within 5s")
+		t.Fatal("downloadDBFromS3 did not return within 5s")
 	}
 
 	got, err := os.ReadFile(dst)
@@ -122,35 +130,41 @@ func TestBootDownload_CancelButtonAbortsDownload(t *testing.T) {
 	store := &slowStorage{Storage: mem, delay: 20 * time.Millisecond}
 	dst := filepath.Join(t.TempDir(), "index.db")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	parentCtx := context.Background()
+	dlCtx, cancel := context.WithCancel(parentCtx)
+	t.Cleanup(cancel)
+	state := &bootState{total: int64(len(body))}
+	var cancelHit atomic.Bool
+	cancelDownload := func() {
+		if cancelHit.CompareAndSwap(false, true) {
+			cancel()
+		}
 	}
-	addr := ln.Addr().String()
+	mux := bootMux(state, cancelDownload)
 
 	var wg sync.WaitGroup
 	var dlErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		dlErr = runBootDownload(context.Background(), ln, store, "", dst, int64(len(body)))
+		dlErr = downloadDBFromS3(dlCtx, store, "", dst, int64(len(body)), state.update)
+		if cancelHit.Load() && parentCtx.Err() == nil {
+			dlErr = nil
+		}
+		state.finish(dlErr, cancelHit.Load() && parentCtx.Err() == nil)
 	}()
 
 	// Wait until /progress reports some bytes flowing so we know the cancel
 	// fires mid-download (not before the first read).
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		res, err := http.Get("http://" + addr + "/progress")
-		if err != nil {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/progress", nil))
 		var p struct {
 			Bytes int64 `json:"bytes"`
 			Done  bool  `json:"done"`
 		}
-		_ = json.NewDecoder(res.Body).Decode(&p)
-		res.Body.Close()
+		_ = json.NewDecoder(rr.Body).Decode(&p)
 		if p.Done {
 			t.Fatal("download completed before we could fire cancel")
 		}
@@ -160,13 +174,10 @@ func TestBootDownload_CancelButtonAbortsDownload(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	res, err := http.Post("http://"+addr+"/cancel", "application/x-www-form-urlencoded", nil)
-	if err != nil {
-		t.Fatalf("POST /cancel: %v", err)
-	}
-	res.Body.Close()
-	if res.StatusCode != 200 {
-		t.Errorf("POST /cancel status=%d want 200", res.StatusCode)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/cancel", nil))
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST /cancel status=%d want 200", rr.Code)
 	}
 
 	wg.Wait()

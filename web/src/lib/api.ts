@@ -321,6 +321,10 @@ export const api = {
   cancelRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   stopRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/stop`, { method: 'POST' }),
   continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
+  deleteRunLogs: () =>
+    request<{ affected: number }>('/api/run-logs', {
+      method: 'DELETE',
+    }),
 
   files: (
     opts: { page?: number; limit?: number; status?: string; search?: string; all?: boolean } = {},
