@@ -21,6 +21,7 @@ aws-backup -version           print baked-in version
 - Hash router; any path that doesn't resolve under `dist/` falls back to `index.html`
 - `web/src/lib/api.ts` is the typed fetch wrapper layer — keep `Config`, `SettingsResponse`, etc. in sync with `internal/config` and the API handlers
 - `web/src/lib/toast.ts` is the canonical path for transient feedback (avoid `alert()`)
+- `npm run lint` runs ESLint across the frontend `js`/`ts`/`svelte` sources; CI includes it in the lint job alongside the Go checks
 - Settings is split into per-section sub-routes under `/settings/<section>`; each sub-component takes `bind:cfg` and edits a slice of the Config tree
 - Restore is split into a `Restore` tab for Glacier thaw/status and a separate `Download` tab for local S3 downloads with MD5 verification + cost estimation; the target directory is prefilled from `backup.download_dir` when Settings has one configured
 
