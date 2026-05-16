@@ -3,13 +3,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,7 +27,64 @@ import (
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
-func newTestServer(t *testing.T) (*httptest.Server, Deps) {
+type testServerConfig struct {
+	Handler http.Handler
+}
+
+type testServer struct {
+	URL    string
+	Config *testServerConfig
+	client *http.Client
+}
+
+func (ts *testServer) Client() *http.Client { return ts.client }
+func (ts *testServer) Close()               {}
+
+func newInProcServer(handler http.Handler) *testServer {
+	ts := &testServer{
+		URL:    "http://inproc.test",
+		Config: &testServerConfig{Handler: handler},
+	}
+	transport := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		ForceAttemptHTTP2: false,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if ts.Config == nil || ts.Config.Handler == nil {
+				return nil, errors.New("in-proc test server handler is not configured")
+			}
+			clientConn, serverConn := net.Pipe()
+			go func() { _ = http.Serve(&singleConnListener{conn: serverConn}, ts.Config.Handler) }()
+			return clientConn, nil
+		},
+	}
+	ts.client = &http.Client{Transport: transport}
+	return ts
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error { return nil }
+
+func (l *singleConnListener) Addr() net.Addr { return testAddr("inproc") }
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+func (a testAddr) String() string  { return string(a) }
+
+func newTestServer(t *testing.T) (*testServer, Deps) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -74,12 +133,27 @@ func newTestServer(t *testing.T) (*httptest.Server, Deps) {
 		},
 	}
 	srv := NewServer(deps)
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 	return ts, deps
 }
 
-func getJSON(t *testing.T, ts *httptest.Server, path string, into any) *http.Response {
+func newRestoreDownloadServer(t *testing.T) (*testServer, Deps, storage.Storage) {
+	t.Helper()
+	ts, deps := newTestServer(t)
+	store := storage.NewMemStorage()
+	deps.Storage = func() storage.Storage { return store }
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
+	return ts, deps, store
+}
+
+func hexMD5(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func getJSON(t *testing.T, ts *testServer, path string, into any) *http.Response {
 	t.Helper()
 	resp, err := ts.Client().Get(ts.URL + path)
 	if err != nil {
@@ -118,7 +192,7 @@ func TestStatusStaleCurrentRunIDIsClean(t *testing.T) {
 	srv.currentRun = 99999 // no such row
 	srv.runMu.Unlock()
 
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 
 	resp, err := ts.Client().Get(ts.URL + "/api/status")
@@ -186,10 +260,10 @@ func TestSettingsPutInvokesApplySettings(t *testing.T) {
 	var gotPrev, gotNext config.Config
 	var applied bool
 	srv := &Server{deps: Deps{
-		DB:         deps.DB,
-		Bus:        deps.Bus,
-		Config:     deps.Config,
-		ConfigPath: deps.ConfigPath,
+		DB:          deps.DB,
+		Bus:         deps.Bus,
+		Config:      deps.Config,
+		ConfigPath:  deps.ConfigPath,
 		BuildEngine: deps.BuildEngine,
 		ApplySettings: func(prev, next config.Config) error {
 			gotPrev, gotNext, applied = prev, next, true
@@ -231,10 +305,10 @@ func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	origBucket := deps.Config.S3.Bucket
 
 	srv := &Server{deps: Deps{
-		DB:         deps.DB,
-		Bus:        deps.Bus,
-		Config:     deps.Config,
-		ConfigPath: deps.ConfigPath,
+		DB:          deps.DB,
+		Bus:         deps.Bus,
+		Config:      deps.Config,
+		ConfigPath:  deps.ConfigPath,
 		BuildEngine: deps.BuildEngine,
 		ApplySettings: func(prev, next config.Config) error {
 			return fmt.Errorf("synthetic hot-swap failure")
@@ -816,7 +890,7 @@ func TestStorageHotSwap(t *testing.T) {
 		Config:  &cfg,
 		Storage: func() storage.Storage { return live },
 	})
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 
 	// Hot-swap the storage handle that the getter returns.
@@ -902,10 +976,15 @@ func TestRestoreEstimate(t *testing.T) {
 	_ = deps.DB.SetZipName(ctx, []int64{b.ID}, "photos/photos_1.zip")
 	_ = c // unused; left as pending
 
-	body := strings.NewReader(`{"paths":["photos","unknown/dir"]}`)
+	body := strings.NewReader(`{"paths":["photos","unknown/dir"],"tier":"standard","days":30}`)
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/estimate", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 	var got restoreEstimateResponse
 	_ = json.NewDecoder(resp.Body).Decode(&got)
@@ -917,11 +996,250 @@ func TestRestoreEstimate(t *testing.T) {
 	if got.TotalBytes != 2*1024*1024*1024 {
 		t.Errorf("total_bytes=%d", got.TotalBytes)
 	}
+	if got.StorageFeeUSD <= 0 {
+		t.Errorf("storage_fee_usd not positive: %v", got.StorageFeeUSD)
+	}
 	if got.TotalFeeUSD <= 0 {
 		t.Errorf("total fee not positive: %v", got.TotalFeeUSD)
 	}
 	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
 		t.Errorf("unknown_paths=%+v", got.UnknownPaths)
+	}
+}
+
+func TestRestoreDownloadOK(t *testing.T) {
+	ts, deps, store := newRestoreDownloadServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, err := deps.DB.UpsertFile(ctx, "notes.txt", 5, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, "backups/notes.txt", strings.NewReader("hello"), int64(len("hello"))); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(t.TempDir(), "restore-out")
+	body := fmt.Sprintf(`{"paths":["notes.txt"],"target_dir":%q,"verify_checksum":true}`, target)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	var got struct {
+		FilesWritten int64    `json:"files_written"`
+		BytesWritten int64    `json:"bytes_written"`
+		Skipped      []string `json:"skipped"`
+		Errors       []string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.FilesWritten != 1 {
+		t.Fatalf("files_written=%d want 1", got.FilesWritten)
+	}
+	if got.BytesWritten != int64(len("hello")) {
+		t.Fatalf("bytes_written=%d want %d", got.BytesWritten, len("hello"))
+	}
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors=%v want none", got.Errors)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "notes.txt"))
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("restored file = %q want %q", data, "hello")
+	}
+}
+
+func TestRestoreDownloadEstimate(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	res, err := deps.DB.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: "photos/a.jpg", Size: 100, ModTime: now},
+		{Path: "photos/b.jpg", Size: 200, ModTime: now},
+		{Path: "docs/readme.md", Size: 300, ModTime: now},
+		{Path: "docs/idle.txt", Size: 400, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{
+		"photos/a.jpg":   res[0].ID,
+		"photos/b.jpg":   res[1].ID,
+		"docs/readme.md": res[2].ID,
+		"docs/idle.txt":  res[3].ID,
+	}
+	if err := deps.DB.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploadedBatch(ctx, []int64{ids["photos/a.jpg"]}, md5hex("aaa"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"), "backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, ids["docs/readme.md"], md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, ids["docs/idle.txt"], md5hex("idle"), "backups/docs/idle.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestored(ctx, "backups/photos/photos_1.zip", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestoreInProgress(ctx, "backups/docs/readme.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"paths":["photos","docs","unknown/dir"]}`)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	var got restoreDownloadEstimateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ObjectCount != 1 {
+		t.Fatalf("object_count=%d want 1", got.ObjectCount)
+	}
+	if got.TotalBytes != 300 {
+		t.Fatalf("total_bytes=%d want 300", got.TotalBytes)
+	}
+	if got.RestoredCount != 2 {
+		t.Fatalf("restored_count=%d want 2", got.RestoredCount)
+	}
+	if got.InProgressCount != 1 {
+		t.Fatalf("in_progress_count=%d want 1", got.InProgressCount)
+	}
+	if got.NotRestoringCount != 1 {
+		t.Fatalf("not_restoring_count=%d want 1", got.NotRestoringCount)
+	}
+	if len(got.UnknownPaths) != 1 || got.UnknownPaths[0] != "unknown/dir" {
+		t.Fatalf("unknown_paths=%v", got.UnknownPaths)
+	}
+}
+
+func TestDownloadStatusCarriesCostEstimate(t *testing.T) {
+	srv := &Server{}
+	srv.currentDownload = &downloadSummary{
+		ID:          1,
+		StartedAt:   time.Now().UTC(),
+		Status:      "running",
+		Phase:       "scan",
+		DownloadDir: t.TempDir(),
+	}
+
+	srv.applyDownloadEvent(engine.Event{
+		Type: engine.EventDownloadMirrorScanComplete,
+		Data: map[string]any{
+			"scanned":      4,
+			"present":      2,
+			"missing":      2,
+			"total":        2,
+			"total_bytes":  int64(101 * 1024 * 1024 * 1024),
+			"object_count": int64(3),
+		},
+	})
+
+	got := srv.currentDownload
+	if got == nil {
+		t.Fatal("currentDownload cleared unexpectedly")
+	}
+	if got.ObjectCount != 3 {
+		t.Fatalf("object_count=%d want 3", got.ObjectCount)
+	}
+	if got.RequestFeeUSD <= 0 || got.EgressFeeUSD <= 0 || got.TotalFeeUSD <= 0 {
+		t.Fatalf("expected positive fees: %+v", got)
+	}
+}
+
+func TestRestoreDownloadEstimateRejectsEmptyPaths(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json",
+		strings.NewReader(`{"paths":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestRestoreDownloadRejectsRelativeTarget(t *testing.T) {
+	ts, deps, _ := newRestoreDownloadServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	r, err := deps.DB.UpsertFile(ctx, "notes.txt", 5, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, r.ID, hexMD5("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestoreInProgress(ctx, "backups/notes.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":["notes.txt"],"target_dir":"relative/path"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestRestoreDownloadRejectsEmptyPaths(t *testing.T) {
+	ts, _, _ := newRestoreDownloadServer(t)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":[],"target_dir":"/tmp/restore"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestRestoreDownloadRejectsWhileRunActive(t *testing.T) {
+	ts, deps, _ := newRestoreDownloadServer(t)
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 1
+	srv.runMu.Unlock()
+	ts.Config.Handler = srv.Router()
+
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download", "application/json",
+		strings.NewReader(`{"paths":["notes.txt"],"target_dir":"/tmp/restore"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d want 409", resp.StatusCode)
 	}
 }
 
@@ -1013,6 +1331,40 @@ func TestDeleteFilesBulk(t *testing.T) {
 	resp.Body.Close()
 	if res.Affected != 2 {
 		t.Errorf("affected=%d", res.Affected)
+	}
+}
+
+func TestDeleteRunLogs(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	r1, _ := deps.DB.CreateRun(ctx, now)
+	r2, _ := deps.DB.CreateRun(ctx, now.Add(time.Minute))
+	_ = deps.DB.AppendLog(ctx, r1, db.LogInfo, "hello", now)
+	_ = deps.DB.AppendLog(ctx, r2, db.LogError, "boom", now.Add(time.Minute))
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/run-logs", nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	var res affectedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if res.Affected != 2 {
+		t.Fatalf("affected=%d want 2", res.Affected)
+	}
+	if _, total, err := deps.DB.ListLogs(ctx, r1, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run1 logs=%d err=%v", total, err)
+	}
+	if _, total, err := deps.DB.ListLogs(ctx, r2, 1, 10); err != nil || total != 0 {
+		t.Fatalf("run2 logs=%d err=%v", total, err)
 	}
 }
 

@@ -24,6 +24,12 @@ build-linux: web
 build-windows: web
 	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY)-windows-amd64.exe $(CMD)
 
+build-macos-amd64: web
+	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-amd64 $(CMD)
+
+build-macos-arm64: web
+	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-arm64 $(CMD)
+
 # Build the SPA into web/dist/.
 web: web/dist/index.html
 

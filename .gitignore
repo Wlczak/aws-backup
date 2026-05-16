@@ -3,6 +3,7 @@
 /aws-backup.exe
 /aws-backup-*-amd64
 /aws-backup-*-amd64.exe
+/aws-backup-*-arm64
 /dist/
 /bin/
 

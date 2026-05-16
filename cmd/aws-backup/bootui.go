@@ -166,36 +166,7 @@ func runBootDownload(ctx context.Context, listener net.Listener, store storage.S
 			dlCancel()
 		}
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(bootHTML))
-	})
-	mux.HandleFunc("/progress", func(w http.ResponseWriter, r *http.Request) {
-		b, t, done, cancelled, errMsg := state.snapshot()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"bytes":     b,
-			"total":     t,
-			"done":      done,
-			"cancelled": cancelled,
-			"error":     errMsg,
-		})
-	})
-	mux.HandleFunc("/cancel", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		cancelDownload()
-		w.WriteHeader(http.StatusOK)
-	})
-
+	mux := bootMux(state, cancelDownload)
 	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.Serve(listener) }()
@@ -234,4 +205,39 @@ func runBootDownload(ctx context.Context, listener net.Listener, store storage.S
 		slog.Warn("boot UI server exited with error", "err", e)
 	}
 	return dlErr
+}
+
+// bootMux returns the transient HTTP handlers shown while the boot-time
+// index.db download is in flight. Tests use this directly so they do not
+// need to open a real TCP listener.
+func bootMux(state *bootState, cancelDownload func()) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(bootHTML))
+	})
+	mux.HandleFunc("/progress", func(w http.ResponseWriter, r *http.Request) {
+		b, t, done, cancelled, errMsg := state.snapshot()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"bytes":     b,
+			"total":     t,
+			"done":      done,
+			"cancelled": cancelled,
+			"error":     errMsg,
+		})
+	})
+	mux.HandleFunc("/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		cancelDownload()
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
 }

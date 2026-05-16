@@ -136,7 +136,7 @@
     <button type="button" class="name mono clickable linkish" onclick={() => onOpenDetail(f)}>{fname}</button>
     <span class="meta mono muted">{bytes(f.size)}</span>
     <span class="meta muted">{formatDate(f.mtime)}</span>
-    <StatusBadge status={f.status} />
+    <StatusBadge status={f.status} s3Key={f.s3_key} />
     {#if f.restore_status}
       <StatusBadge status={restoreLabel(f.restore_status)} />
       {#if f.restore_status === 'restored' && f.restore_expires_at}

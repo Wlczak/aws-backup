@@ -44,6 +44,9 @@ func TestRestoreToDirMixed(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["notes.txt"]}, md5hex("hello"), "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.SetZipName(ctx, []int64{ids["photos/a.jpg"], ids["photos/b.jpg"]}, "photos/photos_1.zip"); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +60,9 @@ func TestRestoreToDirMixed(t *testing.T) {
 	}
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["photos/b.jpg"]}, md5hex("bbbb"),
 		"backups/photos/photos_1.zip", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/photos/photos_1.zip", now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,6 +113,98 @@ func TestRestoreToDirMixed(t *testing.T) {
 	}
 }
 
+func TestDownloadMirrorToDirZipMissingMember(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	seed := []db.BatchEntry{
+		{Path: "photos/a.jpg", Size: 3, ModTime: now},
+		{Path: "photos/b.jpg", Size: 4, ModTime: now},
+	}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	ids := []int64{res[0].ID, res[1].ID}
+	if err := d.MarkZipUploadedBatch(ctx, db.Zip{
+		ZipName:    "photos/photos_1.zip",
+		Size:       1234,
+		MD5:        "archive-md5",
+		SHA256:     "archive-sha",
+		S3Key:      "backups/photos/photos_1.zip",
+		UploadedAt: &now,
+		LastSeenAt: now,
+	}, []db.ZipMemberUpload{
+		{ID: ids[0], MD5: md5hex("aaa")},
+		{ID: ids[1], MD5: md5hex("bbbb")},
+	}); err != nil {
+		t.Fatalf("MarkZipUploadedBatch: %v", err)
+	}
+
+	mirror := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mirror, "photos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "photos", "a.jpg"), []byte("aaa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	zipBytes := buildZip(t, map[string]string{
+		"photos/a.jpg": "aaa",
+		"photos/b.jpg": "bbbb",
+	})
+	if _, err := store.Put(ctx, "backups/photos/photos_1.zip", bytes.NewReader(zipBytes), int64(len(zipBytes))); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := DownloadMirrorToDir(ctx, DownloadOptions{
+		DB:          d,
+		Storage:     store,
+		KeyPrefix:   "backups/",
+		DownloadDir: mirror,
+		TmpDir:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("DownloadMirrorToDir: %v", err)
+	}
+	if stats.Scanned != 2 || stats.Present != 1 || stats.Missing != 1 {
+		t.Fatalf("unexpected scan stats: %+v", stats)
+	}
+	if stats.ObjectCount != 1 {
+		t.Fatalf("ObjectCount = %d want 1", stats.ObjectCount)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
+	}
+
+	got, err := os.ReadFile(filepath.Join(mirror, "photos", "b.jpg"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(got) != "bbbb" {
+		t.Fatalf("downloaded file = %q want %q", got, "bbbb")
+	}
+
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	for _, f := range files {
+		switch f.Path {
+		case "photos/a.jpg":
+			if !f.DownloadPresent {
+				t.Fatalf("expected %s to remain marked present", f.Path)
+			}
+		case "photos/b.jpg":
+			if !f.DownloadPresent {
+				t.Fatalf("expected %s to be marked present after download", f.Path)
+			}
+		}
+	}
+}
+
 func TestRestoreToDirPrefixFilter(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
@@ -121,6 +219,12 @@ func TestRestoreToDirPrefixFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := d.MarkUploadedBatch(ctx, []int64{ids["docs/readme.md"]}, md5hex("docs!"), "backups/docs/readme.md", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/photos/a.jpg", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/docs/readme.md", now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -179,6 +283,9 @@ func TestRestoreToDirChecksumMismatch(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{id}, wrongMD5, "backups/notes.txt", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 
 	store := storage.NewMemStorage()
 	mustPut(t, store, "backups/notes.txt", "hello")
@@ -208,6 +315,128 @@ func TestRestoreToDirChecksumMismatch(t *testing.T) {
 	}
 	if stats2.FilesWritten != 1 {
 		t.Errorf("SkipChecksum: FilesWritten got %d want 1", stats2.FilesWritten)
+	}
+}
+
+func TestRestoreToDirEmitsProgress(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/notes.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/notes.txt", "hello")
+
+	var events []Event
+	stats, err := RestoreToDir(ctx, RestoreOptions{
+		DB:        d,
+		Storage:   store,
+		KeyPrefix: "backups/",
+		TargetDir: t.TempDir(),
+		Paths:     []string{"/"},
+		Emit: func(ev Event) {
+			events = append(events, ev)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
+	}
+	if len(events) != 3 {
+		t.Fatalf("event count = %d want 3 (%+v)", len(events), events)
+	}
+	if events[0].Type != EventRestoreDownloadStart {
+		t.Fatalf("start type = %q", events[0].Type)
+	}
+	if got := events[0].Data["total"].(int); got != 1 {
+		t.Fatalf("start total = %d want 1", got)
+	}
+	if events[1].Type != EventRestoreDownloadProgress {
+		t.Fatalf("progress type = %q", events[1].Type)
+	}
+	if got := events[1].Data["processed"].(int); got != 1 {
+		t.Fatalf("progress processed = %d want 1", got)
+	}
+	if got := events[1].Data["files_written"].(int64); got != 1 {
+		t.Fatalf("progress files_written = %d want 1", got)
+	}
+	if events[2].Type != EventRestoreDownloadComplete {
+		t.Fatalf("complete type = %q", events[2].Type)
+	}
+	if got := events[2].Data["errors"].(int); got != 0 {
+		t.Fatalf("complete errors = %d want 0", got)
+	}
+}
+
+func TestRestoreToDirSkipsNonRestoredFiles(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: "ready.txt", Size: 5, ModTime: now},
+		{Path: "thawing.txt", Size: 7, ModTime: now},
+		{Path: "idle.txt", Size: 9, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("ready"), "backups/ready.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, res[1].ID, md5hex("thawing"), "backups/thawing.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, res[2].ID, md5hex("idle"), "backups/idle.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/ready.txt", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestoreInProgress(ctx, "backups/thawing.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/ready.txt", "ready")
+	mustPut(t, store, "backups/thawing.txt", "thawing")
+	mustPut(t, store, "backups/idle.txt", "idle")
+
+	target := t.TempDir()
+	stats, err := RestoreToDir(ctx, RestoreOptions{
+		DB:        d,
+		Storage:   store,
+		KeyPrefix: "backups/",
+		TargetDir: target,
+		Paths:     []string{"/"},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+	if stats.FilesWritten != 1 {
+		t.Fatalf("FilesWritten = %d want 1 (%+v)", stats.FilesWritten, stats)
+	}
+	if len(stats.Skipped) != 2 {
+		t.Fatalf("Skipped = %v want 2 entries", stats.Skipped)
+	}
+	if _, err := os.Stat(filepath.Join(target, "ready.txt")); err != nil {
+		t.Fatalf("ready.txt missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "thawing.txt")); !os.IsNotExist(err) {
+		t.Fatalf("thawing.txt should not have been restored, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "idle.txt")); !os.IsNotExist(err) {
+		t.Fatalf("idle.txt should not have been restored, err=%v", err)
 	}
 }
 

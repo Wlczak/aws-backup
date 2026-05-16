@@ -15,6 +15,7 @@
   let detailCtrl: AbortController | null = null;
   let listCtrl: AbortController | null = null;
   let aborted = false;
+  let clearing = $state(false);
 
   async function loadRuns() {
     listCtrl?.abort();
@@ -46,6 +47,26 @@
     }
   }
 
+  async function clearAllLogs() {
+    if (!confirm('Delete every log line in the database? This keeps the run rows.')) return;
+    clearing = true;
+    try {
+      const res = await api.deleteRunLogs();
+      toast.success(`Cleared ${res.affected.toLocaleString()} log line(s).`);
+      await loadRuns();
+      if (selectedID !== null) {
+        await selectRun(selectedID);
+      } else {
+        detail = null;
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.kind === 'abort') return;
+      if (!aborted) toast.error(String(e));
+    } finally {
+      clearing = false;
+    }
+  }
+
   onMount(loadRuns);
   onDestroy(() => {
     aborted = true;
@@ -55,6 +76,12 @@
 </script>
 
 <h1>Run logs</h1>
+
+<div class="toolbar">
+  <button class="danger" onclick={clearAllLogs} disabled={clearing} type="button">
+    {clearing ? 'Clearing…' : 'Clear all logs'}
+  </button>
+</div>
 
 <div class="grid">
   <div class="card nopad runs">
@@ -113,6 +140,11 @@
 
 <style>
   .grid { display: grid; grid-template-columns: minmax(360px, 480px) 1fr; gap: 1rem; align-items: start; }
+  .toolbar { display: flex; justify-content: flex-end; }
+  .danger {
+    border-color: var(--err);
+    color: var(--err);
+  }
   .nopad { padding: 0; overflow: hidden; }
   tbody tr { cursor: pointer; }
   tbody tr:hover { background: rgba(255, 255, 255, 0.03); }

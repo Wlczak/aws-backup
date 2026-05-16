@@ -370,14 +370,22 @@ func (a *appState) syncRestoreStatus() func(ctx context.Context) (int, error) {
 	return a.sqsConsumer.DrainAll
 }
 
-// syncDBToS3 checkpoints the WAL and uploads the DB file to S3, emitting
-// db_sync_* progress events through the bus so the dashboard can render
-// a progress bar (the index can grow to hundreds of MB). reason is
-// "complete" | "stop" | "cancel" depending on how the originating run
-// ended; runID is the run that triggered this sync. (#128)
+// syncDBToS3 snapshots the live SQLite DB into a temp file and uploads
+// that snapshot to S3, emitting db_sync_* progress events through the
+// bus so the dashboard can render a progress bar (the index can grow to
+// hundreds of MB). reason is "complete" | "stop" | "cancel" depending
+// on how the originating run ended; runID is the run that triggered
+// this sync. (#128)
 func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) error {
-	if err := a.db.Checkpoint(ctx); err != nil {
-		return fmt.Errorf("checkpoint: %w", err)
+	snap, err := os.CreateTemp("", "aws-backup-index-*.db")
+	if err != nil {
+		return fmt.Errorf("create db snapshot temp file: %w", err)
+	}
+	snapPath := snap.Name()
+	_ = snap.Close()
+	if err := a.db.SnapshotTo(ctx, snapPath); err != nil {
+		_ = os.Remove(snapPath)
+		return fmt.Errorf("snapshot db: %w", err)
 	}
 	// Snapshot the live storage and key prefix together so a concurrent
 	// applySettings hot-swap can't make us upload to a closed handle or
@@ -387,11 +395,15 @@ func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) e
 	keyPrefix := a.cfg.S3.KeyPrefix
 	a.mu.Unlock()
 
-	f, err := os.Open(a.dbPath)
+	f, err := os.Open(snapPath)
 	if err != nil {
+		_ = os.Remove(snapPath)
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(snapPath)
+	}()
 	fi, err := f.Stat()
 	if err != nil {
 		return err
@@ -642,6 +654,14 @@ func runServe(cfgPath string) {
 	// handler as the rest of the server.
 	slog.SetDefault(logger)
 
+	created, err := ensureConfigFile(cfgPath)
+	if err != nil {
+		fatalf("prepare config %s: %v", cfgPath, err)
+	}
+	if created {
+		logger.Info("created default config", "path", cfgPath)
+	}
+
 	app, err := loadAppState(ctx, cfgPath, true)
 	if err != nil {
 		fatalf("%v", err)
@@ -810,9 +830,9 @@ type discardResponse struct {
 
 func newDiscardResponse() *discardResponse { return &discardResponse{header: make(http.Header)} }
 
-func (d *discardResponse) Header() http.Header       { return d.header }
+func (d *discardResponse) Header() http.Header         { return d.header }
 func (d *discardResponse) Write(b []byte) (int, error) { return len(b), nil }
-func (d *discardResponse) WriteHeader(s int)          { d.status = s }
+func (d *discardResponse) WriteHeader(s int)           { d.status = s }
 
 func runConfig(path string, args []string) {
 	if len(args) == 0 {
@@ -845,6 +865,18 @@ func runConfig(path string, args []string) {
 		fmt.Fprintf(os.Stderr, "unknown config subcommand %q\n", args[0])
 		os.Exit(2)
 	}
+}
+
+func ensureConfigFile(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := config.Save(path, config.Default()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func fatalf(format string, args ...any) {

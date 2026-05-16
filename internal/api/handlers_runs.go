@@ -25,14 +25,14 @@ type runsListResponse struct {
 }
 
 type runSummary struct {
-	ID             int64     `json:"id"`
-	StartedAt      time.Time `json:"started_at"`
-	FinishedAt     time.Time `json:"finished_at,omitempty"`
-	Status         string    `json:"status"`
-	FilesScanned   int64     `json:"files_scanned"`
-	FilesUploaded  int64     `json:"files_uploaded"`
-	BytesUploaded  int64     `json:"bytes_uploaded"`
-	ErrorMessage   string    `json:"error_message,omitempty"`
+	ID            int64     `json:"id"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at,omitempty"`
+	Status        string    `json:"status"`
+	FilesScanned  int64     `json:"files_scanned"`
+	FilesUploaded int64     `json:"files_uploaded"`
+	BytesUploaded int64     `json:"bytes_uploaded"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
 }
 
 func toSummary(r db.Run) runSummary {
@@ -67,8 +67,8 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 type runDetailResponse struct {
-	Run  runSummary    `json:"run"`
-	Logs []logEntry    `json:"logs"`
+	Run  runSummary `json:"run"`
+	Logs []logEntry `json:"logs"`
 }
 
 type logEntry struct {
@@ -107,9 +107,21 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runDetailResponse{Run: toSummary(run), Logs: out})
 }
 
+// handleDeleteRunLogs truncates the entire run_logs table while leaving
+// the runs table intact. Intended for the Logs page's global cleanup
+// action.
+func (s *Server) handleDeleteRunLogs(w http.ResponseWriter, r *http.Request) {
+	n, err := s.deps.DB.DeleteRunLogs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
 type triggerRunRequest struct {
 	// Mode controls which phases run: "full" (default), "scan", or "upload".
-	Mode  string   `json:"mode"`
+	Mode string `json:"mode"`
 	// Paths restricts a scan-mode run to specific file/folder paths (partial rescan).
 	Paths []string `json:"paths"`
 }
@@ -370,8 +382,10 @@ func (s *Server) handleContinueRun(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Current *runSummary `json:"current"`
-	Last    *runSummary `json:"last"`
+	Current         *runSummary      `json:"current"`
+	Last            *runSummary      `json:"last"`
+	DownloadCurrent *downloadSummary `json:"download_current,omitempty"`
+	DownloadLast    *downloadSummary `json:"download_last,omitempty"`
 	// StopRequested is true while a graceful stop is pending: the engine
 	// will exit cleanly after the in-flight upload. Lets the UI flip the
 	// Stop button to a Continue affordance and render a "stopping" badge.
@@ -416,6 +430,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		sum := toSummary(runs[0])
 		resp.Last = &sum
 	}
+	s.downloadMu.Lock()
+	if s.currentDownload != nil {
+		cur := *s.currentDownload
+		resp.DownloadCurrent = &cur
+	}
+	if s.lastDownload != nil {
+		last := *s.lastDownload
+		resp.DownloadLast = &last
+	}
+	s.downloadMu.Unlock()
 	writeJSON(w, http.StatusOK, resp)
 }
 

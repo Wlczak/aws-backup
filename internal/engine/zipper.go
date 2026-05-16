@@ -6,6 +6,9 @@ package engine
 import (
 	"archive/zip"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +44,13 @@ type Group struct {
 	Files  []PendingFile
 }
 
+// ZipEntry captures one member written into an archive together with its
+// per-file MD5. The archive checksum itself lives on the zip row.
+type ZipEntry struct {
+	Path string
+	MD5  string
+}
+
 // rootDirLabel is the fake "directory" name used when naming zips that
 // contain root-level files.
 const rootDirLabel = "_root"
@@ -58,7 +68,9 @@ type dirNode struct {
 }
 
 // GroupFiles splits pending files into upload groups, preferring
-// subdirectory boundaries over arbitrary numbered slices.
+// subdirectory boundaries over arbitrary numbered slices while folding
+// small sibling folders up into their parent loose-file pool so object-
+// heavy trees get zipped instead of fanning out into many uploads.
 //
 // Algorithm:
 //  1. Build a path tree from all RelPaths.
@@ -68,8 +80,10 @@ type dirNode struct {
 //  3. If a subtree is too big, recurse into each child subdirectory —
 //     so `photos/2024/` and `photos/2025/` become separate zips instead
 //     of one monolithic `photos_1.zip`. Child subdirectories with fewer
-//     than minZipDirFiles files are folded into the parent's loose-file
-//     pool instead of becoming tiny standalone groups.
+//     than minZipDirFiles files are folded into the current level's
+//     loose-file pool instead of becoming tiny standalone groups; this
+//     applies at the root too so many tiny top-level folders can still
+//     collapse into a small number of zip objects.
 //  4. Files sitting directly at a splitting level ("loose files"), plus
 //     any folded small-child files, form their own group; if they
 //     collectively exceed maxBytes they are chunked by size.
@@ -86,9 +100,9 @@ func GroupFiles(files []PendingFile, zipThreshold, minZipDirFiles int, maxBytes 
 
 	root := buildTree(files)
 	var out []Group
-	// Root always descends into its children so each top-level directory
-	// is a natural group boundary, independent of the size cap. The cap
-	// only drives further splits inside a top-level subtree.
+	// Keep the root as a split point so top-level directories still act
+	// like natural boundaries when the tree is not object-heavy enough
+	// to collapse.
 	walkTree(root, "", zipThreshold, minZipDirFiles, maxBytes, true, &out)
 	return out
 }
@@ -126,9 +140,9 @@ func buildTree(files []PendingFile) *dirNode {
 
 // walkTree decides how to split a subtree into groups, writing them into
 // *out. pathPrefix is the slash-joined directory path from the tree root
-// to this node ("" for root). mustDescend forces the split at this level
-// even if the subtree would fit in the cap — set at root so top-level
-// directories are always their own groups regardless of cap settings.
+// to this node ("" for root). mustDescend forces a split at this level so
+// the root can remain a natural boundary even when the whole tree fits in
+// the size cap.
 func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, maxBytes int64, mustDescend bool, out *[]Group) {
 	// Subtree fits in the cap — emit the whole thing as one group.
 	if !mustDescend && (maxBytes <= 0 || n.size <= maxBytes) {
@@ -148,8 +162,8 @@ func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, m
 	// Descend into each child subdir so subfolders become the group
 	// boundary (e.g. photos/2024/ vs photos/2025/) instead of numbered
 	// slices of a flat top-dir. Children with fewer than minZipDirFiles
-	// files (only when not at the forced root level) are folded into
-	// this level's loose-file pool rather than becoming tiny groups.
+	// files are folded into this level's loose-file pool rather than
+	// becoming tiny groups.
 	childNames := make([]string, 0, len(n.children))
 	for name := range n.children {
 		childNames = append(childNames, name)
@@ -163,7 +177,7 @@ func walkTree(n *dirNode, pathPrefix string, zipThreshold, minZipDirFiles int, m
 		if pathPrefix != "" {
 			childPrefix = pathPrefix + "/" + name
 		}
-		if !mustDescend && minZipDirFiles > 0 && child.count < minZipDirFiles {
+		if minZipDirFiles > 0 && child.count < minZipDirFiles {
 			folded = append(folded, collectSubtree(child)...)
 			continue
 		}
@@ -379,13 +393,13 @@ func sanitizeLabel(s string) string {
 // non-nil, is applied once per source reader before bytes flow into
 // the zip writer; the engine uses it to inject a counterReader that
 // emits live copy_progress events.
-func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string, wrap func(io.Reader) io.Reader) (size int64, entries []string, err error) {
+func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outPath string, wrap func(io.Reader) io.Reader) (size int64, entries []ZipEntry, md5hex, sha256hex string, err error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	out, err := os.Create(outPath)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	defer func() {
 		cerr := out.Close()
@@ -394,39 +408,42 @@ func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outP
 		}
 	}()
 
-	zw := zip.NewWriter(out)
+	md5h := md5.New()
+	sha256h := sha256.New()
+	zw := zip.NewWriter(io.MultiWriter(out, md5h, sha256h))
 	for _, f := range files {
 		if err := ctx.Err(); err != nil {
 			zw.Close()
-			return 0, nil, err
+			return 0, nil, "", "", err
 		}
-		if err := writeZipEntry(ctx, zw, src, f, wrap); err != nil {
+		md5hex, err := writeZipEntry(ctx, zw, src, f, wrap)
+		if err != nil {
 			zw.Close()
-			return 0, nil, fmt.Errorf("zip %s: %w", f.RelPath, err)
+			return 0, nil, "", "", fmt.Errorf("zip %s: %w", f.RelPath, err)
 		}
-		entries = append(entries, f.RelPath)
+		entries = append(entries, ZipEntry{Path: f.RelPath, MD5: md5hex})
 	}
 	if err := zw.Close(); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	if err := out.Sync(); err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
 	st, err := out.Stat()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, "", "", err
 	}
-	return st.Size(), entries, nil
+	return st.Size(), entries, hex.EncodeToString(md5h.Sum(nil)), hex.EncodeToString(sha256h.Sum(nil)), nil
 }
 
-func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile, wrap func(io.Reader) io.Reader) error {
+func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f PendingFile, wrap func(io.Reader) io.Reader) (string, error) {
 	w, err := zw.Create(f.RelPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	rc, err := src.Open(ctx, f.RelPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer rc.Close()
 	var reader io.Reader = rc
@@ -437,6 +454,10 @@ func writeZipEntry(ctx context.Context, zw *zip.Writer, src source.Source, f Pen
 	// zip-entry read within one io.Copy buffer instead of waiting for
 	// the file to fully drain into the zip writer.
 	reader = &ctxReader{ctx: ctx, r: reader}
-	_, err = io.Copy(w, reader)
-	return err
+	h := md5.New()
+	_, err = io.Copy(w, io.TeeReader(reader, h))
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -4,6 +4,26 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Logs page now has a clear-all action that truncates `run_logs` via `DELETE /api/run-logs` while preserving the `runs` table history |
+| — | — | Download tab now prefills its target directory from `backup.download_dir`, and the dashboard no longer exposes the full-download trigger; the mirror job still exists server-side for direct use |
+| — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
+| — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
+| — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |
+| — | — | Zip grouping now folds tiny sibling folders into parent-level zip pools even at the top level, so fan-out heavy trees collapse into a few archives instead of thousands of S3 objects |
+| — | — | Full-download mirror job now carries an object-count + GET/egress cost estimate for the missing set, so the UI can show the expected download cost once the mirror scan has determined what is actually missing |
+| — | — | SQLite connection pool now closes the idle connection after 15 minutes and transparently reopens on the next query; the DB handle itself stays alive for the process lifetime |
+| — | — | Dashboard can now trigger a full mirror download from Settings-backed `backup.download_dir`, scan the mirror into `download_present` / `download_checked_at`, and fetch only missing rows (reusing cached zip archives from `backup.tmp_dir` when available) |
+| — | — | Download tab now shows a live status line for idle/running/complete/failed restore downloads, alongside the existing progress bar |
+| — | — | S3 sync now discovers standalone root objects directly from the bucket listing and normalizes every S3-present row into `uploaded` or `cloud_only`; source rescans preserve bucket-backed state on unchanged rows |
+| — | — | Cloud-index sync now ignores standalone DB keys that no longer exist in S3, so the authoritative compare stays bucket-grounded instead of counting stale local metadata as cloud-backed |
+| — | — | Staticcheck cleanup removed an unused mirror helper and simplified the mirror zip error accumulation loop to satisfy `S1011`/`U1000` |
+| — | — | Zip archives now live in a dedicated `zips` table, `files.md5` stores per-file hashes again, and zip-backed files point at the archive row via `files.zip_id` |
+| — | — | Promoted `cloud_only` to a stored file state so sync can recreate S3-only rows without source scans collapsing them back to `missing` |
+| — | — | Dashboard Index card now shows the restored-file count from restore_status stats |
+| #283 | — | Merge sync buttons into one authoritative cloud compare: list S3 objects + zip indexes, compare to the local scan set, recreate cloud-only rows as `cloud_only`, and reset only still-local stale rows to pending |
+| — | — | `cloud_only` is now a stored state; legacy `missing` rows without an `s3_key` still stay labeled `missing` |
+| — | — | Download tab now reports restored / in-progress / not-restoring counts and only estimates downloadable rows |
+| — | — | Added `/api/restore/download` and a separate Download tab for local restore + MD5 verify flow, with `restore_download_*` SSE progress |
 | #38 | db02540 | `MarkMissing` includes `zipped` rows |
 | #39 | f1880af | `currentRun` leak + `discardResponse` header on panic |
 | #43 | b223d84 | Reconcile DB from S3 zip indexes at backup start |
@@ -103,6 +123,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #271 | 3c1d6df | `cachedAllFiles` re-emits the underlying DB error on cache hit instead of serving an empty 200 |
 | #270 | 6c1c157 | `fetchManifest` rejects manifests whose `sourceBucket` is empty or doesn't equal the read bucket — closes the empty-bypass left by #187 |
 | #232 | ad60bd7 | `fetchManifest` rejects manifests with any empty `MD5checksum` so per-data-file verification can't be silently skipped |
+| — | — | CI `govulncheck` moved to Go 1.25.10 after GO-2026-4971 / GO-2026-4918 in 1.25.9 |
+| — | — | Post-run DB sync now uploads a `VACUUM INTO` snapshot instead of the live `index.db` file |
 | #275 | e83c614 | `fetchDataKeys` bounds compressed/uncompressed reads (8 GiB hard cap on gzip stream + manifest-Size compressed cap + 1 MiB per-field cap) — gzip-bomb hardening |
 | #274 | e438112 | `Validate` URL-parses `s3.endpoint` / `sqs.queue_url`, requires http/https + non-empty host, and rejects IMDS-class hosts to block credential exfiltration / metadata SSRF |
 | #273 | c905d34 | `originGuard` chi middleware on `/api` rejects mismatched-Origin requests so a hostile page can't read /api/events on a loopback dev server |

@@ -4,21 +4,15 @@
 
 The SQLite index in this project represents the **state of the S3 bucket**, not the state of the local source directory. When a file is deleted from the source, it transitions to `status = 'missing'` and **must remain in the index** until it is also deleted from S3. Do not add code, endpoints, or UI controls that purge `missing` rows based solely on source-side absence — that desyncs the index from the bucket.
 
-`cloud_only` is a distinct stored status for rows that are recoverable from S3 but are not currently present on disk. Source scans must not collapse those rows back into `missing`; only the authoritative S3 sync should reconcile them.
+The authoritative S3 sync must keep every S3-present file in an explicit bucket-backed state: `uploaded` for rows that are present locally and in S3, or `cloud_only` for rows that exist only in S3. It must not collapse S3-present rows into `missing`.
 
-The authoritative S3 sync must normalize every S3-present row into either `uploaded` or `cloud_only`. It should not turn an S3-present row into `missing`.
+Source rescans must preserve bucket-backed state on unchanged rows. An unchanged `cloud_only` row becomes `uploaded` when the local file is seen again; unchanged `uploaded` rows stay `uploaded`.
 
-Source rescans preserve existing bucket-backed state on unchanged rows. An unchanged `cloud_only` row is promoted to `uploaded` when the local file reappears.
-
-Zip archives are indexed in `zips`; `files.md5` stores the member checksum and `files.zip_id` links a file row to its archive when applicable.
+Zip archives are indexed separately in `zips`; `files.md5` is the per-file checksum and `files.zip_id` is the archive link when a row belongs to a zip.
 
 ## docs-guide.md is the project briefing
 
 `docs-guide.md` at the repo root is the index to the per-topic project docs under `docs/`. Read it at the start of every session in this repo before answering questions or making changes — it tells you which detail files (`docs/architecture.md`, `docs/api.md`, `docs/engine.md`, etc.) are worth opening for the current task, so you can be selective rather than re-deriving state from `git log` or directory structure. This replaces the old single-file `plan.md`. When a change you make alters something a doc describes, update the relevant doc in the same turn (and add a `docs/changelog.md` row if it's a noteworthy fix).
-
-## Commit + push when work lands
-
-After finishing a task that produces a working-tree change, commit and `git push` to `origin/main` in the same turn — don't leave dirty state for the user. Full rule + exceptions live in `docs/workflow.md`.
 
 ## Web feedback UI
 
@@ -26,9 +20,9 @@ Transient success/error feedback in the web app goes through the toast system (`
 
 ## Updating these instructions
 
-Whenever the user says "remember …", or otherwise shares important project information (architecture invariants, conventions, gotchas, decisions), update `CLAUDE.md` in the same turn so the rule is durable across sessions. Do not rely on conversation memory alone for project-level rules.
+Whenever the user says "remember …", or otherwise shares important project information (architecture invariants, conventions, gotchas, decisions), update `AGENTS.md` in the same turn so the rule is durable across sessions. Do not rely on conversation memory alone for project-level rules.
 
-If the new rule also belongs in the topical project docs (anything that affects architecture, the API, the data model, the engine lifecycle, the config schema, the dev workflow, etc.), update the matching file under `docs/` in the same turn — `CLAUDE.md` is for cross-cutting harness rules; `docs/*.md` is where future readers go for details. When both apply, write the rule once in the right doc and keep the `CLAUDE.md` entry as a short pointer.
+If the new rule also belongs in the topical project docs (anything that affects architecture, the API, the data model, the engine lifecycle, the config schema, the dev workflow, etc.), update the matching file under `docs/` in the same turn — `AGENTS.md` is for cross-cutting harness rules; `docs/*.md` is where future readers go for details. When both apply, write the rule once in the right doc and keep the `AGENTS.md` entry as a short pointer.
 
 ## Commiting
 

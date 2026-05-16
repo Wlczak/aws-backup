@@ -171,6 +171,39 @@ func TestGroupFilesMinZipDirFiles(t *testing.T) {
 	}
 }
 
+func TestGroupFilesMinZipDirFilesFoldTopLevelDirs(t *testing.T) {
+	// Before the root-level fold fix, each top-level folder below the
+	// threshold would be emitted separately even when the whole tree was
+	// object-heavy. Now those small sibling folders collapse into a small
+	// number of zip groups at the root.
+	files := []PendingFile{
+		{ID: 1, RelPath: "alpha/a1.txt", Size: 200},
+		{ID: 2, RelPath: "alpha/a2.txt", Size: 200},
+		{ID: 3, RelPath: "beta/b1.txt", Size: 200},
+		{ID: 4, RelPath: "beta/b2.txt", Size: 200},
+		{ID: 5, RelPath: "gamma/c1.txt", Size: 200},
+		{ID: 6, RelPath: "gamma/c2.txt", Size: 200},
+	}
+
+	groups := GroupFiles(files, 3, 3, 1000)
+	if len(groups) != 2 {
+		t.Fatalf("want 2 root zip groups, got %d: %+v", len(groups), groups)
+	}
+	total := 0
+	for _, g := range groups {
+		if g.TopDir != "" {
+			t.Errorf("root-folded groups should keep TopDir empty, got %q", g.TopDir)
+		}
+		if !g.Zip {
+			t.Errorf("group %+v should be zipped", g)
+		}
+		total += len(g.Files)
+	}
+	if total != len(files) {
+		t.Errorf("groups lost files: covered=%d want=%d", total, len(files))
+	}
+}
+
 func TestZipName(t *testing.T) {
 	// Files all in photos/ → label is "photos"
 	photosFiles := []PendingFile{
@@ -321,7 +354,7 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "photos.zip")
-	size, entries, err := CreateZip(context.Background(), src, pending, out, nil)
+	size, entries, md5hex, sha256hex, err := CreateZip(context.Background(), src, pending, out, nil)
 	if err != nil {
 		t.Fatalf("CreateZip: %v", err)
 	}
@@ -330,6 +363,9 @@ func TestCreateZipRoundTrip(t *testing.T) {
 	}
 	if len(entries) != len(pending) {
 		t.Errorf("entries=%d want %d", len(entries), len(pending))
+	}
+	if md5hex == "" || sha256hex == "" {
+		t.Fatalf("expected archive digests, got md5=%q sha256=%q", md5hex, sha256hex)
 	}
 
 	// Reopen the zip and verify contents.
@@ -390,7 +426,7 @@ func TestCreateZipCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := CreateZip(ctx, src, []PendingFile{{RelPath: "a.txt"}},
+	_, _, _, _, err := CreateZip(ctx, src, []PendingFile{{RelPath: "a.txt"}},
 		filepath.Join(t.TempDir(), "out.zip"), nil)
 	if err == nil {
 		t.Fatal("expected cancel error")
