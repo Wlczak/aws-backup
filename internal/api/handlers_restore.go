@@ -296,6 +296,11 @@ type restoreDownloadResponse struct {
 	Errors       []string `json:"errors,omitempty"`
 }
 
+// restoreToDirResponse is the legacy test name for restoreDownloadResponse.
+// Keep it as an alias so older callers keep compiling while the API surface
+// uses the /restore/download naming everywhere else.
+type restoreToDirResponse = restoreDownloadResponse
+
 type restoreDownloadEstimateRequest struct {
 	Paths []string `json:"paths"`
 }
@@ -454,6 +459,13 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		Skipped:      stats.Skipped,
 		Errors:       stats.Errors,
 	})
+}
+
+// handleRestoreToDir is the legacy handler name for the restore download
+// endpoint. Keep it as a shim so older tests and callers continue to work
+// while the route stays on /restore/download.
+func (s *Server) handleRestoreToDir(w http.ResponseWriter, r *http.Request) {
+	s.handleRestoreDownload(w, r)
 }
 
 // handleRestoreDownloadEstimate computes a download cost estimate from DB

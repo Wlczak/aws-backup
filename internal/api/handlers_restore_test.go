@@ -213,8 +213,8 @@ func TestRestoreToDirDownloadsMixedStandaloneAndZip(t *testing.T) {
 	if out.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
 		t.Fatalf("bytes_written=%d want %d", out.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
 	}
-	if len(out.Blocked) != 1 || !strings.Contains(out.Blocked[0], "pending.txt") {
-		t.Fatalf("blocked=%v want pending.txt", out.Blocked)
+	if len(out.Skipped) != 1 || !strings.Contains(out.Skipped[0], "pending.txt") {
+		t.Fatalf("skipped=%v want pending.txt", out.Skipped)
 	}
 }
 

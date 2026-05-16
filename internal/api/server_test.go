@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,7 +27,64 @@ import (
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
-func newTestServer(t *testing.T) (*httptest.Server, Deps) {
+type testServerConfig struct {
+	Handler http.Handler
+}
+
+type testServer struct {
+	URL    string
+	Config *testServerConfig
+	client *http.Client
+}
+
+func (ts *testServer) Client() *http.Client { return ts.client }
+func (ts *testServer) Close()               {}
+
+func newInProcServer(handler http.Handler) *testServer {
+	ts := &testServer{
+		URL:    "http://inproc.test",
+		Config: &testServerConfig{Handler: handler},
+	}
+	transport := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		ForceAttemptHTTP2: false,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if ts.Config == nil || ts.Config.Handler == nil {
+				return nil, errors.New("in-proc test server handler is not configured")
+			}
+			clientConn, serverConn := net.Pipe()
+			go func() { _ = http.Serve(&singleConnListener{conn: serverConn}, ts.Config.Handler) }()
+			return clientConn, nil
+		},
+	}
+	ts.client = &http.Client{Transport: transport}
+	return ts
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error { return nil }
+
+func (l *singleConnListener) Addr() net.Addr { return testAddr("inproc") }
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+func (a testAddr) String() string  { return string(a) }
+
+func newTestServer(t *testing.T) (*testServer, Deps) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -77,12 +133,12 @@ func newTestServer(t *testing.T) (*httptest.Server, Deps) {
 		},
 	}
 	srv := NewServer(deps)
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 	return ts, deps
 }
 
-func newRestoreDownloadServer(t *testing.T) (*httptest.Server, Deps, storage.Storage) {
+func newRestoreDownloadServer(t *testing.T) (*testServer, Deps, storage.Storage) {
 	t.Helper()
 	ts, deps := newTestServer(t)
 	store := storage.NewMemStorage()
@@ -97,7 +153,7 @@ func hexMD5(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func getJSON(t *testing.T, ts *httptest.Server, path string, into any) *http.Response {
+func getJSON(t *testing.T, ts *testServer, path string, into any) *http.Response {
 	t.Helper()
 	resp, err := ts.Client().Get(ts.URL + path)
 	if err != nil {
@@ -136,7 +192,7 @@ func TestStatusStaleCurrentRunIDIsClean(t *testing.T) {
 	srv.currentRun = 99999 // no such row
 	srv.runMu.Unlock()
 
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 
 	resp, err := ts.Client().Get(ts.URL + "/api/status")
@@ -834,7 +890,7 @@ func TestStorageHotSwap(t *testing.T) {
 		Config:  &cfg,
 		Storage: func() storage.Storage { return live },
 	})
-	ts := httptest.NewServer(srv.Router())
+	ts := newInProcServer(srv.Router())
 	t.Cleanup(ts.Close)
 
 	// Hot-swap the storage handle that the getter returns.

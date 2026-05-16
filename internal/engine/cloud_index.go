@@ -76,12 +76,17 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 		idx.ZipCount++
 	}
 
-	addStandalone := func(key string) {
+	addStandalone := func(key string, requirePresent bool) {
 		if !strings.HasPrefix(key, listPrefix) {
 			return
 		}
 		if strings.HasSuffix(key, ZipIndexSuffix) {
 			return
+		}
+		if requirePresent {
+			if _, ok := inS3[key]; !ok {
+				return
+			}
 		}
 		// If a zip's sidecar is present, the zip key is represented through
 		// the indexed member list instead of as a standalone object.
@@ -100,10 +105,10 @@ func LoadCloudIndex(ctx context.Context, s storage.Storage, prefix string, stand
 	}
 
 	for _, key := range keys {
-		addStandalone(key)
+		addStandalone(key, false)
 	}
 	for _, key := range standaloneKeys {
-		addStandalone(key)
+		addStandalone(key, true)
 	}
 
 	return idx, nil
