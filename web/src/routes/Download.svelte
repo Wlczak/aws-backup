@@ -83,9 +83,9 @@
     percent: number;
     status: 'active' | 'done' | 'failed';
     error?: string;
-    updatedAt: number;
   };
   let downloadItems = $state<Record<string, DownloadItem>>({});
+  let downloadItemOrder = $state<string[]>([]);
   let pollTimer: number | undefined;
   let pollDestroyed = false;
 
@@ -171,6 +171,9 @@
 
   function upsertDownloadItem(path: string, patch: Partial<DownloadItem>) {
     const prev = downloadItems[path];
+    if (!prev) {
+      downloadItemOrder = [...downloadItemOrder, path];
+    }
     downloadItems[path] = {
       path,
       bytes: prev?.bytes ?? 0,
@@ -178,17 +181,12 @@
       percent: prev?.percent ?? 0,
       status: prev?.status ?? 'active',
       error: prev?.error,
-      updatedAt: Date.now(),
       ...patch,
     };
   }
 
   let downloadItemList = $derived(
-    Object.values(downloadItems).sort((a, b) => {
-      if (a.status === 'active' && b.status !== 'active') return -1;
-      if (b.status === 'active' && a.status !== 'active') return 1;
-      return b.updatedAt - a.updatedAt;
-    }),
+    downloadItemOrder.map((path) => downloadItems[path]).filter((item): item is DownloadItem => !!item),
   );
 
   function resultFromProgress(next: DownloadProgress): DownloadResult {
@@ -241,6 +239,7 @@
         const d = data as { total: number; total_bytes: number };
         downloadTotalBytes = d.total_bytes ?? 0;
         downloadItems = {};
+        downloadItemOrder = [];
         applyDownloadProgress({
           processed: 0,
           total: d.total,
@@ -406,6 +405,7 @@
     downloadResult = null;
     downloadTotalBytes = 0;
     downloadItems = {};
+    downloadItemOrder = [];
     downloadStatus = runningStatus('Submitting download request…');
     try {
       lastVerifyChecksum = verifyChecksum;
@@ -594,8 +594,8 @@
       {downloadProgress.processed.toLocaleString()} / {downloadProgress.total.toLocaleString()} checked
       {#if downloadProgress.error} · {downloadProgress.error}{/if}
     </p>
-    {#if downloadProgress.current_path}
-      <div class="current-file">
+    <div class="current-file" class:empty={!downloadProgress.current_path}>
+      {#if downloadProgress.current_path}
         <div class="current-head">
           <div>
             <div class="muted small">Current file</div>
@@ -612,8 +612,11 @@
             />
           </div>
         {/if}
-      </div>
-    {/if}
+      {:else}
+        <div class="muted small">Current file</div>
+        <div class="current-placeholder">Waiting for the next file…</div>
+      {/if}
+    </div>
     {#if downloadProgress.total_bytes > 0}
       <div style="margin-top: 0.6rem">
         <ProgressBar
@@ -765,6 +768,12 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.02);
+    min-height: 5.5rem;
+  }
+  .current-file.empty {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }
   .current-head,
   .activity-head {
@@ -780,6 +789,11 @@
   .current-pct {
     white-space: nowrap;
     color: var(--muted);
+  }
+  .current-placeholder {
+    margin-top: 0.35rem;
+    color: var(--muted);
+    min-height: 1.25rem;
   }
   .activity-list {
     display: grid;
