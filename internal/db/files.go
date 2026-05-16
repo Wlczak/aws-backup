@@ -260,9 +260,11 @@ type BatchEntry struct {
 // Implementation: a re-scan over a stable tree is dominated by unchanged
 // rows, so we partition entries via one bulk SELECT, then issue bulk
 // INSERT (new) + bulk UPDATE last_seen_at (unchanged) + per-row UPDATE
-// (changed). The previous version did SELECT-then-INSERT/UPDATE per
-// entry which made a 100k-file scan take minutes of GORM round-trips.
-// (#scan-batch)
+// (changed). Missing rows that reappear locally are reset to pending,
+// cloud_only rows seen again are promoted to uploaded, and vanished
+// uploaded/zipped rows are reclassified by MarkMissing. The previous
+// version did SELECT-then-INSERT/UPDATE per entry which made a 100k-file
+// scan take minutes of GORM round-trips. (#scan-batch)
 func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt time.Time) ([]UpsertResult, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -270,10 +272,8 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 	results := make([]UpsertResult, len(entries))
 
 	paths := make([]string, len(entries))
-	indexByPath := make(map[string]int, len(entries))
 	for i, e := range entries {
 		paths[i] = e.Path
-		indexByPath[e.Path] = i
 	}
 
 	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -302,6 +302,7 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 		var toCreate []File
 		var toCreateIdx []int
 		var unchangedIDs []int64
+		var missingIDs []int64
 		var cloudOnlyIDs []int64
 		type changeOp struct {
 			id    int64
@@ -325,9 +326,12 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				results[i].Changed = true
 				changes = append(changes, changeOp{id: ex.ID, size: e.Size, mtime: e.ModTime})
 			} else {
-				if ex.Status == StatusCloudOnly {
+				switch ex.Status {
+				case StatusCloudOnly:
 					cloudOnlyIDs = append(cloudOnlyIDs, ex.ID)
-				} else {
+				case StatusMissing:
+					missingIDs = append(missingIDs, ex.ID)
+				default:
 					unchangedIDs = append(unchangedIDs, ex.ID)
 				}
 			}
@@ -375,6 +379,27 @@ func (db *DB) UpsertFileBatch(ctx context.Context, entries []BatchEntry, seenAt 
 				Updates(map[string]any{
 					"status":       StatusUploaded,
 					"last_seen_at": seenAt,
+				}).Error; err != nil {
+				return err
+			}
+		}
+
+		for s := 0; s < len(missingIDs); s += sqlChunkSize {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			end := s + sqlChunkSize
+			if end > len(missingIDs) {
+				end = len(missingIDs)
+			}
+			if err := tx.Model(&File{}).
+				Where("id IN ?", missingIDs[s:end]).
+				Updates(map[string]any{
+					"status":             StatusPending,
+					"zip_id":             gorm.Expr("NULL"),
+					"last_seen_at":       seenAt,
+					"restore_status":     "",
+					"restore_expires_at": nil,
 				}).Error; err != nil {
 				return err
 			}
@@ -446,8 +471,14 @@ func (db *DB) UpsertFile(ctx context.Context, path string, size int64, mtime, se
 		updates := map[string]any{
 			"last_seen_at": seenAt,
 		}
-		if existing.Status == StatusCloudOnly {
+		switch existing.Status {
+		case StatusCloudOnly:
 			updates["status"] = StatusUploaded
+		case StatusMissing:
+			updates["status"] = StatusPending
+			updates["zip_id"] = gorm.Expr("NULL")
+			updates["restore_status"] = ""
+			updates["restore_expires_at"] = nil
 		}
 		return tx.Model(&File{}).Where("id = ?", existing.ID).Updates(updates).Error
 	})
@@ -486,17 +517,30 @@ func (db *DB) MarkMissingByPaths(ctx context.Context, paths []string) (int64, er
 	return total, err
 }
 
-// MarkMissing flips any non-missing row whose last_seen_at is older than
-// scanStart to status=missing. Returns the affected row count.
-// Includes pending/failed so a file that was queued but deleted before
-// upload doesn't sit in the queue forever, re-failing every run.
+// MarkMissing reclassifies rows that were not seen in the current scan.
+// Rows that were already bucket-backed become cloud_only when they
+// disappear from the local source; rows that were only local (pending or
+// failed) become missing. Returns the number of rows that became missing.
 func (db *DB) MarkMissing(ctx context.Context, scanStart time.Time) (int64, error) {
-	result := db.g.WithContext(ctx).Model(&File{}).
-		Where("status IN ? AND last_seen_at < ?",
-			[]string{StatusUploaded, StatusZipped, StatusPending, StatusFailed},
-			scanStart).
-		Update("status", StatusMissing)
-	return result.RowsAffected, result.Error
+	var missingRows int64
+	err := db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		missing := tx.Model(&File{}).
+			Where("status IN ? AND last_seen_at < ?",
+				[]string{StatusPending, StatusFailed},
+				scanStart).
+			Update("status", StatusMissing)
+		if missing.Error != nil {
+			return missing.Error
+		}
+		missingRows = missing.RowsAffected
+
+		return tx.Model(&File{}).
+			Where("status IN ? AND last_seen_at < ?",
+				[]string{StatusUploaded, StatusZipped},
+				scanStart).
+			Update("status", StatusCloudOnly).Error
+	})
+	return missingRows, err
 }
 
 // MarkUploaded sets md5, s3_key, uploaded_at and flips status to uploaded.

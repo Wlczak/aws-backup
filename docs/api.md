@@ -13,7 +13,8 @@ POST   /api/runs                      trigger run; body {mode: full|scan|upload,
 POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
-POST   /api/download/full             dashboard-triggered full mirror download using backup.download_dir; the live job summary now includes object count + estimated GET/egress cost for the missing set
+DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
+POST   /api/download/full             full mirror download using backup.download_dir; the live job summary includes object count + estimated GET/egress cost for the missing set
 
 # File index
 GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
@@ -54,13 +55,13 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
-`POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. The live `/api/status` payload exposes the missing-set object count plus estimated request / egress / total cost so the dashboard can show the price before and during the download phase.
+`POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase.
 
 `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/standard-storage/egress cost breakdown plus expected wait window. Files whose `restore_status` is already `in_progress` or `restored` are excluded from the estimate; the request-fee count is based on distinct S3 objects, so multiple rows inside one zip still count as one restore request. The skipped rows are surfaced separately as `already_in_progress_*` / `already_restored_*`.
 
 `POST /api/restore/trigger` issues `s3:RestoreObject` for every unique key covering the selected paths and asks AWS to keep the thawed copy in standard storage for `days` (1..180). The request can choose `bulk` or `standard`; Glacier objects aren't readable until they thaw (about 48 h Bulk or 12 h Standard for Deep Archive). Matched DB rows immediately flip to `restore_status='in_progress'` so the UI reflects the request; final state lands via SQS (`s3:ObjectRestore:Completed`) or a HEAD scan. Rows already at `restore_status IN (in_progress, restored)` are filtered out before the S3 call (counted in `files_skipped_*` of the response). Storage-level `RestoreAlreadyInProgress` / `InvalidObjectState` from S3 are still mapped to soft-success counts, not errors.
 
-`POST /api/sync` / `/api/sync/full` do not use the bucket compare to mark S3-present rows as `missing`. Anything that exists in S3 is kept explicit as either `uploaded` or `cloud_only`; rows absent from S3 are left to source-side reconciliation. Standalone root objects come straight from the bucket listing, not from prior DB history. Zip-backed rows are relinked through the `zips` table, while `files.md5` always stores the per-file checksum.
+`POST /api/sync` / `/api/sync/full` keep S3-present rows explicit as either `uploaded` or `cloud_only`. Rows that are `cloud_only` but no longer have a matching S3 object are converted to `missing`; rows absent from the DB but present in S3 are recreated as `cloud_only`. Standalone root objects come straight from the bucket listing, not from prior DB history. Zip-backed rows are relinked through the `zips` table, while `files.md5` always stores the per-file checksum.
 
 ## SSE Event Catalogue
 

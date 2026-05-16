@@ -57,14 +57,24 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	if err := d.MarkUploadedBatch(ctx, []int64{goneRes.ID}, "md5", "backups/gone-locally.txt", pastTime); err != nil {
 		t.Fatalf("mark gone uploaded: %v", err)
 	}
-	// MarkMissing flips rows whose last_seen_at < now; gone-locally qualifies.
-	// s3_key is preserved so ListIndividualS3Keys still returns it.
+	// MarkMissing now treats a vanished uploaded row as cloud_only so the
+	// later S3-aware sync can decide whether it is still recoverable.
 	if _, err := d.MarkMissing(ctx, now); err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
+	goneLocallyRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "gone-locally.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload gone-locally after MarkMissing: %v", err)
+	}
+	if len(goneLocallyRows) != 1 {
+		t.Fatalf("reload gone-locally rows=%d want 1", len(goneLocallyRows))
+	}
+	if goneLocallyRows[0].Status != db.StatusCloudOnly {
+		t.Fatalf("gone-locally status=%q want cloud_only after MarkMissing", goneLocallyRows[0].Status)
+	}
 	// Seed a second row that claims it was uploaded, but the object is
 	// not actually present in S3. The merged sync should push it back to
-	// pending too.
+	// pending because it is local-only now.
 	goneCloudRes, err := d.UpsertFile(ctx, "gone-cloud.txt", 1, pastTime, pastTime)
 	if err != nil {
 		t.Fatalf("seed gone-cloud: %v", err)
@@ -146,11 +156,11 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// Local file set = {photos/a.jpg, docs/spec.pdf, new-on-disk.txt,
-	// gone-cloud.txt, pending-on-s3.txt}; gone-locally and recoverable are
-	// status=missing, so excluded.
-	if body.LocalFileCount != 5 {
-		t.Errorf("LocalFileCount: got %d want 5 (body=%+v)", body.LocalFileCount, body)
+	// Local file set after sync = {gone-cloud.txt, new-on-disk.txt}.
+	// gone-locally and recoverable are cloud-backed, while the uploaded
+	// S3-present rows are already normalized into uploaded/cloud_only.
+	if body.LocalFileCount != 2 {
+		t.Errorf("LocalFileCount: got %d want 2 (body=%+v)", body.LocalFileCount, body)
 	}
 	// Cloud index = {photos/a.jpg (standalone), docs/spec.pdf,
 	// restore-me.jpg, pending-on-s3.txt, recoverable.txt}.
@@ -164,8 +174,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 
 	sort.Strings(body.CloudMissingFromLocal)
-	if strings.Join(body.CloudMissingFromLocal, ",") != "recoverable.txt,restore-me.jpg" {
-		t.Errorf("CloudMissingFromLocal: got %v want [recoverable.txt restore-me.jpg]", body.CloudMissingFromLocal)
+	if len(body.CloudMissingFromLocal) != 5 {
+		t.Errorf("CloudMissingFromLocal: got %v want 5 entries", body.CloudMissingFromLocal)
 	}
 
 	if body.ZipIndexesConsumed != 1 {
@@ -175,17 +185,17 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 		t.Errorf("expected at least one recreated file, got %d", body.FilesCreated)
 	}
 
-	// Only the row that is still local should be normalised back to
-	// pending. The missing row stays missing even though its cloud object
-	// is gone.
+	// Only the rows that are still local should be normalized back to
+	// pending. The cloud_only row with no S3 object becomes missing, and the
+	// missing row with an S3 object becomes cloud_only.
 	if body.MissingIndividual < 2 {
 		t.Errorf("expected two missing individual keys, got %d", body.MissingIndividual)
 	}
-	if body.FilesReset < 1 {
-		t.Errorf("expected one row reset to pending, got %d", body.FilesReset)
+	if body.FilesReset < 4 {
+		t.Errorf("expected four row updates, got %d", body.FilesReset)
 	}
 
-	goneLocallyRows, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "gone-locally.txt", All: true})
+	goneLocallyRows, _, err = d.ListFiles(ctx, db.FilesFilter{Search: "gone-locally.txt", All: true})
 	if err != nil {
 		t.Fatalf("reload gone-locally: %v", err)
 	}
@@ -199,8 +209,8 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	if len(goneCloudRows) != 1 {
 		t.Fatalf("reload gone-cloud rows=%d want 1", len(goneCloudRows))
 	}
-	if goneLocallyRows[0].Status != db.StatusPending {
-		t.Errorf("gone-locally status=%q want pending", goneLocallyRows[0].Status)
+	if goneLocallyRows[0].Status != db.StatusMissing {
+		t.Errorf("gone-locally status=%q want missing", goneLocallyRows[0].Status)
 	}
 	if goneCloudRows[0].Status != db.StatusPending {
 		t.Errorf("gone-cloud status=%q want pending", goneCloudRows[0].Status)

@@ -39,7 +39,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 		t.Errorf("first scan: %+v", s)
 	}
 
-	// Mark both as uploaded so we can see MarkMissing effect.
+	// Mark both as uploaded so we can see the disappearance reclassification.
 	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
 	for _, f := range files {
 		if err := d.MarkUploaded(ctx, f.ID, "md5", "k/"+f.Path, time.Now().UTC()); err != nil {
@@ -73,8 +73,8 @@ func TestScanNewChangedMissing(t *testing.T) {
 	if s.Changed != 1 {
 		t.Errorf("changed=%d want 1", s.Changed)
 	}
-	if s.Missing != 1 {
-		t.Errorf("missing=%d want 1", s.Missing)
+	if s.Missing != 0 {
+		t.Errorf("missing=%d want 0", s.Missing)
 	}
 
 	byPath := map[string]string{}
@@ -85,11 +85,46 @@ func TestScanNewChangedMissing(t *testing.T) {
 	if byPath["a.txt"] != db.StatusPending {
 		t.Errorf("a.txt status=%q want pending", byPath["a.txt"])
 	}
-	if byPath["keep.txt"] != db.StatusMissing {
-		t.Errorf("keep.txt status=%q want missing", byPath["keep.txt"])
+	if byPath["keep.txt"] != db.StatusCloudOnly {
+		t.Errorf("keep.txt status=%q want cloud_only", byPath["keep.txt"])
 	}
 	if byPath["c.txt"] != db.StatusPending {
 		t.Errorf("c.txt status=%q want pending", byPath["c.txt"])
+	}
+}
+
+func TestScanRevivesMissingRowToPending(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "return.txt"), "back again")
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	if _, err := Scan(ctx, src, d, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkMissingByPaths(ctx, []string{"return.txt"}); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+
+	s, err := Scan(ctx, src, d, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Seen != 1 || s.Missing != 0 {
+		t.Fatalf("rescan stats: %+v", s)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "return.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload return.txt: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("return.txt rows=%d want 1", len(files))
+	}
+	if files[0].Status != db.StatusPending {
+		t.Fatalf("return.txt status=%q want pending", files[0].Status)
 	}
 }
 

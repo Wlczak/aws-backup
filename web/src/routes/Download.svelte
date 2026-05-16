@@ -72,6 +72,18 @@
   onDestroy(() => { aborted = true; });
 
   onMount(() => {
+    void (async () => {
+      try {
+        const settings = await api.settings();
+        if (downloadTargetDir.trim() === '') {
+          downloadTargetDir = settings.backup.download_dir ?? '';
+        }
+      } catch {
+        // If settings aren't available yet, leave the field empty and let
+        // the operator pick a target directory manually.
+      }
+    })();
+
     const pre = selectionPaths();
     if (pre.length > 0) {
       raw = pre.join('\n');
@@ -222,7 +234,8 @@
     Download matching S3 objects or zip members into an absolute local directory
     and verify each restored file against the MD5 stored in the index. Glacier
     objects must already be available; otherwise the download reports a still
-    thawing error.
+    thawing error. The field is prefilled from Settings when a download
+    directory is configured.
   </p>
   <div class="download-form">
     <input
