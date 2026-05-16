@@ -60,7 +60,7 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
 
 Successive PUTs during one run compose against the pending config (not the live one) so a redacted-secret echo doesn't blank a credential the operator just queued.
 
-`backup.download_dir` is the persistent local mirror target used by the full-download mirror job. It must be an absolute path and is scanned before each mirror sync so the job can skip rows that are already present on disk.
+`backup.download_dir` is the persistent local mirror target used by the full-download mirror job. It must be an absolute path. The first mirror sync against a new directory performs a bootstrap scan, then caches the result in the database so later reruns can skip the filesystem walk; use `POST /api/download/rescan` or the dashboard button to refresh that cached snapshot when the folder changes on disk.
 
 ## Default config path
 

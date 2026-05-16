@@ -26,6 +26,8 @@
   // reloads. (#remember-completed)
   let seededFilesUploaded = $state(0);
   let triggering = $state(false);
+  let rescanningMirror = $state(false);
+  let cancellingMirror = $state(false);
 
   type ItemProgress = {
     key: string;
@@ -139,7 +141,7 @@
   // calls/hour for no value. (#70)
   function scheduleNextPoll() {
     if (pollDestroyed) return;
-    const delay = status?.current ? 1000 : 30000;
+    const delay = status?.current || status?.download_current ? 1000 : 30000;
     pollTimer = window.setTimeout(async () => {
       await refresh();
       scheduleNextPoll();
@@ -150,6 +152,9 @@
     try {
       status = await api.status();
       stats = await api.fileStats();
+      if (status?.download_current?.status !== 'running') {
+        cancellingMirror = false;
+      }
       // Seed scanSeen from the run row so a missed scan_progress SSE
       // frame (or a reconnect mid-run) doesn't strand the counter at
       // 0. The engine writes files_scanned on every scan flush so this
@@ -162,6 +167,33 @@
       const liveUp = status?.current?.files_uploaded ?? 0;
       if (liveUp > seededFilesUploaded) seededFilesUploaded = liveUp;
     } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  async function rescanDownloadMirror() {
+    if (rescanningMirror || status?.current || status?.download_current) return;
+    rescanningMirror = true;
+    try {
+      await api.downloadRescan();
+      toast.success('Download folder rescan started.');
+      await refresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      rescanningMirror = false;
+    }
+  }
+
+  async function cancelDownloadMirror() {
+    if (cancellingMirror || status?.download_current?.status !== 'running') return;
+    cancellingMirror = true;
+    try {
+      await api.downloadCancel();
+      toast.info('Mirror download cancel requested.');
+      await refresh();
+    } catch (e) {
+      cancellingMirror = false;
       toast.error(String(e));
     }
   }
@@ -609,6 +641,7 @@
       {@const restored = stats.by_restore_status?.['restored'] ?? 0}
       {@const mirrored = stats.by_download_present?.['present'] ?? 0}
       {@const notMirrored = stats.by_download_present?.['missing'] ?? 0}
+      {@const mirrorSnap = status?.download_mirror_snapshot}
       <div class="big">{stats.total_count.toLocaleString()} files</div>
       <div class="muted">{bytes(stats.total_size)} total</div>
       <div class="pills">
@@ -621,6 +654,90 @@
       </div>
       <div class="muted small" style="margin-top: 0.2rem">
         Download mirror: {mirrored.toLocaleString()} present, {notMirrored.toLocaleString()} missing
+      </div>
+      {#if mirrorSnap}
+        <div class="muted small" style="margin-top: 0.2rem">
+          Last scan {relativeTime(mirrorSnap.scanned_at)} ({formatDate(mirrorSnap.scanned_at)})
+        </div>
+      {/if}
+      {#if status?.download_current || status?.download_last}
+        {@const mirrorCurrent = status?.download_current}
+        {@const mirrorLast = status?.download_last}
+        <div class="mirror-job">
+          <div class="mirror-head">
+            <div>
+              <div class="muted small">Mirror download</div>
+              <div class="mono mirror-summary">
+                {#if mirrorCurrent}
+                  {mirrorCurrent.phase === 'scan' ? 'Scanning mirror' : 'Downloading mirror'}
+                {:else if mirrorLast}
+                  Last job · {mirrorLast.status}
+                {/if}
+              </div>
+            </div>
+            {#if mirrorCurrent}
+              <span class={`mirror-pill ${mirrorCurrent.status}`}>{mirrorCurrent.status}</span>
+            {:else if mirrorLast}
+              <span class={`mirror-pill ${mirrorLast.status}`}>{mirrorLast.status}</span>
+            {/if}
+          </div>
+          {#if mirrorCurrent}
+            {@const mirrorPct = mirrorCurrent.total > 0
+              ? Math.min(100, Math.round(((mirrorCurrent.phase === 'scan' ? mirrorCurrent.scanned : mirrorCurrent.processed) / mirrorCurrent.total) * 100))
+              : 0}
+            <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={mirrorPct} style="margin-top: 0.55rem">
+              <div class="fill" style="width: {mirrorPct}%"></div>
+            </div>
+            <div class="mirror-meta mono small">
+              {#if mirrorCurrent.phase === 'scan'}
+                {mirrorCurrent.scanned.toLocaleString()} / {mirrorCurrent.total.toLocaleString()} scanned
+                · {mirrorCurrent.present.toLocaleString()} present
+                · {mirrorCurrent.missing.toLocaleString()} missing
+              {:else}
+                {mirrorCurrent.processed.toLocaleString()} / {mirrorCurrent.total.toLocaleString()} checked
+                · {mirrorCurrent.files_written.toLocaleString()} written
+                · {bytes(mirrorCurrent.bytes_written)}
+              {/if}
+              {#if mirrorCurrent.errors > 0} · {mirrorCurrent.errors.toLocaleString()} error(s){/if}
+              {#if mirrorCurrent.error_message} · {mirrorCurrent.error_message}{/if}
+            </div>
+            <div class="run-actions" style="margin-top: 0.55rem">
+              <button
+                class="danger"
+                onclick={cancelDownloadMirror}
+                type="button"
+                disabled={cancellingMirror}
+                title="Cancel the current mirror download"
+              >
+                {cancellingMirror ? 'Cancelling…' : 'Cancel download'}
+              </button>
+            </div>
+          {:else if mirrorLast}
+            <div class="mirror-meta mono small" style="margin-top: 0.55rem">
+              {#if mirrorLast.phase === 'complete' || mirrorLast.phase === 'failed' || mirrorLast.phase === 'cancelled'}
+                {mirrorLast.scanned.toLocaleString()} scanned
+                · {mirrorLast.present.toLocaleString()} present
+                · {mirrorLast.missing.toLocaleString()} missing
+                · {mirrorLast.files_written.toLocaleString()} written
+                · {bytes(mirrorLast.bytes_written)}
+                {#if mirrorLast.errors > 0} · {mirrorLast.errors.toLocaleString()} error(s){/if}
+              {:else}
+                {mirrorLast.phase}
+              {/if}
+              {#if mirrorLast.error_message} · {mirrorLast.error_message}{/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+      <div class="run-actions" style="margin-top: 0.65rem">
+        <button
+          onclick={rescanDownloadMirror}
+          type="button"
+          disabled={rescanningMirror || !!status?.current || !!status?.download_current}
+          title="Refresh the cached mirror snapshot so reruns skip files already on disk"
+        >
+          {rescanningMirror ? 'Rescanning…' : 'Rescan download folder'}
+        </button>
       </div>
     {/if}
   </div>
@@ -883,6 +1000,41 @@
   .big { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.3rem; }
   .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
   .pill { font-size: 0.85rem; display: inline-flex; gap: 0.4rem; align-items: center; }
+  .mirror-job {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .mirror-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .mirror-summary,
+  .mirror-meta {
+    overflow-wrap: anywhere;
+  }
+  .mirror-meta {
+    margin-top: 0.35rem;
+    color: var(--muted);
+  }
+  .mirror-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .mirror-pill.running { color: var(--accent); }
+  .mirror-pill.completed { color: var(--ok, #1f7a3f); }
+  .mirror-pill.failed { color: var(--err); }
+  .mirror-pill.cancelled { color: var(--warn); }
   .err { color: var(--err); border-color: var(--err); }
   .live-stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
   .sync-grid { display: flex; flex-direction: column; gap: 0.75rem; }

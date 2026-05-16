@@ -56,8 +56,8 @@ const (
 	EventRestoreRequestFailed   = "restore_request_failed"
 	// Restore-download events accompany RestoreToDir — a local download and
 	// verify pass that writes files beneath an operator-chosen directory.
-	// Progress is reported per restored file so the UI can show the user
-	// that the S3 download and hash check are still advancing.
+	// Progress reports the active file path plus byte-level progress so the
+	// UI can show both the overall job and the current file still advancing.
 	EventRestoreDownloadStart    = "restore_download_start"
 	EventRestoreDownloadProgress = "restore_download_progress"
 	EventRestoreDownloadComplete = "restore_download_complete"
@@ -73,6 +73,7 @@ const (
 	EventDownloadMirrorProgress     = "download_mirror_progress"
 	EventDownloadMirrorComplete     = "download_mirror_complete"
 	EventDownloadMirrorFailed       = "download_mirror_failed"
+	EventDownloadMirrorCancelled    = "download_mirror_cancelled"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

@@ -382,10 +382,13 @@ func (s *Server) handleContinueRun(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Current         *runSummary      `json:"current"`
-	Last            *runSummary      `json:"last"`
-	DownloadCurrent *downloadSummary `json:"download_current,omitempty"`
-	DownloadLast    *downloadSummary `json:"download_last,omitempty"`
+	Current                *runSummary                    `json:"current"`
+	Last                   *runSummary                    `json:"last"`
+	DownloadCurrent        *downloadSummary               `json:"download_current,omitempty"`
+	DownloadLast           *downloadSummary               `json:"download_last,omitempty"`
+	DownloadSnapshot       *downloadMirrorSnapshotSummary `json:"download_mirror_snapshot,omitempty"`
+	RestoreDownloadCurrent *restoreDownloadSummary        `json:"restore_download_current,omitempty"`
+	RestoreDownloadLast    *restoreDownloadSummary        `json:"restore_download_last,omitempty"`
 	// StopRequested is true while a graceful stop is pending: the engine
 	// will exit cleanly after the in-flight upload. Lets the UI flip the
 	// Stop button to a Continue affordance and render a "stopping" badge.
@@ -430,6 +433,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		sum := toSummary(runs[0])
 		resp.Last = &sum
 	}
+	snap, err := s.loadDownloadMirrorSnapshotSummary(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("get download mirror snapshot: %w", err))
+		return
+	}
+	resp.DownloadSnapshot = snap
 	s.downloadMu.Lock()
 	if s.currentDownload != nil {
 		cur := *s.currentDownload
@@ -440,6 +449,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.DownloadLast = &last
 	}
 	s.downloadMu.Unlock()
+	s.restoreDownloadMu.Lock()
+	if s.currentRestoreDownload != nil {
+		cur := *s.currentRestoreDownload
+		resp.RestoreDownloadCurrent = &cur
+	}
+	if s.lastRestoreDownload != nil {
+		last := *s.lastRestoreDownload
+		resp.RestoreDownloadLast = &last
+	}
+	s.restoreDownloadMu.Unlock()
 	writeJSON(w, http.StatusOK, resp)
 }
 

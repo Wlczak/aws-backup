@@ -1032,27 +1032,62 @@ func TestRestoreDownloadOK(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
+
+	statusResp, err := ts.Client().Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var early struct {
+		RestoreDownloadCurrent *restoreDownloadSummary `json:"restore_download_current"`
+		RestoreDownloadLast    *restoreDownloadSummary `json:"restore_download_last"`
+	}
+	if err := json.NewDecoder(statusResp.Body).Decode(&early); err != nil {
+		statusResp.Body.Close()
+		t.Fatalf("decode early status: %v", err)
+	}
+	statusResp.Body.Close()
+	if early.RestoreDownloadCurrent == nil && early.RestoreDownloadLast == nil {
+		t.Fatal("restore download summary missing before first progress update")
+	}
+	if early.RestoreDownloadCurrent != nil && early.RestoreDownloadCurrent.TotalBytes != int64(len("hello")) {
+		t.Fatalf("early current total bytes=%d want %d", early.RestoreDownloadCurrent.TotalBytes, len("hello"))
+	}
+	if early.RestoreDownloadLast != nil && early.RestoreDownloadLast.TotalBytes != int64(len("hello")) {
+		t.Fatalf("early last total bytes=%d want %d", early.RestoreDownloadLast.TotalBytes, len("hello"))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
 	var got struct {
-		FilesWritten int64    `json:"files_written"`
-		BytesWritten int64    `json:"bytes_written"`
-		Skipped      []string `json:"skipped"`
-		Errors       []string `json:"errors"`
+		RestoreDownloadCurrent *restoreDownloadSummary `json:"restore_download_current"`
+		RestoreDownloadLast    *restoreDownloadSummary `json:"restore_download_last"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
+	for time.Now().Before(deadline) {
+		statusResp, err := ts.Client().Get(ts.URL + "/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResp.Body).Decode(&got); err != nil {
+			statusResp.Body.Close()
+			t.Fatalf("decode status: %v", err)
+		}
+		statusResp.Body.Close()
+		if got.RestoreDownloadLast != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if got.FilesWritten != 1 {
-		t.Fatalf("files_written=%d want 1", got.FilesWritten)
+	if got.RestoreDownloadLast == nil {
+		t.Fatal("restore download did not finish")
 	}
-	if got.BytesWritten != int64(len("hello")) {
-		t.Fatalf("bytes_written=%d want %d", got.BytesWritten, len("hello"))
+	if got.RestoreDownloadLast.FilesWritten != 1 {
+		t.Fatalf("files_written=%d want 1", got.RestoreDownloadLast.FilesWritten)
 	}
-	if len(got.Errors) != 0 {
-		t.Fatalf("errors=%v want none", got.Errors)
+	if got.RestoreDownloadLast.BytesWritten != int64(len("hello")) {
+		t.Fatalf("bytes_written=%d want %d", got.RestoreDownloadLast.BytesWritten, len("hello"))
 	}
 	data, err := os.ReadFile(filepath.Join(target, "notes.txt"))
 	if err != nil {

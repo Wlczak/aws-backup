@@ -22,6 +22,38 @@ func md5hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+func TestRestoreStagesThroughCacheBeforeTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := t.TempDir()
+	cachePath := restoreCachePath(tmpDir, "standalone", "docs/readme.txt")
+	if _, err := writeFromReader(cachePath, strings.NewReader("hello"), int64(len("hello")), md5hex("hello"), nil); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("cache file missing before promotion: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "docs", "readme.txt")); !os.IsNotExist(err) {
+		t.Fatalf("target file appeared before promotion: %v", err)
+	}
+	dst, err := safeJoin(target, "docs/readme.txt")
+	if err != nil {
+		t.Fatalf("safeJoin: %v", err)
+	}
+	if err := promoteCachedFile(cachePath, dst); err != nil {
+		t.Fatalf("promote cached file: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache file still exists after promotion: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("target = %q want %q", got, "hello")
+	}
+}
+
 func TestRestoreToDirMixed(t *testing.T) {
 	ctx := context.Background()
 
@@ -353,8 +385,8 @@ func TestRestoreToDirEmitsProgress(t *testing.T) {
 	if stats.FilesWritten != 1 {
 		t.Fatalf("FilesWritten = %d want 1", stats.FilesWritten)
 	}
-	if len(events) != 3 {
-		t.Fatalf("event count = %d want 3 (%+v)", len(events), events)
+	if len(events) < 4 {
+		t.Fatalf("event count = %d want at least 4 (%+v)", len(events), events)
 	}
 	if events[0].Type != EventRestoreDownloadStart {
 		t.Fatalf("start type = %q", events[0].Type)
@@ -368,15 +400,102 @@ func TestRestoreToDirEmitsProgress(t *testing.T) {
 	if got := events[1].Data["processed"].(int); got != 1 {
 		t.Fatalf("progress processed = %d want 1", got)
 	}
-	if got := events[1].Data["files_written"].(int64); got != 1 {
-		t.Fatalf("progress files_written = %d want 1", got)
+	if got := events[1].Data["current_total_bytes"].(int64); got != 5 {
+		t.Fatalf("progress current_total_bytes = %d want 5", got)
 	}
-	if events[2].Type != EventRestoreDownloadComplete {
-		t.Fatalf("complete type = %q", events[2].Type)
+	if got := events[1].Data["current_percent"].(int); got != 0 {
+		t.Fatalf("progress current_percent = %d want 0", got)
 	}
-	if got := events[2].Data["errors"].(int); got != 0 {
+	if events[len(events)-1].Type != EventRestoreDownloadComplete {
+		t.Fatalf("complete type = %q", events[len(events)-1].Type)
+	}
+	if got := events[len(events)-1].Data["errors"].(int); got != 0 {
 		t.Fatalf("complete errors = %d want 0", got)
 	}
+}
+
+func TestRestoreToDirEmitsByteLevelProgress(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "big.bin", Size: 5, ModTime: now}}, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("abcde"), "backups/big.bin", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/big.bin", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	mustPut(t, store, "backups/big.bin", "abcde")
+	slow := &slowGetStorage{Storage: store}
+
+	var events []Event
+	_, err = RestoreToDir(ctx, RestoreOptions{
+		DB:        d,
+		Storage:   slow,
+		KeyPrefix: "backups/",
+		TargetDir: t.TempDir(),
+		Paths:     []string{"/"},
+		Emit: func(ev Event) {
+			events = append(events, ev)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreToDir: %v", err)
+	}
+
+	var sawMidFile bool
+	for _, ev := range events {
+		if ev.Type != EventRestoreDownloadProgress {
+			continue
+		}
+		read := ev.Data["current_bytes"].(int64)
+		total := ev.Data["current_total_bytes"].(int64)
+		if read > 0 && read < total {
+			sawMidFile = true
+			if pct := ev.Data["current_percent"].(int); pct <= 0 || pct >= 100 {
+				t.Fatalf("expected in-flight percent to be between 0 and 100, got %d", pct)
+			}
+			break
+		}
+	}
+	if !sawMidFile {
+		t.Fatalf("expected a mid-file progress event, got %+v", events)
+	}
+}
+
+type slowGetStorage struct {
+	storage.Storage
+}
+
+func (s *slowGetStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, err := s.Storage.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &slowReadCloser{ReadCloser: rc}, nil
+}
+
+type slowReadCloser struct {
+	io.ReadCloser
+}
+
+func (s *slowReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, 1)
+	n, err := s.ReadCloser.Read(buf)
+	if n > 0 {
+		p[0] = buf[0]
+		time.Sleep(300 * time.Millisecond)
+		return 1, nil
+	}
+	return 0, err
 }
 
 func TestRestoreToDirSkipsNonRestoredFiles(t *testing.T) {
