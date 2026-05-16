@@ -86,6 +86,7 @@
   };
   let downloadItems = $state<Record<string, DownloadItem>>({});
   let downloadItemOrder = $state<string[]>([]);
+  let currentFile = $state<DownloadItem | null>(null);
   let pollTimer: number | undefined;
   let pollDestroyed = false;
 
@@ -107,13 +108,29 @@
     }
     downloadTotalBytes = next.total_bytes ?? downloadTotalBytes;
     if (next.current_path) {
-      upsertDownloadItem(next.current_path, {
+      const item = {
+        path: next.current_path,
         bytes: next.current_bytes ?? 0,
         total: next.current_total_bytes ?? 0,
         percent: next.current_percent ?? 0,
         status: next.file_status ?? (next.status === 'failed' ? 'failed' : next.status === 'done' ? 'done' : 'active'),
         error: next.error,
-      });
+      };
+      currentFile = item;
+      upsertDownloadItem(next.current_path, item);
+    } else if (currentFile && next.status === 'active') {
+      // Keep showing the last active file while the job advances between
+      // progress ticks that don't repeat current_path.
+      upsertDownloadItem(currentFile.path, currentFile);
+    } else if (currentFile && next.status !== 'active') {
+      currentFile = {
+        ...currentFile,
+        status: next.status === 'failed'
+          ? 'failed'
+          : 'done',
+        error: next.error,
+      };
+      upsertDownloadItem(currentFile.path, currentFile);
     }
     if (next.status === 'active') {
       const parts = [
@@ -240,6 +257,7 @@
         downloadTotalBytes = d.total_bytes ?? 0;
         downloadItems = {};
         downloadItemOrder = [];
+        currentFile = null;
         applyDownloadProgress({
           processed: 0,
           total: d.total,
@@ -315,13 +333,15 @@
           file_status: 'done',
         });
         if (currentPath) {
-          upsertDownloadItem(currentPath, {
+          currentFile = {
+            path: currentPath,
             bytes: currentTotalBytes ?? currentBytes ?? 0,
             total: currentTotalBytes ?? currentBytes ?? 0,
             percent: 100,
             status: 'done',
             error: undefined,
-          });
+          };
+          upsertDownloadItem(currentPath, currentFile);
         }
         downloadResult = resultFromProgress({
           processed: downloadProgress?.processed ?? d.files_written,
@@ -357,13 +377,15 @@
           file_status: 'failed',
         });
         if (currentPath) {
-          upsertDownloadItem(currentPath, {
+          currentFile = {
+            path: currentPath,
             bytes: currentBytes ?? 0,
             total: currentTotalBytes ?? 0,
             percent: currentPercent ?? 0,
             status: 'failed',
             error: d.error,
-          });
+          };
+          upsertDownloadItem(currentPath, currentFile);
         }
         downloadResult = resultFromProgress({
           processed: downloadProgress?.processed ?? d.files_written,
@@ -406,6 +428,7 @@
     downloadTotalBytes = 0;
     downloadItems = {};
     downloadItemOrder = [];
+    currentFile = null;
     downloadStatus = runningStatus('Submitting download request…');
     try {
       lastVerifyChecksum = verifyChecksum;
@@ -594,22 +617,27 @@
       {downloadProgress.processed.toLocaleString()} / {downloadProgress.total.toLocaleString()} checked
       {#if downloadProgress.error} · {downloadProgress.error}{/if}
     </p>
-    <div class="current-file" class:empty={!downloadProgress.current_path}>
-      {#if downloadProgress.current_path}
+    <div class="current-file">
+      {#if currentFile}
         <div class="current-head">
           <div>
             <div class="muted small">Current file</div>
-            <div class="mono current-path">{downloadProgress.current_path}</div>
+            <div class="mono current-path">{currentFile.path}</div>
           </div>
-          <div class="mono current-pct">{downloadProgress.current_percent ?? 0}%</div>
+          <div class="mono current-pct">{currentFile.percent}%</div>
         </div>
-        {#if (downloadProgress.current_total_bytes ?? 0) > 0}
+        {#if currentFile.total > 0}
           <div style="margin-top: 0.5rem">
             <ProgressBar
               label="File bytes"
-              value={downloadProgress.current_bytes ?? 0}
-              max={downloadProgress.current_total_bytes ?? 0}
+              value={currentFile.bytes}
+              max={currentFile.total}
             />
+          </div>
+          <div class="muted small" style="margin-top: 0.25rem">
+            {bytes(currentFile.bytes)} / {bytes(currentFile.total)}
+            {#if currentFile.status !== 'active'} · {currentFile.status}{/if}
+            {#if currentFile.error} · {currentFile.error}{/if}
           </div>
         {/if}
       {:else}

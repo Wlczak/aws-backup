@@ -58,12 +58,14 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 
 `POST /api/download/full` is a separate mirror job, not part of `Engine.RunWithID` or the dashboard UI.
 
-- It snapshots `backup.download_dir` from settings and refuses to start while a backup run is active.
-- The job scans the mirror directory first and updates `files.download_present` / `files.download_checked_at` so the UI can show what is already on disk.
-- It then downloads only rows still missing from that mirror.
+- It refuses to start while a backup run is active.
+- The first run against a new `backup.download_dir` performs a bootstrap scan, updates `files.download_present` / `files.download_checked_at`, and stores a cached row in `download_mirror_snapshots` keyed by the directory path.
+- Reruns reuse that cached snapshot and skip the filesystem walk unless the operator clicks `POST /api/download/rescan` / the dashboard's "Rescan download folder" action.
+- `POST /api/download/cancel` stops the active mirror job so the dashboard can interrupt a long rerun without waiting for the current file to finish.
+- The download phase then fetches only rows still missing from the cached mirror snapshot.
 - Standalone files are fetched directly into the mirror directory with MD5 verification.
 - Zip-backed rows are grouped by archive key. The job reuses a cached zip from `backup.tmp_dir` when present; otherwise it downloads the archive once, then extracts only the missing members and marks each extracted row present.
-- Progress is published with `download_mirror_*` SSE events so the dashboard can show scan and download phases separately.
+- Progress is published with `download_mirror_*` SSE events so the dashboard can show scan and download phases separately. `download_mirror_scan_*` events include a `download_after` flag so the API can distinguish the bootstrap scan that leads into a download from a scan-only rescan.
 
 ## Run-state Concurrency (`api.Server`)
 
@@ -87,6 +89,7 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 - `/api/restore/download/estimate` uses the same DB path matching as `RestoreToDir` to split the selected rows into restored / in_progress / not_restoring buckets, estimate the number of S3 objects and indexed bytes that are actually downloadable, and then price GET requests plus outbound egress.
 - The mirror-download flow is separate from restore: it uses the configured mirror directory, scans it into new download-mirror columns, and then pulls only missing rows. For zip-backed rows it can reuse a cached archive from `backup.tmp_dir` and extract just the missing members.
 - The mirror-download job tracks the missing-set object count plus a pessimistic GET/egress/total cost estimate in the live job summary so operators can surface the maximum likely price alongside scan and progress state.
+- Restore downloads stage each object in the temp cache first, then promote the finished file into the target directory so partial objects never appear in place as complete restores.
 - `run_logs` is auto-trimmed after every `FinishRun` (and once at process startup): the just-finished run is capped to `backup.log_max_per_run` rows (lowest-severity oldest first), and every run finished more than `backup.log_retention_days` days ago has its log rows deleted (the runs row itself is preserved). See `docs/data-model.md`
 - `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/standard-storage/egress cost breakdown plus expected wait window. Files whose `restore_status` is already `in_progress` or `restored` are excluded from the estimate; the request-fee count is based on distinct S3 objects, so multiple rows inside one zip still count as one restore request. The skipped rows are surfaced separately as `already_in_progress_*` / `already_restored_*`
 - `POST /api/restore/trigger` issues `s3:RestoreObject` for every unique key covering the selected paths and asks AWS to keep the thawed copy in standard storage for `days` (1..180). The request can choose `bulk` or `standard`; Glacier objects aren't readable until they thaw (about 48 h Bulk or 12 h Standard for Deep Archive). Matched DB rows immediately flip to `restore_status='in_progress'` so the UI reflects the request; final state lands via SQS (`s3:ObjectRestore:Completed`) or a HEAD scan. Rows already at `restore_status IN (in_progress, restored)` are filtered out before the S3 call (counted in `files_skipped_*` of the response). Storage-level `RestoreAlreadyInProgress` / `InvalidObjectState` from S3 are still mapped to soft-success counts, not errors

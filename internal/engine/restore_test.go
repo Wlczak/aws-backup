@@ -22,6 +22,38 @@ func md5hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+func TestRestoreStagesThroughCacheBeforeTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := t.TempDir()
+	cachePath := restoreCachePath(tmpDir, "standalone", "docs/readme.txt")
+	if _, err := writeFromReader(cachePath, strings.NewReader("hello"), int64(len("hello")), md5hex("hello"), nil); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("cache file missing before promotion: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "docs", "readme.txt")); !os.IsNotExist(err) {
+		t.Fatalf("target file appeared before promotion: %v", err)
+	}
+	dst, err := safeJoin(target, "docs/readme.txt")
+	if err != nil {
+		t.Fatalf("safeJoin: %v", err)
+	}
+	if err := promoteCachedFile(cachePath, dst); err != nil {
+		t.Fatalf("promote cached file: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache file still exists after promotion: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("target = %q want %q", got, "hello")
+	}
+}
+
 func TestRestoreToDirMixed(t *testing.T) {
 	ctx := context.Background()
 

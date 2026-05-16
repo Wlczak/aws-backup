@@ -295,3 +295,50 @@ func TestMarkZipUploadedBatchCreatesZipRow(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadMirrorSnapshotLifecycle(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	first := DownloadMirrorSnapshot{
+		DownloadDir:  "/tmp/mirror",
+		ScannedAt:    time.Now().UTC().Truncate(time.Second),
+		TotalCount:   10,
+		PresentCount: 7,
+		MissingCount: 3,
+	}
+	if err := d.UpsertDownloadMirrorSnapshot(ctx, first); err != nil {
+		t.Fatalf("upsert snapshot: %v", err)
+	}
+	got, found, err := d.GetDownloadMirrorSnapshot(ctx, first.DownloadDir)
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if !found {
+		t.Fatal("snapshot not found")
+	}
+	if got.DownloadDir != first.DownloadDir || got.TotalCount != first.TotalCount || got.PresentCount != first.PresentCount || got.MissingCount != first.MissingCount {
+		t.Fatalf("snapshot mismatch: got %+v want %+v", got, first)
+	}
+
+	second := DownloadMirrorSnapshot{
+		DownloadDir:  first.DownloadDir,
+		ScannedAt:    first.ScannedAt.Add(5 * time.Minute),
+		TotalCount:   11,
+		PresentCount: 8,
+		MissingCount: 3,
+	}
+	if err := d.UpsertDownloadMirrorSnapshot(ctx, second); err != nil {
+		t.Fatalf("update snapshot: %v", err)
+	}
+	got, found, err = d.GetDownloadMirrorSnapshot(ctx, first.DownloadDir)
+	if err != nil {
+		t.Fatalf("get updated snapshot: %v", err)
+	}
+	if !found {
+		t.Fatal("updated snapshot missing")
+	}
+	if !got.ScannedAt.Equal(second.ScannedAt) || got.TotalCount != second.TotalCount || got.PresentCount != second.PresentCount || got.MissingCount != second.MissingCount {
+		t.Fatalf("updated snapshot mismatch: got %+v want %+v", got, second)
+	}
+}

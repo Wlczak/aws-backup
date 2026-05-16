@@ -135,7 +135,7 @@ Source rescans preserve bucket-backed state on unchanged rows. A vanished `uploa
 The authoritative S3 sync keeps every S3-present row in an explicit bucket-backed state: `uploaded` when the local row is still present, or `cloud_only` when the local row is absent. It turns `cloud_only` into `missing` only when the S3 object is actually gone.
 Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
 
-`download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above.
+`download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above. The last completed scan for each mirror directory is cached separately in `download_mirror_snapshots(download_dir, scanned_at, total_count, present_count, missing_count)` so reruns can reuse the snapshot until an operator triggers a rescan.
 
 ## Zip naming + sidecar
 

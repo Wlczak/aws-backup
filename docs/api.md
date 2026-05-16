@@ -6,7 +6,7 @@ Routes mounted in `internal/api/server.go`. JSON over HTTP; the SPA at `/` is se
 
 ```text
 # Run lifecycle
-GET    /api/status                    current + last run, restore-download current + last, stop_requested flag
+GET    /api/status                    current + last run, download mirror snapshot, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
 GET    /api/runs/{id}                 detail + logs
 POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}
@@ -15,6 +15,8 @@ POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
 DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
 POST   /api/download/full             full mirror download using backup.download_dir; the live job summary includes object count + estimated GET/egress cost for the missing set
+POST   /api/download/rescan           refresh the cached mirror snapshot for backup.download_dir without downloading files
+POST   /api/download/cancel           cancel the active mirror download or rescan job if one is running
 
 # File index
 GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
@@ -55,9 +57,9 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
-`POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase.
+`POST /api/download/full` rejects while a backup run is in flight, reuses the cached download-mirror snapshot for `backup.download_dir` when one exists, and only performs a filesystem scan when the directory has not been scanned yet. The scan updates `download_present` / `download_checked_at` and persists a `download_mirror_snapshots` row keyed by the directory path; reruns can then skip the mirror walk and jump straight to the download phase. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. `POST /api/download/rescan` runs the scan-only phase and refreshes the cached snapshot without downloading any files. `POST /api/download/cancel` asks the active mirror job to stop and surfaces a cancelled terminal state when the worker exits. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase, and also includes the cached snapshot timestamp/counts for the mirror card.
 
-`POST /api/restore/download` now starts a background restore-download job instead of holding the request open. The live `/api/status` payload exposes `restore_download_current` / `restore_download_last`, including the active file path plus `current_bytes` / `current_total_bytes` / `current_percent` while a file is streaming, and the SSE stream emits `restore_download_*` events so the Download tab can show progress, survive reloads, and render the final counts after completion or failure.
+`POST /api/restore/download` now starts a background restore-download job instead of holding the request open. The live `/api/status` payload exposes `restore_download_current` / `restore_download_last`, including the active file path plus `current_bytes` / `current_total_bytes` / `current_percent` while a file is streaming, and the SSE stream emits `restore_download_*` events so the Download tab can show progress, survive reloads, and render the final counts after completion or failure. Restore downloads stage each object in the configured temp cache first, then promote the completed file into the target directory so the destination tree only sees fully written files.
 
 `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/standard-storage/egress cost breakdown plus expected wait window. Files whose `restore_status` is already `in_progress` or `restored` are excluded from the estimate; the request-fee count is based on distinct S3 objects, so multiple rows inside one zip still count as one restore request. The skipped rows are surfaced separately as `already_in_progress_*` / `already_restored_*`.
 
@@ -98,11 +100,12 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `restore_download_progress` | processed, total, path, files_written, bytes_written, errors, error, current_path, current_bytes, current_total_bytes, current_percent, file_status |
 | `restore_download_complete` | files_written, bytes_written, errors |
 | `restore_download_failed` | files_written, bytes_written, errors, error |
-| `download_mirror_scan_start` | total |
-| `download_mirror_scan_progress` | scanned, present, missing, total |
-| `download_mirror_scan_complete` | scanned, present, missing, total |
-| `download_mirror_scan_failed` | error |
+| `download_mirror_scan_start` | total, download_after |
+| `download_mirror_scan_progress` | scanned, present, missing, total, download_after |
+| `download_mirror_scan_complete` | scanned, present, missing, total, download_after |
+| `download_mirror_scan_failed` | error, download_after |
 | `download_mirror_start` | total |
 | `download_mirror_progress` | processed, total, path, files_written, bytes_written, errors, error |
 | `download_mirror_complete` | files_written, bytes_written, errors |
 | `download_mirror_failed` | files_written, bytes_written, errors, error |
+| `download_mirror_cancelled` | files_written, bytes_written, errors, error |

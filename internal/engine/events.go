@@ -73,6 +73,7 @@ const (
 	EventDownloadMirrorProgress     = "download_mirror_progress"
 	EventDownloadMirrorComplete     = "download_mirror_complete"
 	EventDownloadMirrorFailed       = "download_mirror_failed"
+	EventDownloadMirrorCancelled    = "download_mirror_cancelled"
 )
 
 // EventEmitter is the minimal sink the engine uses to announce progress.

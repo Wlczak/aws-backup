@@ -4,6 +4,9 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Restore downloads now stage each object in the temp cache first and only promote fully downloaded files into the target directory |
+| — | — | Full-download mirror reruns now reuse a DB-backed snapshot of the download folder, and the dashboard has a manual "Rescan download folder" action to refresh that snapshot on demand |
+| — | — | Dashboard mirror downloads now have a cancel button so operators can stop a rerun without waiting for the current file to finish |
 | — | — | Restore download progress now includes per-file byte meters and the Download page shows a separate download activity section instead of blending it with upload status |
 | — | — | Download tab now starts restore downloads in the background, tracks live progress through `/api/status` + `restore_download_*`, and keeps the terminal summary visible after reloads |
 | — | — | Logs page now has a clear-all action that truncates `run_logs` via `DELETE /api/run-logs` while preserving the `runs` table history |

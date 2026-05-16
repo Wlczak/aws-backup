@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -36,9 +37,10 @@ type RestoreOptions struct {
 	// "photos" selects every file under "photos/". "/" or "" selects
 	// everything. Unknown paths come back in RestoreStats.Skipped.
 	Paths []string
-	// TmpDir is where downloaded zip archives are staged before extraction.
-	// Empty falls back to os.TempDir(); set this to the configured backup
-	// TmpDir so multi-GB restores don't exhaust a small /tmp tmpfs. (#74)
+	// TmpDir is where restore cache files are staged before they are
+	// promoted into TargetDir. Empty falls back to os.TempDir(); set
+	// this to the configured backup TmpDir so multi-GB restores don't
+	// exhaust a small /tmp tmpfs. (#74)
 	TmpDir string
 	// SkipChecksum disables the post-write MD5 check against the DB row.
 	// Off by default — verification is essentially free (hashing happens
@@ -359,6 +361,12 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 	if err := os.MkdirAll(opts.TargetDir, 0o755); err != nil {
 		return stats, fmt.Errorf("mkdir target: %w", err)
 	}
+	if opts.TmpDir == "" {
+		opts.TmpDir = os.TempDir()
+	}
+	if err := os.MkdirAll(opts.TmpDir, 0o755); err != nil {
+		return stats, fmt.Errorf("mkdir tmp dir: %w", err)
+	}
 	cleanTarget, err := filepath.Abs(filepath.Clean(opts.TargetDir))
 	if err != nil {
 		return stats, fmt.Errorf("abs target: %w", err)
@@ -486,7 +494,7 @@ func RestoreToDir(ctx context.Context, opts RestoreOptions) (stats RestoreStats,
 				expected = ""
 			}
 			emitRestoreDownloadProgress(emit, f.Path, processed+1, total, totalBytes, stats.FilesWritten, stats.BytesWritten, len(stats.Errors), 0, f.Size, "active", nil)
-			n, err := restoreStandalone(ctx, opts.Storage, cleanTarget, f, expected, func(read, readTotal int64) {
+			n, err := restoreStandalone(ctx, opts.Storage, opts.TmpDir, cleanTarget, f, expected, func(read, readTotal int64) {
 				emitRestoreDownloadProgress(emit, f.Path, processed+1, total, totalBytes, stats.FilesWritten, stats.BytesWritten, len(stats.Errors), read, readTotal, "active", nil)
 			})
 			processed++
@@ -570,11 +578,12 @@ func emitRestoreDownloadProgress(emit EventEmitter, path string, processed, tota
 
 // restoreStandalone downloads a single individually-uploaded file into
 // the target directory. Returns bytes written.
-func restoreStandalone(ctx context.Context, s storage.Storage, target string, f db.File, expectedMD5 string, onProgress func(read, total int64)) (int64, error) {
+func restoreStandalone(ctx context.Context, s storage.Storage, tmpDir, target string, f db.File, expectedMD5 string, onProgress func(read, total int64)) (int64, error) {
 	dst, err := safeJoin(target, f.Path)
 	if err != nil {
 		return 0, err
 	}
+	cachePath := restoreCachePath(tmpDir, "standalone", f.Path)
 	rc, err := s.Get(ctx, f.S3Key)
 	if err != nil {
 		if errors.Is(err, storage.ErrGlacierThawing) {
@@ -583,7 +592,14 @@ func restoreStandalone(ctx context.Context, s storage.Storage, target string, f 
 		return 0, fmt.Errorf("get %s: %w", f.S3Key, err)
 	}
 	defer rc.Close()
-	return writeFromReader(dst, rc, f.Size, expectedMD5, onProgress)
+	n, err := writeFromReader(cachePath, rc, f.Size, expectedMD5, onProgress)
+	if err != nil {
+		return 0, err
+	}
+	if err := promoteCachedFile(cachePath, dst); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // restoreZipMembers downloads the zip at zipName once and extracts every
@@ -624,13 +640,13 @@ func restoreZipMembers(ctx context.Context, opts RestoreOptions, target, zipName
 		errs = append(errs, zipName+": close temp zip: "+err.Error())
 		return written, bytes, errs, processed
 	}
-	return extractZipMembers(ctx, target, zipName, tmpPath, members, processed, total, totalBytes, emit, opts.SkipChecksum, nil)
+	return extractZipMembers(ctx, opts.TmpDir, target, zipName, tmpPath, members, processed, total, totalBytes, emit, opts.SkipChecksum, nil)
 }
 
 // extractZipMembers opens a zip file already present on disk and
 // extracts every matching member listed in members. Errors are returned
 // per-member so a corrupt entry doesn't poison the rest of the archive.
-func extractZipMembers(ctx context.Context, target, zipName, zipPath string, members []db.File, processed, total int, totalBytes int64, emit EventEmitter, skipChecksum bool, onWritten func(db.File) error) (written, bytes int64, errs []string, nextProcessed int) {
+func extractZipMembers(ctx context.Context, tmpDir, target, zipName, zipPath string, members []db.File, processed, total int, totalBytes int64, emit EventEmitter, skipChecksum bool, onWritten func(db.File) error) (written, bytes int64, errs []string, nextProcessed int) {
 	if emit == nil {
 		emit = DiscardEvents
 	}
@@ -692,6 +708,7 @@ func extractZipMembers(ctx context.Context, target, zipName, zipPath string, mem
 			emitRestoreDownloadProgress(emit, m.Path, processed, total, totalBytes, written, bytes, len(errs), 0, 0, "failed", err)
 			continue
 		}
+		cachePath := restoreCachePath(tmpDir, "member", m.Path)
 		entry, err := zf.Open()
 		if err != nil {
 			errs = append(errs, m.Path+": open entry: "+err.Error())
@@ -704,12 +721,18 @@ func extractZipMembers(ctx context.Context, target, zipName, zipPath string, mem
 			expected = ""
 		}
 		memberTotal := int64(zf.UncompressedSize64)
-		n, err := writeFromReader(dst, entry, memberTotal, expected, func(read, readTotal int64) {
+		n, err := writeFromReader(cachePath, entry, memberTotal, expected, func(read, readTotal int64) {
 			emitRestoreDownloadProgress(emit, m.Path, processed+1, total, totalBytes, written, bytes, len(errs), read, readTotal, "active", nil)
 		})
 		entry.Close()
 		if err != nil {
 			errs = append(errs, m.Path+": write: "+err.Error())
+			processed++
+			emitRestoreDownloadProgress(emit, m.Path, processed, total, totalBytes, written, bytes, len(errs), 0, memberTotal, "failed", err)
+			continue
+		}
+		if err := promoteCachedFile(cachePath, dst); err != nil {
+			errs = append(errs, m.Path+": promote: "+err.Error())
 			processed++
 			emitRestoreDownloadProgress(emit, m.Path, processed, total, totalBytes, written, bytes, len(errs), 0, memberTotal, "failed", err)
 			continue
@@ -747,6 +770,48 @@ func downloadZipToFile(ctx context.Context, s storage.Storage, key string, dst *
 	defer rc.Close()
 	if _, err := io.Copy(dst, newProgressReader(rc, total, defaultProgressInterval, onProgress)); err != nil {
 		return err
+	}
+	return nil
+}
+
+func restoreCachePath(baseDir, kind, relPath string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + relPath))
+	name := hex.EncodeToString(sum[:]) + ".cache"
+	return filepath.Join(baseDir, "download-cache", "restore", name)
+}
+
+func promoteCachedFile(cachePath, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
+	in, err := os.Open(cachePath)
+	if err != nil {
+		return fmt.Errorf("open cache %s: %w", cachePath, err)
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.part")
+	if err != nil {
+		return fmt.Errorf("create staged target: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return fmt.Errorf("copy staged file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close staged file: %w", err)
+	}
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove existing target: %w", err)
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return fmt.Errorf("replace target: %w", err)
+	}
+	if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove cache %s: %w", cachePath, err)
 	}
 	return nil
 }

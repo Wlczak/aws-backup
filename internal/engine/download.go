@@ -43,9 +43,11 @@ type DownloadStats struct {
 	Errors       []string
 }
 
-// DownloadMirrorToDir scans the configured download folder, updates the
-// mirror columns in the DB, and then downloads only rows still missing
-// from that folder.
+// DownloadMirrorToDir reuses the cached mirror snapshot for the
+// configured download folder when one exists. If the folder has never
+// been scanned before, it performs a bootstrap scan first, persists the
+// snapshot, and then downloads only rows still missing from that
+// snapshot. Scan-only callers should use ScanDownloadMirror.
 func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadStats, error) {
 	var stats DownloadStats
 	if opts.DB == nil {
@@ -70,25 +72,90 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 		return stats, fmt.Errorf("mkdir tmp dir: %w", err)
 	}
 
+	snap, found, err := opts.DB.GetDownloadMirrorSnapshot(ctx, opts.DownloadDir)
+	if err != nil {
+		return stats, fmt.Errorf("load download mirror snapshot: %w", err)
+	}
+	if !found {
+		if _, err := scanDownloadMirror(ctx, opts, true); err != nil {
+			return stats, err
+		}
+		snap, found, err = opts.DB.GetDownloadMirrorSnapshot(ctx, opts.DownloadDir)
+		if err != nil {
+			return stats, fmt.Errorf("reload download mirror snapshot: %w", err)
+		}
+		if !found {
+			return stats, errors.New("download: bootstrap scan did not create a mirror snapshot")
+		}
+	}
+	stats.Scanned = snap.TotalCount
+	stats.Present = snap.PresentCount
+	stats.Missing = snap.MissingCount
+
+	downloadStats, err := downloadMissingMirror(ctx, opts)
+	if err != nil {
+		return stats, err
+	}
+	stats.ObjectCount = downloadStats.ObjectCount
+	stats.TotalBytes = downloadStats.TotalBytes
+	stats.FilesWritten = downloadStats.FilesWritten
+	stats.BytesWritten = downloadStats.BytesWritten
+	stats.Skipped = downloadStats.Skipped
+	stats.Errors = downloadStats.Errors
+	return stats, nil
+}
+
+// ScanDownloadMirror refreshes the per-file download-present flags and
+// persists a cached snapshot for the configured download directory.
+// Callers use this for manual rescans, or as the bootstrap phase when
+// the mirror directory has not been scanned before.
+func ScanDownloadMirror(ctx context.Context, opts DownloadOptions) (DownloadStats, error) {
+	return scanDownloadMirror(ctx, opts, false)
+}
+
+func scanDownloadMirror(ctx context.Context, opts DownloadOptions, downloadAfter bool) (stats DownloadStats, err error) {
+	if opts.DB == nil {
+		return stats, errors.New("download: DB is required")
+	}
+	if opts.DownloadDir == "" {
+		return stats, errors.New("download: DownloadDir is required")
+	}
+	if !filepath.IsAbs(opts.DownloadDir) {
+		return stats, fmt.Errorf("download: DownloadDir must be absolute (got %q)", opts.DownloadDir)
+	}
+
 	total, err := countDownloadCandidates(ctx, opts.DB)
 	if err != nil {
 		return stats, err
 	}
 
 	emit := opts.Emit
+	defer func() {
+		if err == nil || emit == nil {
+			return
+		}
+		emit(Event{
+			Type: EventDownloadMirrorScanFailed,
+			At:   time.Now(),
+			Data: map[string]any{
+				"error":          err.Error(),
+				"download_after": downloadAfter,
+			},
+		})
+	}()
 	if emit != nil {
 		emit(Event{
 			Type: EventDownloadMirrorScanStart,
 			At:   time.Now(),
 			Data: map[string]any{
-				"total": total,
+				"total":          total,
+				"download_after": downloadAfter,
 			},
 		})
 	}
 
 	presentByID := make([]int64, 0, 256)
 	missingByID := make([]int64, 0, 256)
-	recoverableMissing := make([]db.File, 0, 256)
 	const pageSize = 1000
 	for page := 1; ; page++ {
 		if err := ctx.Err(); err != nil {
@@ -108,9 +175,6 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 				stats.Errors = append(stats.Errors, f.Path+": "+err.Error())
 				missingByID = append(missingByID, f.ID)
 				stats.Missing++
-				if recoverableDownloadRow(f) {
-					recoverableMissing = append(recoverableMissing, f)
-				}
 				continue
 			}
 			if present {
@@ -119,9 +183,6 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			} else {
 				stats.Missing++
 				missingByID = append(missingByID, f.ID)
-				if recoverableDownloadRow(f) {
-					recoverableMissing = append(recoverableMissing, f)
-				}
 			}
 		}
 		if err := opts.DB.MarkDownloadMirrorBatch(ctx, presentByID, missingByID, time.Now().UTC()); err != nil {
@@ -134,10 +195,11 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 				Type: EventDownloadMirrorScanProgress,
 				At:   time.Now(),
 				Data: map[string]any{
-					"scanned": stats.Scanned,
-					"present": stats.Present,
-					"missing": stats.Missing,
-					"total":   total,
+					"scanned":        stats.Scanned,
+					"present":        stats.Present,
+					"missing":        stats.Missing,
+					"total":          total,
+					"download_after": downloadAfter,
 				},
 			})
 		}
@@ -145,9 +207,69 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			break
 		}
 	}
+
+	if err := opts.DB.UpsertDownloadMirrorSnapshot(ctx, db.DownloadMirrorSnapshot{
+		DownloadDir:  opts.DownloadDir,
+		ScannedAt:    time.Now().UTC(),
+		TotalCount:   stats.Scanned,
+		PresentCount: stats.Present,
+		MissingCount: stats.Missing,
+	}); err != nil {
+		return stats, fmt.Errorf("save download mirror snapshot: %w", err)
+	}
+
+	if emit != nil {
+		emit(Event{
+			Type: EventDownloadMirrorScanComplete,
+			At:   time.Now(),
+			Data: map[string]any{
+				"scanned":        stats.Scanned,
+				"present":        stats.Present,
+				"missing":        stats.Missing,
+				"total":          total,
+				"download_after": downloadAfter,
+			},
+		})
+	}
+	return stats, nil
+}
+
+func countDownloadCandidates(ctx context.Context, d *db.DB) (int64, error) {
+	_, total, err := d.ListFiles(ctx, db.FilesFilter{Page: 1, Limit: 1})
+	return total, err
+}
+
+func downloadMissingMirror(ctx context.Context, opts DownloadOptions) (DownloadStats, error) {
+	var stats DownloadStats
+	if opts.DB == nil {
+		return stats, errors.New("download: DB is required")
+	}
+	if opts.Storage == nil {
+		return stats, errors.New("download: Storage is required")
+	}
+	if opts.DownloadDir == "" {
+		return stats, errors.New("download: DownloadDir is required")
+	}
+	if !filepath.IsAbs(opts.DownloadDir) {
+		return stats, fmt.Errorf("download: DownloadDir must be absolute (got %q)", opts.DownloadDir)
+	}
+	if opts.TmpDir == "" {
+		opts.TmpDir = os.TempDir()
+	}
+	if err := os.MkdirAll(opts.DownloadDir, 0o755); err != nil {
+		return stats, fmt.Errorf("mkdir download dir: %w", err)
+	}
+	if err := os.MkdirAll(opts.TmpDir, 0o755); err != nil {
+		return stats, fmt.Errorf("mkdir tmp dir: %w", err)
+	}
+
+	missing, err := opts.DB.ListDownloadMirrorMissing(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("list mirror rows: %w", err)
+	}
 	byZip := map[string][]db.File{}
-	standalone := make([]db.File, 0, len(recoverableMissing))
-	for _, f := range recoverableMissing {
+	standalone := make([]db.File, 0, len(missing))
+	for _, f := range missing {
 		if f.ZipName != "" {
 			key := f.S3Key
 			if key == "" {
@@ -174,23 +296,8 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 			downloadBytesTotal += f.Size
 		}
 	}
-	if emit != nil {
-		emit(Event{
-			Type: EventDownloadMirrorScanComplete,
-			At:   time.Now(),
-			Data: map[string]any{
-				"scanned":      stats.Scanned,
-				"present":      stats.Present,
-				"missing":      stats.Missing,
-				"total":        total,
-				"total_bytes":  downloadBytesTotal,
-				"object_count": downloadObjectCount,
-			},
-		})
-	}
-	if len(recoverableMissing) == 0 {
-		return stats, nil
-	}
+
+	emit := opts.Emit
 	if emit != nil {
 		emit(Event{
 			Type: EventDownloadMirrorStart,
@@ -201,6 +308,25 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 				"object_count": downloadObjectCount,
 			},
 		})
+	}
+
+	if len(missing) == 0 {
+		if emit != nil {
+			emit(Event{
+				Type: EventDownloadMirrorComplete,
+				At:   time.Now(),
+				Data: map[string]any{
+					"files_written": int64(0),
+					"bytes_written": int64(0),
+					"total_bytes":   downloadBytesTotal,
+					"object_count":  downloadObjectCount,
+					"errors":        0,
+				},
+			})
+		}
+		stats.ObjectCount = downloadObjectCount
+		stats.TotalBytes = downloadBytesTotal
+		return stats, nil
 	}
 
 	processed := int64(0)
@@ -287,11 +413,6 @@ func DownloadMirrorToDir(ctx context.Context, opts DownloadOptions) (DownloadSta
 	return stats, nil
 }
 
-func countDownloadCandidates(ctx context.Context, d *db.DB) (int64, error) {
-	_, total, err := d.ListFiles(ctx, db.FilesFilter{Page: 1, Limit: 1})
-	return total, err
-}
-
 func mirrorFilePresent(root string, f db.File) (bool, error) {
 	dst, err := safeJoin(root, f.Path)
 	if err != nil {
@@ -320,7 +441,7 @@ func recoverableDownloadRow(f db.File) bool {
 }
 
 func downloadStandaloneMirror(ctx context.Context, opts DownloadOptions, f db.File) (int64, error) {
-	return restoreStandalone(ctx, opts.Storage, opts.DownloadDir, f, f.MD5, nil)
+	return restoreStandalone(ctx, opts.Storage, opts.TmpDir, opts.DownloadDir, f, f.MD5, nil)
 }
 
 func downloadZipMembersMirror(
@@ -341,7 +462,7 @@ func downloadZipMembersMirror(
 		}
 		return 0, 0, errs, processed
 	}
-	w, b, innerErrs, next := extractZipMembers(ctx, opts.DownloadDir, key, zipPath, members, int(processed), int(total), totalBytes, emit, false, func(f db.File) error {
+	w, b, innerErrs, next := extractZipMembers(ctx, opts.TmpDir, opts.DownloadDir, key, zipPath, members, int(processed), int(total), totalBytes, emit, false, func(f db.File) error {
 		return opts.DB.MarkDownloadMirrorBatch(ctx, []int64{f.ID}, nil, time.Now().UTC())
 	})
 	errs = append(errs, innerErrs...)
