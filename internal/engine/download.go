@@ -431,15 +431,6 @@ func mirrorFilePresent(root string, f db.File) (bool, error) {
 	return info.Size() == f.Size, nil
 }
 
-func recoverableDownloadRow(f db.File) bool {
-	switch f.Status {
-	case db.StatusUploaded, db.StatusZipped, db.StatusCloudOnly:
-		return f.S3Key != "" || f.ZipName != ""
-	default:
-		return false
-	}
-}
-
 func downloadStandaloneMirror(ctx context.Context, opts DownloadOptions, f db.File) (int64, error) {
 	return restoreStandalone(ctx, opts.Storage, opts.TmpDir, opts.DownloadDir, f, f.MD5, nil)
 }

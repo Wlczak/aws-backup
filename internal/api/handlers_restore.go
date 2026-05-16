@@ -310,19 +310,6 @@ type restoreDownloadSummary struct {
 	ErrorMessage      string     `json:"error_message,omitempty"`
 }
 
-type restoreDownloadResponse struct {
-	FilesWritten int64    `json:"files_written"`
-	BytesWritten int64    `json:"bytes_written"`
-	TotalBytes   int64    `json:"total_bytes"`
-	Skipped      []string `json:"skipped,omitempty"`
-	Errors       []string `json:"errors,omitempty"`
-}
-
-// restoreToDirResponse is the legacy test name for restoreDownloadResponse.
-// Keep it as an alias so older callers keep compiling while the API surface
-// uses the /restore/download naming everywhere else.
-type restoreToDirResponse = restoreDownloadResponse
-
 type restoreDownloadEstimateRequest struct {
 	Paths []string `json:"paths"`
 }
