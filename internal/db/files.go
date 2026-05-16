@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -115,6 +116,17 @@ type Zip struct {
 	S3Key      string     `gorm:"column:s3_key"`
 	UploadedAt *time.Time `gorm:"column:uploaded_at"`
 	LastSeenAt time.Time  `gorm:"column:last_seen_at;not null;index"`
+}
+
+// DownloadMirrorSnapshot caches the last completed scan of the configured
+// download directory so full mirror reruns can skip the expensive
+// filesystem walk unless the operator explicitly asks for a rescan.
+type DownloadMirrorSnapshot struct {
+	DownloadDir  string    `gorm:"column:download_dir;primaryKey"`
+	ScannedAt    time.Time `gorm:"column:scanned_at;not null"`
+	TotalCount   int64     `gorm:"column:total_count;not null;default:0"`
+	PresentCount int64     `gorm:"column:present_count;not null;default:0"`
+	MissingCount int64     `gorm:"column:missing_count;not null;default:0"`
 }
 
 // ZipMemberUpload is the per-file payload used when a zip archive is
@@ -1501,6 +1513,61 @@ func (db *DB) MarkDownloadMirrorBatch(ctx context.Context, presentIDs, missingID
 		}
 		return nil
 	})
+}
+
+// UpsertDownloadMirrorSnapshot stores the last completed scan for one
+// download directory. The row is keyed by directory path so a later
+// rerun can reuse the cached mirror state without rescanning the whole
+// folder first.
+func (db *DB) UpsertDownloadMirrorSnapshot(ctx context.Context, snap DownloadMirrorSnapshot) error {
+	if snap.DownloadDir == "" {
+		return fmt.Errorf("download mirror snapshot: download_dir is required")
+	}
+	if snap.ScannedAt.IsZero() {
+		snap.ScannedAt = time.Now().UTC()
+	}
+	return db.g.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "download_dir"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"scanned_at",
+			"total_count",
+			"present_count",
+			"missing_count",
+		}),
+	}).Create(&snap).Error
+}
+
+// GetDownloadMirrorSnapshot returns the cached scan metadata for a
+// specific download directory. The bool is false when no completed
+// scan exists yet.
+func (db *DB) GetDownloadMirrorSnapshot(ctx context.Context, downloadDir string) (DownloadMirrorSnapshot, bool, error) {
+	if downloadDir == "" {
+		return DownloadMirrorSnapshot{}, false, fmt.Errorf("download mirror snapshot: download_dir is required")
+	}
+	var snap DownloadMirrorSnapshot
+	err := db.g.WithContext(ctx).Where("download_dir = ?", downloadDir).First(&snap).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return DownloadMirrorSnapshot{}, false, nil
+	}
+	if err != nil {
+		return DownloadMirrorSnapshot{}, false, err
+	}
+	return snap, true, nil
+}
+
+// ListDownloadMirrorMissing returns the rows that still need to be
+// materialised into the configured download directory according to the
+// cached mirror snapshot.
+func (db *DB) ListDownloadMirrorMissing(ctx context.Context) ([]File, error) {
+	var files []File
+	err := db.g.WithContext(ctx).Model(&File{}).
+		Select("id, path, size, mtime, md5, status, zip_id, zip_name, s3_key, uploaded_at, last_seen_at, download_present, download_checked_at").
+		Where("download_present = 0").
+		Where("status IN ?", []string{StatusUploaded, StatusZipped, StatusCloudOnly}).
+		Where("COALESCE(s3_key,'') != '' OR COALESCE(zip_name,'') != ''").
+		Order("path").
+		Find(&files).Error
+	return files, err
 }
 
 // markPendingByColumn is the shared implementation for the three MarkPendingBy* functions.

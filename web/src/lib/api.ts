@@ -93,6 +93,9 @@ export interface Status {
   last?: Run;
   download_current?: DownloadJobSummary;
   download_last?: DownloadJobSummary;
+  download_mirror_snapshot?: DownloadMirrorSnapshot;
+  restore_download_current?: RestoreDownloadSummary;
+  restore_download_last?: RestoreDownloadSummary;
   stop_requested?: boolean;
 }
 
@@ -100,8 +103,8 @@ export interface DownloadJobSummary {
   id: number;
   started_at: string;
   finished_at?: string;
-  status: 'running' | 'completed' | 'failed';
-  phase: 'scan' | 'download' | 'complete' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  phase: 'scan' | 'download' | 'complete' | 'failed' | 'cancelled';
   download_dir: string;
   total: number;
   total_bytes: number;
@@ -121,6 +124,38 @@ export interface DownloadJobSummary {
 
 export interface DownloadFullResponse {
   download_id: number;
+}
+
+export interface DownloadMirrorSnapshot {
+  download_dir: string;
+  scanned_at: string;
+  total: number;
+  present: number;
+  missing: number;
+}
+
+export interface RestoreDownloadSummary {
+  id: number;
+  started_at: string;
+  finished_at?: string;
+  status: 'running' | 'completed' | 'failed';
+  phase: 'download' | 'complete' | 'failed';
+  target_dir: string;
+  total: number;
+  total_bytes: number;
+  processed: number;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  current_path?: string;
+  current_bytes?: number;
+  current_total_bytes?: number;
+  current_percent?: number;
+  error_message?: string;
+}
+
+export interface RestoreDownloadTriggerResponse {
+  restore_download_id: number;
 }
 
 export interface RestoreEstimate {
@@ -435,12 +470,20 @@ export const api = {
       body: JSON.stringify({ paths, days, tier }),
     }),
   restoreDownload: (paths: string[], targetDir: string, verifyChecksum = true) =>
-    request<RestoreDownloadResponse>('/api/restore/download', {
+    request<RestoreDownloadTriggerResponse>('/api/restore/download', {
       method: 'POST',
       body: JSON.stringify({ paths, target_dir: targetDir, verify_checksum: verifyChecksum }),
     }),
   downloadFull: () =>
     request<DownloadFullResponse>('/api/download/full', {
+      method: 'POST',
+    }),
+  downloadRescan: () =>
+    request<DownloadFullResponse>('/api/download/rescan', {
+      method: 'POST',
+    }),
+  downloadCancel: () =>
+    request<{ status: 'cancelling' }>('/api/download/cancel', {
       method: 'POST',
     }),
   restoreDownloadEstimate: (paths: string[]) =>
@@ -520,7 +563,7 @@ export function subscribeEvents(
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
     'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',
     'download_mirror_scan_start', 'download_mirror_scan_progress', 'download_mirror_scan_complete', 'download_mirror_scan_failed',
-    'download_mirror_start', 'download_mirror_progress', 'download_mirror_complete', 'download_mirror_failed',
+    'download_mirror_start', 'download_mirror_progress', 'download_mirror_complete', 'download_mirror_failed', 'download_mirror_cancelled',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
   // Fallback for default-typed (`event: message`) frames: forward them so
