@@ -57,7 +57,7 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 
 `POST /api/download/full` rejects while a backup run is in flight, snapshots `backup.download_dir`, scans that folder to update the `download_present` / `download_checked_at` mirror columns, and then downloads only rows still missing from the mirror. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase.
 
-`POST /api/restore/download` now starts a background restore-download job instead of holding the request open. The live `/api/status` payload exposes `restore_download_current` / `restore_download_last`, and the SSE stream emits `restore_download_*` events so the Download tab can show progress, survive reloads, and render the final counts after completion or failure.
+`POST /api/restore/download` now starts a background restore-download job instead of holding the request open. The live `/api/status` payload exposes `restore_download_current` / `restore_download_last`, including the active file path plus `current_bytes` / `current_total_bytes` / `current_percent` while a file is streaming, and the SSE stream emits `restore_download_*` events so the Download tab can show progress, survive reloads, and render the final counts after completion or failure.
 
 `POST /api/restore/estimate` filters DB by `status IN (uploaded, zipped)` and returns a request/retrieval/standard-storage/egress cost breakdown plus expected wait window. Files whose `restore_status` is already `in_progress` or `restored` are excluded from the estimate; the request-fee count is based on distinct S3 objects, so multiple rows inside one zip still count as one restore request. The skipped rows are surfaced separately as `already_in_progress_*` / `already_restored_*`.
 
@@ -95,7 +95,7 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `restore_request_complete` | total, keys_requested, keys_already_in_progress, keys_already_available, files_affected, bytes_affected, errors |
 | `restore_request_failed` | error, processed, total |
 | `restore_download_start` | total |
-| `restore_download_progress` | processed, total, path, files_written, bytes_written, errors, error |
+| `restore_download_progress` | processed, total, path, files_written, bytes_written, errors, error, current_path, current_bytes, current_total_bytes, current_percent, file_status |
 | `restore_download_complete` | files_written, bytes_written, errors |
 | `restore_download_failed` | files_written, bytes_written, errors, error |
 | `download_mirror_scan_start` | total |

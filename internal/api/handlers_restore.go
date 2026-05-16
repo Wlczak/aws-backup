@@ -291,19 +291,23 @@ type restoreDownloadRequest struct {
 }
 
 type restoreDownloadSummary struct {
-	ID           int64      `json:"id"`
-	StartedAt    time.Time  `json:"started_at"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	Status       string     `json:"status"`
-	Phase        string     `json:"phase"`
-	TargetDir    string     `json:"target_dir"`
-	Total        int64      `json:"total"`
-	TotalBytes   int64      `json:"total_bytes"`
-	Processed    int64      `json:"processed"`
-	FilesWritten int64      `json:"files_written"`
-	BytesWritten int64      `json:"bytes_written"`
-	Errors       int64      `json:"errors"`
-	ErrorMessage string     `json:"error_message,omitempty"`
+	ID                int64      `json:"id"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
+	Status            string     `json:"status"`
+	Phase             string     `json:"phase"`
+	TargetDir         string     `json:"target_dir"`
+	Total             int64      `json:"total"`
+	TotalBytes        int64      `json:"total_bytes"`
+	Processed         int64      `json:"processed"`
+	FilesWritten      int64      `json:"files_written"`
+	BytesWritten      int64      `json:"bytes_written"`
+	Errors            int64      `json:"errors"`
+	CurrentPath       string     `json:"current_path,omitempty"`
+	CurrentBytes      int64      `json:"current_bytes,omitempty"`
+	CurrentTotalBytes int64      `json:"current_total_bytes,omitempty"`
+	CurrentPercent    int        `json:"current_percent,omitempty"`
+	ErrorMessage      string     `json:"error_message,omitempty"`
 }
 
 type restoreDownloadResponse struct {
@@ -567,6 +571,10 @@ func (s *Server) applyRestoreDownloadEvent(ev engine.Event) {
 		cur.FilesWritten = 0
 		cur.BytesWritten = 0
 		cur.Errors = 0
+		cur.CurrentPath = ""
+		cur.CurrentBytes = 0
+		cur.CurrentTotalBytes = 0
+		cur.CurrentPercent = 0
 	case engine.EventRestoreDownloadProgress:
 		cur.Status = "running"
 		cur.Phase = "download"
@@ -576,6 +584,10 @@ func (s *Server) applyRestoreDownloadEvent(ev engine.Event) {
 		cur.FilesWritten = intFromAny(ev.Data["files_written"])
 		cur.BytesWritten = intFromAny(ev.Data["bytes_written"])
 		cur.Errors = intFromAny(ev.Data["errors"])
+		cur.CurrentPath = stringFromAny(ev.Data["path"])
+		cur.CurrentBytes = intFromAny(ev.Data["current_bytes"])
+		cur.CurrentTotalBytes = intFromAny(ev.Data["current_total_bytes"])
+		cur.CurrentPercent = int(intFromAny(ev.Data["current_percent"]))
 	case engine.EventRestoreDownloadComplete:
 		cur.Status = "completed"
 		cur.Phase = "complete"

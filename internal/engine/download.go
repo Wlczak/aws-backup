@@ -320,7 +320,7 @@ func recoverableDownloadRow(f db.File) bool {
 }
 
 func downloadStandaloneMirror(ctx context.Context, opts DownloadOptions, f db.File) (int64, error) {
-	return restoreStandalone(ctx, opts.Storage, opts.DownloadDir, f, f.MD5)
+	return restoreStandalone(ctx, opts.Storage, opts.DownloadDir, f, f.MD5, nil)
 }
 
 func downloadZipMembersMirror(

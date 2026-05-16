@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -235,6 +236,112 @@ func TestRestoreToDirDownloadsMixedStandaloneAndZip(t *testing.T) {
 	if final.BytesWritten != int64(len("hello")+len("aaa")+len("bbbb")) {
 		t.Fatalf("bytes_written=%d want %d", final.BytesWritten, len("hello")+len("aaa")+len("bbbb"))
 	}
+}
+
+func TestRestoreDownloadStatusTracksCurrentFile(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	now := time.Now()
+	seed := []db.BatchEntry{{Path: "big.bin", Size: 5, ModTime: now}}
+	res, err := d.UpsertFileBatch(ctx, seed, now)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := d.MarkUploaded(ctx, res[0].ID, md5hex("abcde"), "backups/big.bin", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/big.bin", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	if _, err := store.Put(ctx, "backups/big.bin", strings.NewReader("abcde"), 5); err != nil {
+		t.Fatal(err)
+	}
+	slow := &slowStatusStorage{Storage: store}
+
+	cfg := config.Default()
+	cfg.Backup.TmpDir = t.TempDir()
+	srv := NewServer(Deps{
+		DB:      d,
+		Bus:     events.NewBus(16),
+		Config:  &cfg,
+		Storage: func() storage.Storage { return slow },
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"paths":      []string{"/"},
+		"target_dir": t.TempDir(),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/to-dir", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreToDir(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var cur *restoreDownloadSummary
+	for time.Now().Before(deadline) {
+		srv.restoreDownloadMu.Lock()
+		if srv.currentRestoreDownload != nil && srv.currentRestoreDownload.CurrentPath != "" && srv.currentRestoreDownload.CurrentBytes > 0 {
+			copy := *srv.currentRestoreDownload
+			cur = &copy
+			srv.restoreDownloadMu.Unlock()
+			break
+		}
+		srv.restoreDownloadMu.Unlock()
+		time.Sleep(25 * time.Millisecond)
+	}
+	if cur == nil {
+		t.Fatal("current restore download did not surface byte progress")
+	}
+	if cur.CurrentPath != "big.bin" {
+		t.Fatalf("current path = %q want big.bin", cur.CurrentPath)
+	}
+	if cur.CurrentTotalBytes != 5 {
+		t.Fatalf("current total bytes = %d want 5", cur.CurrentTotalBytes)
+	}
+	if cur.CurrentPercent <= 0 || cur.CurrentPercent >= 100 {
+		t.Fatalf("current percent = %d want in-flight progress", cur.CurrentPercent)
+	}
+}
+
+type slowStatusStorage struct {
+	storage.Storage
+}
+
+func (s *slowStatusStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, err := s.Storage.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &slowStatusReadCloser{ReadCloser: rc}, nil
+}
+
+type slowStatusReadCloser struct {
+	io.ReadCloser
+}
+
+func (s *slowStatusReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, 1)
+	n, err := s.ReadCloser.Read(buf)
+	if n > 0 {
+		p[0] = buf[0]
+		time.Sleep(300 * time.Millisecond)
+		return 1, nil
+	}
+	return 0, err
 }
 
 // TestRestoreTriggerRequestsRestore covers the new request-only flow:

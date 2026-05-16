@@ -69,8 +69,23 @@
     path?: string;
     error?: string;
     errors: number;
+    current_path?: string;
+    current_bytes?: number;
+    current_total_bytes?: number;
+    current_percent?: number;
+    file_status?: 'active' | 'done' | 'failed';
   };
   let downloadProgress = $state<DownloadProgress | null>(null);
+  type DownloadItem = {
+    path: string;
+    bytes: number;
+    total: number;
+    percent: number;
+    status: 'active' | 'done' | 'failed';
+    error?: string;
+    updatedAt: number;
+  };
+  let downloadItems = $state<Record<string, DownloadItem>>({});
   let pollTimer: number | undefined;
   let pollDestroyed = false;
 
@@ -91,12 +106,28 @@
       return;
     }
     downloadTotalBytes = next.total_bytes ?? downloadTotalBytes;
+    if (next.current_path) {
+      upsertDownloadItem(next.current_path, {
+        bytes: next.current_bytes ?? 0,
+        total: next.current_total_bytes ?? 0,
+        percent: next.current_percent ?? 0,
+        status: next.file_status ?? (next.status === 'failed' ? 'failed' : next.status === 'done' ? 'done' : 'active'),
+        error: next.error,
+      });
+    }
     if (next.status === 'active') {
       const parts = [
         `${next.files_written.toLocaleString()} written`,
         `${next.processed.toLocaleString()} / ${next.total.toLocaleString()} checked`,
       ];
-      if (next.path) parts.push(next.path);
+      if (next.current_path) {
+        const total = next.current_total_bytes ?? 0;
+        const current = next.current_bytes ?? 0;
+        const pct = next.current_percent ?? 0;
+        parts.push(`${next.current_path} (${bytes(current)} / ${bytes(total)}${total > 0 ? `, ${pct}%` : ''})`);
+      } else if (next.path) {
+        parts.push(next.path);
+      }
       if (next.error) parts.push(next.error);
       downloadStatus = runningStatus(parts.join(' · '));
       return;
@@ -129,10 +160,36 @@
         : summary.status === 'failed'
           ? 'failed'
           : 'done',
+      current_path: summary.current_path,
+      current_bytes: summary.current_bytes,
+      current_total_bytes: summary.current_total_bytes,
+      current_percent: summary.current_percent,
       error: summary.error_message,
       errors: summary.errors,
     };
   }
+
+  function upsertDownloadItem(path: string, patch: Partial<DownloadItem>) {
+    const prev = downloadItems[path];
+    downloadItems[path] = {
+      path,
+      bytes: prev?.bytes ?? 0,
+      total: prev?.total ?? 0,
+      percent: prev?.percent ?? 0,
+      status: prev?.status ?? 'active',
+      error: prev?.error,
+      updatedAt: Date.now(),
+      ...patch,
+    };
+  }
+
+  let downloadItemList = $derived(
+    Object.values(downloadItems).sort((a, b) => {
+      if (a.status === 'active' && b.status !== 'active') return -1;
+      if (b.status === 'active' && a.status !== 'active') return 1;
+      return b.updatedAt - a.updatedAt;
+    }),
+  );
 
   function resultFromProgress(next: DownloadProgress): DownloadResult {
     return {
@@ -183,6 +240,7 @@
       if (type === 'restore_download_start') {
         const d = data as { total: number; total_bytes: number };
         downloadTotalBytes = d.total_bytes ?? 0;
+        downloadItems = {};
         applyDownloadProgress({
           processed: 0,
           total: d.total,
@@ -203,7 +261,21 @@
           path?: string;
           error?: string;
           errors: number;
+          current_path?: string;
+          current_bytes?: number;
+          current_total_bytes?: number;
+          current_percent?: number;
+          file_status?: 'active' | 'done' | 'failed';
         };
+        if (d.path) {
+          upsertDownloadItem(d.path, {
+            bytes: d.current_bytes ?? 0,
+            total: d.current_total_bytes ?? 0,
+            percent: d.current_percent ?? 0,
+            status: d.file_status ?? 'active',
+            error: d.error,
+          });
+        }
         applyDownloadProgress({
           processed: d.processed,
           total: d.total,
@@ -215,10 +287,19 @@
           path: d.path,
           error: d.error,
           errors: d.errors,
+          current_path: d.current_path ?? d.path,
+          current_bytes: d.current_bytes,
+          current_total_bytes: d.current_total_bytes,
+          current_percent: d.current_percent,
+          file_status: d.file_status,
         });
       } else if (type === 'restore_download_complete') {
         const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number };
         downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
+        const currentPath = downloadProgress?.current_path;
+        const currentBytes = downloadProgress?.current_bytes;
+        const currentTotalBytes = downloadProgress?.current_total_bytes;
+        const currentPercent = downloadProgress?.current_percent;
         applyDownloadProgress({
           processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
           total: downloadProgress?.total ?? 0,
@@ -228,7 +309,21 @@
           phase: 'download',
           status: 'done',
           errors: d.errors,
+          current_path: currentPath,
+          current_bytes: currentBytes,
+          current_total_bytes: currentTotalBytes,
+          current_percent: currentPercent,
+          file_status: 'done',
         });
+        if (currentPath) {
+          upsertDownloadItem(currentPath, {
+            bytes: currentTotalBytes ?? currentBytes ?? 0,
+            total: currentTotalBytes ?? currentBytes ?? 0,
+            percent: 100,
+            status: 'done',
+            error: undefined,
+          });
+        }
         downloadResult = resultFromProgress({
           processed: downloadProgress?.processed ?? d.files_written,
           total: downloadProgress?.total ?? d.files_written,
@@ -242,6 +337,10 @@
       } else if (type === 'restore_download_failed') {
         const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number; error?: string };
         downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
+        const currentPath = downloadProgress?.current_path;
+        const currentBytes = downloadProgress?.current_bytes;
+        const currentTotalBytes = downloadProgress?.current_total_bytes;
+        const currentPercent = downloadProgress?.current_percent;
         applyDownloadProgress({
           processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
           total: downloadProgress?.total ?? 0,
@@ -252,7 +351,21 @@
           status: 'failed',
           errors: d.errors,
           error: d.error,
+          current_path: currentPath,
+          current_bytes: currentBytes,
+          current_total_bytes: currentTotalBytes,
+          current_percent: currentPercent,
+          file_status: 'failed',
         });
+        if (currentPath) {
+          upsertDownloadItem(currentPath, {
+            bytes: currentBytes ?? 0,
+            total: currentTotalBytes ?? 0,
+            percent: currentPercent ?? 0,
+            status: 'failed',
+            error: d.error,
+          });
+        }
         downloadResult = resultFromProgress({
           processed: downloadProgress?.processed ?? d.files_written,
           total: downloadProgress?.total ?? d.files_written,
@@ -292,6 +405,7 @@
     downloadProgress = null;
     downloadResult = null;
     downloadTotalBytes = 0;
+    downloadItems = {};
     downloadStatus = runningStatus('Submitting download request…');
     try {
       lastVerifyChecksum = verifyChecksum;
@@ -327,6 +441,19 @@
       const nextSummary = cur ?? last ?? null;
       if (nextSummary) {
         applyDownloadProgress(progressFromSummary(nextSummary));
+        if (nextSummary.current_path) {
+          upsertDownloadItem(nextSummary.current_path, {
+            bytes: nextSummary.current_bytes ?? 0,
+            total: nextSummary.current_total_bytes ?? 0,
+            percent: nextSummary.current_percent ?? 0,
+            status: nextSummary.status === 'running'
+              ? 'active'
+              : nextSummary.status === 'failed'
+                ? 'failed'
+                : 'done',
+            error: nextSummary.error_message,
+          });
+        }
         if (nextSummary.status === 'completed' || nextSummary.status === 'failed') {
           downloadResult = resultFromProgress(progressFromSummary(nextSummary));
         }
@@ -465,13 +592,32 @@
     <p class="muted small" style="margin-top: 0.25rem">
       {downloadProgress.files_written.toLocaleString()} written · {bytes(downloadProgress.bytes_written)} ·
       {downloadProgress.processed.toLocaleString()} / {downloadProgress.total.toLocaleString()} checked
-      {#if downloadProgress.path} · {downloadProgress.path}{/if}
       {#if downloadProgress.error} · {downloadProgress.error}{/if}
     </p>
+    {#if downloadProgress.current_path}
+      <div class="current-file">
+        <div class="current-head">
+          <div>
+            <div class="muted small">Current file</div>
+            <div class="mono current-path">{downloadProgress.current_path}</div>
+          </div>
+          <div class="mono current-pct">{downloadProgress.current_percent ?? 0}%</div>
+        </div>
+        {#if (downloadProgress.current_total_bytes ?? 0) > 0}
+          <div style="margin-top: 0.5rem">
+            <ProgressBar
+              label="File bytes"
+              value={downloadProgress.current_bytes ?? 0}
+              max={downloadProgress.current_total_bytes ?? 0}
+            />
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if downloadProgress.total_bytes > 0}
       <div style="margin-top: 0.6rem">
         <ProgressBar
-          label="Size downloaded"
+          label="Job bytes"
           value={downloadProgress.bytes_written}
           max={downloadProgress.total_bytes}
         />
@@ -479,6 +625,29 @@
     {/if}
   {/if}
 </div>
+
+{#if downloadItemList.length}
+  <div class="card">
+    <div class="label">Download activity</div>
+    <div class="activity-list">
+      {#each downloadItemList as item (item.path)}
+        <div class="activity-item">
+          <div class="activity-head">
+            <span class="mono activity-path">{item.path}</span>
+            <span class={`activity-pill ${item.status}`}>{item.status}</span>
+          </div>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={item.percent} style="margin-top: 0.45rem">
+            <div class="fill" style="width: {item.percent}%"></div>
+          </div>
+          <div class="activity-meta mono small">
+            {bytes(item.bytes)} / {bytes(item.total)} ({item.percent}%)
+            {#if item.error} · {item.error}{/if}
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
+{/if}
 
 {#if downloadResult}
   <div class="card">
@@ -590,4 +759,54 @@
   .big { font-size: 1.3rem; font-weight: 500; }
   .bar { height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+  .current-file {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .current-head,
+  .activity-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .current-path,
+  .activity-path {
+    overflow-wrap: anywhere;
+  }
+  .current-pct {
+    white-space: nowrap;
+    color: var(--muted);
+  }
+  .activity-list {
+    display: grid;
+    gap: 0.75rem;
+  }
+  .activity-item {
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .activity-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .activity-pill.active { color: var(--accent); }
+  .activity-pill.done { color: var(--ok, #1f7a3f); }
+  .activity-pill.failed { color: var(--err); }
+  .activity-meta {
+    margin-top: 0.35rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
 </style>

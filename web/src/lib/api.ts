@@ -138,6 +138,10 @@ export interface RestoreDownloadSummary {
   files_written: number;
   bytes_written: number;
   errors: number;
+  current_path?: string;
+  current_bytes?: number;
+  current_total_bytes?: number;
+  current_percent?: number;
   error_message?: string;
 }
 
