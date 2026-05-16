@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Download cost estimates now use the full outbound byte total with no free-tier deduction, so the dashboard shows the maximum likely egress cost and leaves any AWS free-tier savings for the operator to verify |
 | — | — | `serve` now auto-creates a starter `config.json` at the resolved config path on first launch, so the manual `config init` bootstrap step is no longer required before the first run |
 | — | — | Source rescans now reclassify vanished uploaded/zipped rows as `cloud_only`, keep `missing` reserved for rows absent from both local and S3, and authoritative sync turns cloud-backed rows into `missing` only when the object is actually gone |
 | — | — | Restore estimates now include the temporary S3 Standard storage copy in the total, and restore requests accept retention periods up to 180 days |

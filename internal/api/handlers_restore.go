@@ -25,8 +25,7 @@ const (
 	pricePerGBRetrievalBulk          = 0.003  // USD/GB; Glacier bulk retrieval
 	pricePerGBStorageStandard        = 0.023  // USD/GB-month; restored copy billed at S3 Standard rates
 	pricePerThousandRequestsGet      = 0.0004 // USD; S3 Standard GET requests
-	pricePerGBEgress                 = 0.09   // USD/GB; internet egress after free tier
-	egressFreeGB                     = 100.0  // free tier
+	pricePerGBEgress                 = 0.09   // USD/GB; internet egress, pessimistic estimate uses the full byte total
 )
 
 type restoreTierRequest string
@@ -59,13 +58,9 @@ func restoreTierPricing(tier storage.RestoreTier) (requestPerThousand, retrieval
 func estimateDownloadFees(objectCount, totalBytes int64) (requestFeeUSD, egressFeeUSD, totalFeeUSD float64) {
 	requestFeeUSD = float64(objectCount) * pricePerThousandRequestsGet / 1000
 	gb := float64(totalBytes) / (1024 * 1024 * 1024)
-	egressGB := gb
-	if egressGB > egressFreeGB {
-		egressGB -= egressFreeGB
-	} else {
-		egressGB = 0
-	}
-	egressFeeUSD = egressGB * pricePerGBEgress
+	// Use the full byte total here so the dashboard shows the maximal
+	// outbound cost the operator may be on the hook for.
+	egressFeeUSD = gb * pricePerGBEgress
 	totalFeeUSD = requestFeeUSD + egressFeeUSD
 	return requestFeeUSD, egressFeeUSD, totalFeeUSD
 }
@@ -180,13 +175,9 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 	request := float64(objectCount) * requestPerThousand / 1000
 	retrieval := gb * retrievalPerGB
 	storage := estimateRestoreStorageFee(br.RetrievableBytes, req.Days)
-	egressGB := gb
-	if egressGB > egressFreeGB {
-		egressGB -= egressFreeGB
-	} else {
-		egressGB = 0
-	}
-	egress := egressGB * pricePerGBEgress
+	// Use the full byte total here so the estimate stays pessimistic
+	// and leaves any AWS free-tier savings for the operator to verify.
+	egress := gb * pricePerGBEgress
 
 	writeJSON(w, http.StatusOK, restoreEstimateResponse{
 		FileCount:              objectCount,
