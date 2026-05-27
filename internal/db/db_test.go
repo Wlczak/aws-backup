@@ -398,6 +398,50 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestStatsIgnoresReservedSnapshotRestoreCounts(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	now := time.Now().UTC()
+	snap, err := d.UpsertFile(ctx, ReservedSnapshotPath, 100, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, snap.ID, "md5", ReservedSnapshotPath, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, ReservedSnapshotPath, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := d.UpsertFile(ctx, "restored.txt", 200, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploaded(ctx, restored.ID, "md5", "backups/restored.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRestored(ctx, "backups/restored.txt", now.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := d.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ByRestoreStatus[RestoreStatusRestored]; got != 1 {
+		t.Fatalf("restored count=%d want 1", got)
+	}
+	if s.RestoreSoonestExp == nil {
+		t.Fatal("RestoreSoonestExp=nil")
+	}
+	want := now.Add(48 * time.Hour).Truncate(time.Second)
+	got := s.RestoreSoonestExp.UTC().Truncate(time.Second)
+	if !got.Equal(want) {
+		t.Fatalf("soonest expires=%v want %v", got, want)
+	}
+}
+
 func TestDownloadMirrorBatchAndStats(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

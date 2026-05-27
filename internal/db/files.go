@@ -68,6 +68,11 @@ const (
 	StatusMissing   = "missing"
 )
 
+// ReservedSnapshotPath is the source-relative path used for the uploaded
+// SQLite snapshot of the index DB itself. It lives in the bucket, but
+// restore estimates should not treat it as a user-restorable file.
+const ReservedSnapshotPath = "index.db"
+
 // Restore lifecycle states tracked separately from Status. Empty string =
 // no known restore activity for the row.
 const (
@@ -936,7 +941,7 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	}
 	if err := db.g.WithContext(ctx).Model(&File{}).
 		Select("restore_status, COUNT(*) as count").
-		Where("restore_status != ''").
+		Where("restore_status != '' AND path != ?", ReservedSnapshotPath).
 		Group("restore_status").
 		Scan(&rrows).Error; err != nil {
 		return s, err
@@ -983,7 +988,7 @@ func (db *DB) Stats(ctx context.Context) (FileStats, error) {
 	var rawExpiries []sql.NullString
 	if err := db.g.WithContext(ctx).Model(&File{}).
 		Select("restore_expires_at").
-		Where("restore_status = ? AND restore_expires_at IS NOT NULL AND restore_expires_at != ''", RestoreStatusRestored).
+		Where("restore_status = ? AND path != ? AND restore_expires_at IS NOT NULL AND restore_expires_at != ''", RestoreStatusRestored, ReservedSnapshotPath).
 		Pluck("restore_expires_at", &rawExpiries).Error; err != nil {
 		return s, err
 	}
@@ -1326,7 +1331,7 @@ func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles
 	if allFiles || len(paths) == 0 {
 		var row aggRow
 		if err := db.g.WithContext(ctx).Model(&File{}).
-			Where("status IN ?", statuses).
+			Where("status IN ? AND path != ?", statuses, ReservedSnapshotPath).
 			Select(sel).
 			Scan(&row).Error; err != nil {
 			return RestoreEstimateBreakdown{}, err
@@ -1356,7 +1361,7 @@ func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles
 		}
 		var row aggRow
 		if err := db.g.WithContext(ctx).Model(&File{}).
-			Where("status IN ?", statuses).
+			Where("status IN ? AND path != ?", statuses, ReservedSnapshotPath).
 			Where("("+strings.Join(conds, ") OR (")+")", args...).
 			Select(sel).
 			Scan(&row).Error; err != nil {
@@ -1373,8 +1378,8 @@ func (db *DB) RestoreEstimateStats(ctx context.Context, paths []string, allFiles
 	for _, p := range paths {
 		var probe []int64
 		if err := db.g.WithContext(ctx).Model(&File{}).
-			Where("status IN ? AND (path = ? OR path LIKE ? ESCAPE '\\')",
-				statuses, p, likeEscape.Replace(p)+"/%").
+			Where("status IN ? AND path != ? AND (path = ? OR path LIKE ? ESCAPE '\\')",
+				statuses, ReservedSnapshotPath, p, likeEscape.Replace(p)+"/%").
 			Select("id").Limit(1).Pluck("id", &probe).Error; err != nil {
 			return RestoreEstimateBreakdown{}, err
 		}

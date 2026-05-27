@@ -76,6 +76,27 @@ func estimateRestoreStorageFee(totalBytes int64, days int) float64 {
 	return gb * months * pricePerGBStorageStandard
 }
 
+func filterRestoreEstimatePaths(paths []string) ([]string, bool) {
+	allFiles := false
+	filtered := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		switch p {
+		case "", "/":
+			allFiles = true
+			continue
+		case db.ReservedSnapshotPath:
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		filtered = append(filtered, p)
+	}
+	return filtered, allFiles
+}
+
 type restoreEstimateRequest struct {
 	Paths []string `json:"paths"`
 	Tier  string   `json:"tier"`
@@ -132,20 +153,10 @@ func (s *Server) handleRestoreEstimate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// "/" (or "") is a special sentinel meaning "all files".
-	allFiles := false
-	pathsForFilter := make([]string, 0, len(req.Paths))
-	seen := make(map[string]struct{}, len(req.Paths))
-	for _, p := range req.Paths {
-		if p == "/" || p == "" {
-			allFiles = true
-			continue
-		}
-		if _, dup := seen[p]; dup {
-			continue
-		}
-		seen[p] = struct{}{}
-		pathsForFilter = append(pathsForFilter, p)
+	pathsForFilter, allFiles := filterRestoreEstimatePaths(req.Paths)
+	if !allFiles && len(pathsForFilter) == 0 {
+		writeJSON(w, http.StatusOK, restoreEstimateResponse{})
+		return
 	}
 
 	br, err := s.deps.DB.RestoreEstimateStats(r.Context(), pathsForFilter, allFiles)
@@ -221,6 +232,9 @@ func (s *Server) restoreObjectCount(ctx context.Context, paths []string, allFile
 			break
 		}
 		for _, f := range rows {
+			if f.Path == db.ReservedSnapshotPath {
+				continue
+			}
 			if f.Status != db.StatusUploaded && f.Status != db.StatusZipped && f.Status != db.StatusCloudOnly {
 				continue
 			}
@@ -446,19 +460,10 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 	// Seed the job summary before the worker starts so /api/status can
 	// replay the final byte budget immediately on refresh, instead of
 	// waiting for the engine's first SSE frame.
-	allFiles := false
-	pathsForEstimate := make([]string, 0, len(req.Paths))
-	seen := make(map[string]struct{}, len(req.Paths))
-	for _, p := range req.Paths {
-		if p == "" || p == "/" {
-			allFiles = true
-			continue
-		}
-		if _, dup := seen[p]; dup {
-			continue
-		}
-		seen[p] = struct{}{}
-		pathsForEstimate = append(pathsForEstimate, p)
+	pathsForEstimate, allFiles := filterRestoreEstimatePaths(req.Paths)
+	if !allFiles && len(pathsForEstimate) == 0 {
+		writeJSON(w, http.StatusOK, restoreDownloadEstimateResponse{})
+		return
 	}
 	estimate, err := s.downloadEstimateStats(r.Context(), pathsForEstimate, allFiles)
 	if err != nil {
@@ -733,6 +738,9 @@ func (s *Server) downloadEstimateStats(ctx context.Context, paths []string, allF
 			break
 		}
 		for _, f := range rows {
+			if f.Path == db.ReservedSnapshotPath {
+				continue
+			}
 			if f.Status != statuses[0] && f.Status != statuses[1] {
 				continue
 			}
