@@ -517,6 +517,56 @@ func TestRestoreEstimateTierChangesPreview(t *testing.T) {
 	}
 }
 
+func TestRestoreEstimateIgnoresDBSnapshotPath(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	now := time.Now()
+
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: db.ReservedSnapshotPath, Size: 111, ModTime: now},
+		{Path: "docs/report.pdf", Size: 222, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("db"), db.ReservedSnapshotPath, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[1].ID}, md5hex("doc"), "backups/docs/report.pdf", now); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	srv := &Server{deps: Deps{DB: d, Bus: events.NewBus(16), Config: &cfg}}
+	body, _ := json.Marshal(map[string]any{
+		"paths": []string{"/"},
+		"tier":  "standard",
+		"days":  30,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/restore/estimate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreEstimate(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var out restoreEstimateResponse
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.FileCount != 1 {
+		t.Fatalf("file_count=%d want 1", out.FileCount)
+	}
+	if out.TotalBytes != 222 {
+		t.Fatalf("total_bytes=%d want 222", out.TotalBytes)
+	}
+}
+
 func TestRestoreEstimateCountsZipAsOneObject(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

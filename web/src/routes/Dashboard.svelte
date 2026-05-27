@@ -649,9 +649,6 @@
           <span class="pill"><StatusBadge status={k} /> {v.toLocaleString()}</span>
         {/each}
       </div>
-      <div class="muted small" style="margin-top: 0.4rem">
-        {restored.toLocaleString()} restored file(s)
-      </div>
       <div class="muted small" style="margin-top: 0.2rem">
         Download mirror: {mirrored.toLocaleString()} present, {notMirrored.toLocaleString()} missing
       </div>
@@ -759,6 +756,7 @@
   <div class="card">
     <div class="label">Glacier restores</div>
     {#if stats}
+      {@const total = stats.total_count}
       {@const inProg = stats.by_restore_status?.['in_progress'] ?? 0}
       {@const restored = stats.by_restore_status?.['restored'] ?? 0}
       {#if inProg === 0 && restored === 0}
@@ -768,7 +766,7 @@
         <div class="big">{(inProg + restored).toLocaleString()} file(s)</div>
         <div class="pills">
           {#if inProg > 0}<span class="pill"><StatusBadge status="in_progress" /> {inProg.toLocaleString()}</span>{/if}
-          {#if restored > 0}<span class="pill"><StatusBadge status="restored" /> {restored.toLocaleString()}</span>{/if}
+          {#if restored > 0}<span class="pill"><StatusBadge status="restored" /> restored {restored.toLocaleString()}/{total.toLocaleString()}</span>{/if}
         </div>
         {#if stats.restore_soonest_expires_at}
           <div class="muted small" style="margin-top: 0.4rem"

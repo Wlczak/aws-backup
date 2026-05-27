@@ -4,7 +4,10 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Dashboard restore counts now exclude the reserved `index.db` snapshot, so it no longer inflates the restored total |
+| — | — | Restore estimates now exclude the reserved `index.db` snapshot object so the local DB does not appear as one extra restorable file |
 | — | — | Restore downloads now seed their total byte budget before the worker starts, so `/api/status` can replay the full size immediately on refresh |
+| — | — | Dashboard "Glacier restores" card now shows `restored X/Y` next to the restored badge so the denominator matches total indexed files |
 | — | — | Restore downloads now stage each object in the temp cache first and only promote fully downloaded files into the target directory |
 | — | — | Full-download mirror reruns now reuse a DB-backed snapshot of the download folder, and the dashboard has a manual "Rescan download folder" action to refresh that snapshot on demand |
 | — | — | Dashboard mirror downloads now have a cancel button so operators can stop a rerun without waiting for the current file to finish |

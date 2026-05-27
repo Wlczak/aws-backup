@@ -1173,6 +1173,52 @@ func TestRestoreDownloadEstimate(t *testing.T) {
 	}
 }
 
+func TestRestoreDownloadEstimateIgnoresDBSnapshotPath(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rows, err := deps.DB.UpsertFileBatch(ctx, []db.BatchEntry{
+		{Path: db.ReservedSnapshotPath, Size: 100, ModTime: now},
+		{Path: "docs/readme.md", Size: 300, ModTime: now},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, rows[0].ID, md5hex("db"), db.ReservedSnapshotPath, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.MarkUploaded(ctx, rows[1].ID, md5hex("doc"), "backups/docs/readme.md", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.MarkRestored(ctx, "backups/docs/readme.md", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"paths":["/"]}`)
+	resp, err := ts.Client().Post(ts.URL+"/api/restore/download/estimate", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	var got restoreDownloadEstimateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ObjectCount != 1 {
+		t.Fatalf("object_count=%d want 1", got.ObjectCount)
+	}
+	if got.NotRestoringCount != 0 {
+		t.Fatalf("not_restoring_count=%d want 0", got.NotRestoringCount)
+	}
+	if got.RestoredCount != 1 {
+		t.Fatalf("restored_count=%d want 1", got.RestoredCount)
+	}
+}
+
 func TestDownloadStatusCarriesCostEstimate(t *testing.T) {
 	srv := &Server{}
 	srv.currentDownload = &downloadSummary{
