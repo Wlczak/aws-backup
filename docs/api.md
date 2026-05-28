@@ -31,6 +31,10 @@ DELETE /api/files                     batch delete by ids[]
 # Settings
 GET    /api/settings                  redacted config + pending_apply flag
 PUT    /api/settings                  validate + apply (or queue if a run is in flight)
+GET    /api/profiles                  profiles + active_profile + switch-blocking state
+POST   /api/profiles                  {name, clone_active} create a profile
+PUT    /api/profiles/active           {name} switch active profile; 409 unless backup/download/restore jobs and pending settings are idle
+DELETE /api/profiles/{name}           delete an inactive profile; refuses active/last profile
 
 # Connectivity tests
 GET    /api/smb/test                  dial source per current config
@@ -56,6 +60,8 @@ GET    /*                             embedded Svelte SPA (hash router fallback 
 ```
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
+
+Profiles are single-active at runtime. Each profile has its own config and `index.db` under the OS config directory, maps to one S3 bucket, and shares central server settings. Switching profiles rebuilds source/storage/DB/scheduler/SQS/inventory state and is rejected with 409 while any backup run, mirror download, restore download, or pending settings apply is active.
 
 `POST /api/download/full` rejects while a backup run is in flight, reuses the cached download-mirror snapshot for `backup.download_dir` when one exists, and only performs a filesystem scan when the directory has not been scanned yet. The scan updates `download_present` / `download_checked_at` and persists a `download_mirror_snapshots` row keyed by the directory path; reruns can then skip the mirror walk and jump straight to the download phase. Zip-backed rows reuse a cached archive from `backup.tmp_dir` when available; otherwise the job downloads the zip once and extracts only the missing members. `POST /api/download/rescan` runs the scan-only phase and refreshes the cached snapshot without downloading any files. `POST /api/download/cancel` asks the active mirror job to stop and surfaces a cancelled terminal state when the worker exits. The live `/api/status` payload exposes the missing-set object count plus a pessimistic estimated request / egress / total cost so operators can see the maximum likely price before and during the download phase, and also includes the cached snapshot timestamp/counts for the mirror card.
 

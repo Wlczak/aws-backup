@@ -12,6 +12,7 @@ A self-contained Go binary with an embedded Svelte SPA that backs up files from 
 - Mirror download that scans a configured mirror directory, records mirror presence in SQLite, and downloads only missing rows
 - Optional SQS integration for tracking S3 Glacier restore-completed events
 - Cron scheduler for unattended periodic runs
+- Multiple named profiles, with one active profile per process; each profile owns one bucket config and one SQLite index under the OS config directory
 
 Module: `github.com/Wlczak/aws-backup`
 
@@ -34,8 +35,8 @@ aws-backup/
 │   │   ├── handlers_sync.go     # /api/sync, /sync/full, /sync/delete-cloud-paths
 │   │   └── handlers_tests.go    # GET /api/smb/test, /api/s3/test
 │   ├── config/
-│   │   ├── config.go            # Config tree, Load/Save/Validate/Default/Redacted
-│   │   └── path.go              # Platform-specific config dir resolution
+│   │   ├── config.go            # Central/profile config trees, Load/Save/Validate/Default/Redacted
+│   │   └── path.go              # Platform-specific config/profile dir resolution
 │   ├── db/
 │   │   ├── db.go                # GORM open, AutoMigrate, busy_timeout, Checkpoint
 │   │   ├── files.go             # File model + CRUD: Upsert, Mark*, ListPending, Reconcile, Restore lifecycle
@@ -129,6 +130,7 @@ aws-backup/
 | Index models S3, not source | Required for safe `missing` semantics and S3-side reconcile (see `CLAUDE.md`) |
 | Download mirror metadata is separate from bucket state | `download_present` / `download_checked_at` track the configured local mirror without changing `uploaded` / `cloud_only` / `missing` semantics |
 | Settings deferred-apply during runs | PUT during a run persists + queues; applies post-run instead of 409 |
+| Single active profile | Profiles configure multiple bucket/source/index sets, but only one is active in a running process; switching is idle-only so DB/storage/source handles never cross profiles |
 | Pre-flight `skipIfMatches` (HEAD + SHA256) | Avoids redundant new versions on versioned buckets without DB schema changes (#133) |
 | `Storage.PutIfAbsent` via S3 `IfNoneMatch=*` | Atomic dedup at the bucket; engine retries with next counter on collision (#116) |
 | Tmp resume via stable `ind-{fileID}` name | Cached copy is reused on upload retry when size+mtime match (#127) |

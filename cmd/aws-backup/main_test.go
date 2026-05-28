@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -192,5 +193,74 @@ func TestEnsureConfigFileDoesNotOverwriteExisting(t *testing.T) {
 	}
 	if string(got) != "sentinel" {
 		t.Fatalf("config was overwritten: %q", got)
+	}
+}
+
+func TestEnsureProfileLayoutCreatesCentralAndDefaultProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	created, err := ensureProfileLayout(path)
+	if err != nil {
+		t.Fatalf("ensureProfileLayout: %v", err)
+	}
+	if !created {
+		t.Fatal("expected fresh profile layout to be created")
+	}
+	central, err := config.LoadCentral(path)
+	if err != nil {
+		t.Fatalf("load central: %v", err)
+	}
+	if central.ActiveProfile != "default" {
+		t.Fatalf("active profile = %q, want default", central.ActiveProfile)
+	}
+	profilePath, _ := config.ProfilePath(path, "default")
+	if _, err := config.LoadProfile(profilePath); err != nil {
+		t.Fatalf("load default profile: %v", err)
+	}
+}
+
+func TestEnsureProfileLayoutMigratesLegacyConfigAndIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := config.Default()
+	legacy.Source.LocalDir.Root = dir
+	legacy.S3.Bucket = "legacy-bucket"
+	if err := config.Save(path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.db"), []byte("legacy-index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := ensureProfileLayout(path)
+	if err != nil {
+		t.Fatalf("ensureProfileLayout: %v", err)
+	}
+	if created {
+		t.Fatal("legacy migration should not report fresh creation")
+	}
+	central, err := config.LoadCentral(path)
+	if err != nil {
+		t.Fatalf("load central: %v", err)
+	}
+	if central.ActiveProfile != "default" || central.Server != legacy.Server {
+		t.Fatalf("central = %+v", central)
+	}
+	profilePath, _ := config.ProfilePath(path, "default")
+	prof, err := config.LoadProfile(profilePath)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	if prof.S3.Bucket != "legacy-bucket" {
+		t.Fatalf("bucket = %q", prof.S3.Bucket)
+	}
+	indexPath, _ := config.ProfileIndexPath(path, "default")
+	got, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read migrated index: %v", err)
+	}
+	if string(got) != "legacy-index" {
+		t.Fatalf("index content = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy index still exists or stat failed: %v", err)
 	}
 }

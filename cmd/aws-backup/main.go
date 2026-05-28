@@ -37,6 +37,7 @@ var version = "0.0.0-dev"
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", "", "path to config.json (default: OS-specific user config dir)")
+	profileOverride := flag.String("profile", "", "profile to use for this process (overrides central active_profile)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: aws-backup [flags] <command>\n\n")
 		fmt.Fprintf(os.Stderr, "commands:\n")
@@ -74,9 +75,9 @@ func main() {
 	case "config":
 		runConfig(path, args[1:])
 	case "run":
-		runBackup(path)
+		runBackup(path, *profileOverride)
 	case "serve":
-		runServe(path)
+		runServe(path, *profileOverride)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
 		flag.Usage()
@@ -93,16 +94,18 @@ type appState struct {
 	// api-side cfg writes (Server.updateConfig) serialise on a single
 	// lock instead of racing across two. RWMutex.Lock semantics are
 	// identical to Mutex.Lock for the existing call sites. (#153)
-	mu      sync.RWMutex
-	cfg     config.Config
-	cfgPath string
-	db      *db.DB
-	src     source.Source
-	store   storage.Storage
-	sched   *scheduler.Scheduler
-	bus     *events.Bus
-	dbPath  string
-	logger  *slog.Logger
+	mu          sync.RWMutex
+	cfg         config.Config
+	cfgPath     string
+	profile     string
+	profilePath string
+	db          *db.DB
+	src         source.Source
+	store       storage.Storage
+	sched       *scheduler.Scheduler
+	bus         *events.Bus
+	dbPath      string
+	logger      *slog.Logger
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
@@ -111,6 +114,8 @@ type appState struct {
 	// "Sync restore status" button can call DrainAll alongside the
 	// background poll. nil when SQS is disabled.
 	sqsConsumer *restore.Consumer
+	sqsCancel   context.CancelFunc
+	sqsDone     chan struct{}
 	// restoreScanner reconciles restore status by HEADing every (or only
 	// pending) individually-uploaded file. Lazily wired in runServe.
 	restoreScanner *scanner.Scanner
@@ -126,16 +131,24 @@ type appState struct {
 // configured server address showing progress with a Cancel button; the
 // transient server is shut down before this returns so the real API can
 // rebind the port. (#143)
-func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appState, error) {
-	cfg, err := config.Load(cfgPath)
+func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBootUI bool) (*appState, error) {
+	central, profile, profilePath, err := loadCentralAndProfile(cfgPath, profileOverride)
 	if err != nil {
-		return nil, fmt.Errorf("load %s: %w", cfgPath, err)
+		return nil, err
 	}
+	cfg := profile.ToConfig(central.Server)
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config:\n%w", err)
 	}
 
-	dir := filepath.Dir(cfgPath)
+	activeProfile := central.ActiveProfile
+	if profileOverride != "" {
+		activeProfile = profileOverride
+	}
+	dir, err := config.ProfileDir(cfgPath, activeProfile)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -201,13 +214,15 @@ func loadAppState(ctx context.Context, cfgPath string, withBootUI bool) (*appSta
 	}
 
 	return &appState{
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		db:      d,
-		src:     src,
-		store:   store,
-		bus:     events.NewBus(128),
-		dbPath:  dbPath,
+		cfg:         cfg,
+		cfgPath:     cfgPath,
+		profile:     activeProfile,
+		profilePath: profilePath,
+		db:          d,
+		src:         src,
+		store:       store,
+		bus:         events.NewBus(128),
+		dbPath:      dbPath,
 	}, nil
 }
 
@@ -600,19 +615,302 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	return nil
 }
 
+func (a *appState) saveSettings(next config.Config) error {
+	a.mu.RLock()
+	profilePath := a.profilePath
+	centralPath := a.cfgPath
+	a.mu.RUnlock()
+	central, err := config.LoadCentral(centralPath)
+	if err != nil {
+		return err
+	}
+	central.Server = next.Server
+	if err := config.SaveProfile(profilePath, config.ProfileFromConfig(next)); err != nil {
+		return err
+	}
+	return config.SaveCentral(centralPath, central)
+}
+
 func (a *appState) close() {
+	if a.sqsCancel != nil {
+		a.sqsCancel()
+	}
+	if a.sqsDone != nil {
+		<-a.sqsDone
+	}
 	a.store.Close()
 	a.src.Close()
 	a.db.Close()
 }
 
-func runBackup(cfgPath string) {
+func (a *appState) listProfiles() ([]api.ProfileInfo, error) {
+	root := config.ProfilesDir(a.cfgPath)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.RLock()
+	active := a.profile
+	a.mu.RUnlock()
+	infos := make([]api.ProfileInfo, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if err := config.ValidateProfileName(name); err != nil {
+			continue
+		}
+		profilePath, _ := config.ProfilePath(a.cfgPath, name)
+		indexPath, _ := config.ProfileIndexPath(a.cfgPath, name)
+		prof, err := config.LoadProfile(profilePath)
+		if err != nil {
+			continue
+		}
+		infos = append(infos, api.ProfileInfo{
+			Name:       name,
+			Active:     name == active,
+			Bucket:     prof.S3.Bucket,
+			ConfigPath: profilePath,
+			IndexPath:  indexPath,
+		})
+	}
+	return infos, nil
+}
+
+func (a *appState) createProfile(_ context.Context, name string, cloneActive bool) (api.ProfileInfo, error) {
+	if err := config.ValidateProfileName(name); err != nil {
+		return api.ProfileInfo{}, err
+	}
+	profilePath, err := config.ProfilePath(a.cfgPath, name)
+	if err != nil {
+		return api.ProfileInfo{}, err
+	}
+	if _, err := os.Stat(profilePath); err == nil {
+		return api.ProfileInfo{}, fmt.Errorf("profile %q already exists", name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return api.ProfileInfo{}, err
+	}
+
+	var prof config.ProfileConfig
+	if cloneActive {
+		a.mu.RLock()
+		prof = config.ProfileFromConfig(a.cfg)
+		a.mu.RUnlock()
+	} else {
+		prof = config.DefaultProfile()
+	}
+	if err := config.SaveProfile(profilePath, prof); err != nil {
+		return api.ProfileInfo{}, err
+	}
+	indexPath, err := config.ProfileIndexPath(a.cfgPath, name)
+	if err != nil {
+		return api.ProfileInfo{}, err
+	}
+	return api.ProfileInfo{Name: name, Bucket: prof.S3.Bucket, ConfigPath: profilePath, IndexPath: indexPath}, nil
+}
+
+func (a *appState) deleteProfile(_ context.Context, name string) error {
+	if err := config.ValidateProfileName(name); err != nil {
+		return err
+	}
+	a.mu.RLock()
+	active := a.profile
+	a.mu.RUnlock()
+	if name == active {
+		return errors.New("cannot delete the active profile")
+	}
+	profiles, err := a.listProfiles()
+	if err != nil {
+		return err
+	}
+	if len(profiles) <= 1 {
+		return errors.New("cannot delete the last profile")
+	}
+	dir, err := config.ProfileDir(a.cfgPath, name)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+func (a *appState) switchProfile(rootCtx context.Context) func(context.Context, string) (api.ProfileRuntime, error) {
+	return func(ctx context.Context, name string) (api.ProfileRuntime, error) {
+		return a.switchProfileTo(ctx, rootCtx, name)
+	}
+}
+
+func (a *appState) switchProfileTo(ctx, rootCtx context.Context, name string) (api.ProfileRuntime, error) {
+	if err := config.ValidateProfileName(name); err != nil {
+		return api.ProfileRuntime{}, err
+	}
+	central, prof, profilePath, err := loadCentralAndProfile(a.cfgPath, name)
+	if err != nil {
+		return api.ProfileRuntime{}, err
+	}
+	cfg := prof.ToConfig(central.Server)
+	if err := cfg.Validate(); err != nil {
+		return api.ProfileRuntime{}, fmt.Errorf("invalid profile %q:\n%w", name, err)
+	}
+	dir, err := config.ProfileDir(a.cfgPath, name)
+	if err != nil {
+		return api.ProfileRuntime{}, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return api.ProfileRuntime{}, err
+	}
+
+	newStore, err := storage.NewS3Storage(ctx, storage.S3Config{
+		Endpoint:           cfg.S3.Endpoint,
+		UsePathStyle:       cfg.S3.UsePathStyle,
+		Region:             cfg.S3.Region,
+		Bucket:             cfg.S3.Bucket,
+		AccessKeyID:        cfg.S3.AccessKeyID,
+		SecretAccessKey:    cfg.S3.SecretAccessKey,
+		StorageClass:       cfg.S3.StorageClass,
+		MultipartThreshold: cfg.S3.MultipartThreshold,
+		ResumeThreshold:    cfg.S3.ResumeThreshold,
+		PartSize:           cfg.S3.PartSize,
+	})
+	if err != nil {
+		return api.ProfileRuntime{}, fmt.Errorf("init storage: %w", err)
+	}
+	dbPath := filepath.Join(dir, "index.db")
+	_ = refreshDBFromS3(ctx, newStore, cfg.S3.KeyPrefix, dbPath)
+	newDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		newStore.Close()
+		return api.ProfileRuntime{}, fmt.Errorf("open db %s: %w", dbPath, err)
+	}
+	newSrc, err := source.FromConfig(cfg.Source)
+	if err != nil {
+		newDB.Close()
+		newStore.Close()
+		return api.ProfileRuntime{}, fmt.Errorf("open source: %w", err)
+	}
+
+	central.ActiveProfile = name
+	if err := config.SaveCentral(a.cfgPath, central); err != nil {
+		newSrc.Close()
+		newDB.Close()
+		newStore.Close()
+		return api.ProfileRuntime{}, fmt.Errorf("save central config: %w", err)
+	}
+
+	a.mu.Lock()
+	oldDB, oldSrc, oldStore := a.db, a.src, a.store
+	oldCancel, oldDone := a.sqsCancel, a.sqsDone
+	a.profile = name
+	a.profilePath = profilePath
+	a.cfg = cfg
+	a.db = newDB
+	a.src = newSrc
+	a.store = newStore
+	a.dbPath = dbPath
+	sched := a.sched
+	a.sqsConsumer = nil
+	a.sqsCancel = nil
+	a.sqsDone = nil
+	a.restoreScanner = scanner.New(newDB, a.liveStorage, a.bus, a.logger)
+	a.inventoryMgr = inventory.New(func() (inventory.API, string, bool) {
+		st := a.liveStorage()
+		s3st, ok := st.(*storage.S3Storage)
+		if !ok || s3st == nil {
+			return nil, "", false
+		}
+		return s3st.Client(), s3st.Bucket(), true
+	}, "")
+	a.mu.Unlock()
+
+	if sched != nil {
+		if err := sched.Update(cfg.Backup.Schedule); err != nil && a.logger != nil {
+			a.logger.Warn("profile switch schedule update failed", "err", err)
+		}
+	}
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldDone != nil {
+		select {
+		case <-oldDone:
+		case <-time.After(3 * time.Second):
+			if a.logger != nil {
+				a.logger.Warn("old sqs consumer did not stop before profile switch continued")
+			}
+		}
+	}
+	_ = oldSrc.Close()
+	_ = oldStore.Close()
+	_ = oldDB.Close()
+
+	a.startSQSConsumer(rootCtx)
+	if a.logger != nil {
+		a.logger.Info("profile switched", "profile", name, "bucket", cfg.S3.Bucket)
+	}
+	return api.ProfileRuntime{
+		Info: api.ProfileInfo{
+			Name:       name,
+			Active:     true,
+			Bucket:     cfg.S3.Bucket,
+			ConfigPath: profilePath,
+			IndexPath:  dbPath,
+		},
+		DB:                newDB,
+		Config:            cfg,
+		ConfigPath:        profilePath,
+		StoragePrefix:     cfg.S3.KeyPrefix,
+		RestoreScanner:    a.restoreScanner,
+		Inventory:         a.inventoryMgr,
+		SyncRestoreStatus: a.syncRestoreStatus(),
+	}, nil
+}
+
+func (a *appState) startSQSConsumer(rootCtx context.Context) {
+	a.mu.RLock()
+	cfg := a.cfg
+	logger := a.logger
+	a.mu.RUnlock()
+	if cfg.SQS.QueueURL == "" {
+		return
+	}
+	consumer, err := restore.New(rootCtx, cfg.SQS, cfg.S3, a.db, logger)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("sqs restore consumer disabled", "err", err)
+		}
+		return
+	}
+	consumer.OnDrainComplete = func(ctx context.Context, processed int) {
+		if a.restoreScanner == nil {
+			return
+		}
+		if _, err := a.restoreScanner.RunPending(ctx); err != nil && !errors.Is(err, scanner.ErrBusy) && logger != nil {
+			logger.Warn("post-drain pending scan failed", "err", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(rootCtx)
+	done := make(chan struct{})
+	a.mu.Lock()
+	a.sqsConsumer = consumer
+	a.sqsCancel = cancel
+	a.sqsDone = done
+	a.mu.Unlock()
+	go func() {
+		defer close(done)
+		_ = consumer.Run(ctx)
+	}()
+}
+
+func runBackup(cfgPath, profileOverride string) {
 	// Honour SIGINT/SIGTERM so Ctrl-C cancels the engine cleanly and lets
 	// it write a 'cancelled' run row + clean up staged tmp zips, instead
 	// of being killed mid-syscall with the run stuck in 'running'. (#260)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	app, err := loadAppState(ctx, cfgPath, false)
+	if _, err := ensureProfileLayout(cfgPath); err != nil {
+		fatalf("prepare config %s: %v", cfgPath, err)
+	}
+	app, err := loadAppState(ctx, cfgPath, profileOverride, false)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -645,7 +943,7 @@ func runBackup(cfgPath string) {
 	fmt.Printf("run %d completed. db: %s\n", runID, app.dbPath)
 }
 
-func runServe(cfgPath string) {
+func runServe(cfgPath, profileOverride string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -654,7 +952,7 @@ func runServe(cfgPath string) {
 	// handler as the rest of the server.
 	slog.SetDefault(logger)
 
-	created, err := ensureConfigFile(cfgPath)
+	created, err := ensureProfileLayout(cfgPath)
 	if err != nil {
 		fatalf("prepare config %s: %v", cfgPath, err)
 	}
@@ -662,36 +960,12 @@ func runServe(cfgPath string) {
 		logger.Info("created default config", "path", cfgPath)
 	}
 
-	app, err := loadAppState(ctx, cfgPath, true)
+	app, err := loadAppState(ctx, cfgPath, profileOverride, true)
 	if err != nil {
 		fatalf("%v", err)
 	}
 	app.logger = logger
 	defer app.close()
-
-	// Build the SQS restore-event consumer (if configured) before NewServer
-	// so the "Sync restore status" button can call DrainAll. Best-effort:
-	// failure to construct logs a warning and the rest of the server runs.
-	if app.cfg.SQS.QueueURL != "" {
-		consumer, err := restore.New(ctx, app.cfg.SQS, app.cfg.S3, app.db, logger)
-		if err != nil {
-			logger.Warn("sqs restore consumer disabled", "err", err)
-		} else if consumer != nil {
-			app.sqsConsumer = consumer
-			// Hook up the post-drain pending-only refresh so a missed
-			// SQS notification (queue subscribed late, redrive timeout,
-			// etc.) still gets reconciled the next time the operator
-			// clicks "Sync now".
-			consumer.OnDrainComplete = func(ctx context.Context, processed int) {
-				if app.restoreScanner == nil {
-					return
-				}
-				if _, err := app.restoreScanner.RunPending(ctx); err != nil && !errors.Is(err, scanner.ErrBusy) {
-					logger.Warn("post-drain pending scan failed", "err", err)
-				}
-			}
-		}
-	}
 
 	// Restore scanner: thin closure over the live storage so a settings
 	// hot-swap is observed without rebuilding it.
@@ -712,7 +986,13 @@ func runServe(cfgPath string) {
 		DB:                app.db,
 		Bus:               app.bus,
 		Config:            &app.cfg,
-		ConfigPath:        app.cfgPath,
+		ConfigPath:        app.profilePath,
+		SaveSettings:      app.saveSettings,
+		ActiveProfile:     app.profile,
+		ListProfiles:      app.listProfiles,
+		CreateProfile:     app.createProfile,
+		SwitchProfile:     app.switchProfile(ctx),
+		DeleteProfile:     app.deleteProfile,
 		BuildEngine:       app.buildEngine,
 		Storage:           app.liveStorage,
 		StoragePrefix:     app.cfg.S3.KeyPrefix,
@@ -753,22 +1033,7 @@ func runServe(cfgPath string) {
 	app.mu.Unlock()
 	sched.Start()
 
-	// Drive the SQS consumer's background long-poll loop now that the API
-	// server is wired up; the consumer itself was constructed earlier so
-	// the "Sync restore status" button can drain on demand alongside this
-	// loop.
-	// Track the SQS consumer goroutine so shutdown can wait for it
-	// before app.close() tears down the DB. Without the wait, an
-	// in-flight handleMessage → MarkRestoreComplete races a closed
-	// *sql.DB. (#258)
-	var sqsDone chan struct{}
-	if app.sqsConsumer != nil {
-		sqsDone = make(chan struct{})
-		go func() {
-			defer close(sqsDone)
-			_ = app.sqsConsumer.Run(ctx)
-		}()
-	}
+	app.startSQSConsumer(ctx)
 
 	addr := net.JoinHostPort(app.cfg.Server.Host, strconv.Itoa(app.cfg.Server.Port))
 	httpSrv := &http.Server{
@@ -779,7 +1044,7 @@ func runServe(cfgPath string) {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("serving", "addr", addr, "config", app.cfgPath)
+		logger.Info("serving", "addr", addr, "config", app.cfgPath, "profile", app.profile)
 		serveErr <- httpSrv.ListenAndServe()
 	}()
 
@@ -813,9 +1078,12 @@ func runServe(cfgPath string) {
 	// Wait for the SQS consumer to exit before app.close() runs. Run()
 	// returns once ctx is done and any in-flight handleMessage has
 	// completed; without this wait MarkRestore* could race db.Close. (#258)
-	if sqsDone != nil {
+	if app.sqsCancel != nil {
+		app.sqsCancel()
+	}
+	if app.sqsDone != nil {
 		select {
-		case <-sqsDone:
+		case <-app.sqsDone:
 		case <-shutdownCtx.Done():
 			logger.Warn("sqs consumer did not exit before shutdown deadline")
 		}
@@ -846,19 +1114,24 @@ func runConfig(path string, args []string) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			fatalf("stat %s: %v", path, err)
 		}
-		if err := config.Save(path, config.Default()); err != nil {
+		created, err := ensureProfileLayout(path)
+		if err != nil {
 			fatalf("write config: %v", err)
 		}
+		_ = created
 		fmt.Printf("wrote default config to %s\n", path)
 	case "path":
 		fmt.Println(path)
 	case "validate":
-		cfg, err := config.Load(path)
+		central, prof, _, err := loadCentralAndProfile(path, "")
 		if err != nil {
-			fatalf("load %s: %v", path, err)
+			fatalf("%v", err)
 		}
-		if err := cfg.Validate(); err != nil {
-			fatalf("invalid config:\n%v", err)
+		if err := central.ValidateCentral(); err != nil {
+			fatalf("invalid central config:\n%v", err)
+		}
+		if err := prof.ValidateProfile(central.Server); err != nil {
+			fatalf("invalid profile config:\n%v", err)
 		}
 		fmt.Printf("ok: %s\n", path)
 	default:
@@ -877,6 +1150,101 @@ func ensureConfigFile(path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func ensureProfileLayout(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		if central, err := config.LoadCentral(path); err == nil && central.ActiveProfile != "" {
+			profilePath, err := config.ProfilePath(path, central.ActiveProfile)
+			if err != nil {
+				return false, err
+			}
+			if _, err := os.Stat(profilePath); err != nil {
+				return false, fmt.Errorf("active profile %q config missing at %s: %w", central.ActiveProfile, profilePath, err)
+			}
+			return false, nil
+		}
+		return false, migrateLegacyConfig(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+
+	central := config.DefaultCentral()
+	profilePath, err := config.ProfilePath(path, central.ActiveProfile)
+	if err != nil {
+		return false, err
+	}
+	if err := config.SaveProfile(profilePath, config.DefaultProfile()); err != nil {
+		return false, err
+	}
+	if err := config.SaveCentral(path, central); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func loadCentralAndProfile(path, profileOverride string) (config.CentralConfig, config.ProfileConfig, string, error) {
+	central, err := config.LoadCentral(path)
+	if err != nil {
+		return config.CentralConfig{}, config.ProfileConfig{}, "", fmt.Errorf("load central config %s: %w", path, err)
+	}
+	if err := central.ValidateCentral(); err != nil {
+		return config.CentralConfig{}, config.ProfileConfig{}, "", fmt.Errorf("invalid central config:\n%w", err)
+	}
+	name := central.ActiveProfile
+	if profileOverride != "" {
+		if err := config.ValidateProfileName(profileOverride); err != nil {
+			return config.CentralConfig{}, config.ProfileConfig{}, "", err
+		}
+		name = profileOverride
+	}
+	profilePath, err := config.ProfilePath(path, name)
+	if err != nil {
+		return config.CentralConfig{}, config.ProfileConfig{}, "", err
+	}
+	profile, err := config.LoadProfile(profilePath)
+	if err != nil {
+		return config.CentralConfig{}, config.ProfileConfig{}, "", fmt.Errorf("load profile %q: %w", name, err)
+	}
+	return central, profile, profilePath, nil
+}
+
+func migrateLegacyConfig(path string) error {
+	legacy, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("load legacy config %s: %w", path, err)
+	}
+	central := config.CentralConfig{
+		ActiveProfile: "default",
+		Server:        legacy.Server,
+	}
+	profilePath, err := config.ProfilePath(path, central.ActiveProfile)
+	if err != nil {
+		return err
+	}
+	if err := config.SaveProfile(profilePath, config.ProfileFromConfig(legacy)); err != nil {
+		return fmt.Errorf("write migrated profile config: %w", err)
+	}
+	oldIndex := filepath.Join(filepath.Dir(path), "index.db")
+	newIndex, err := config.ProfileIndexPath(path, central.ActiveProfile)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(oldIndex); err == nil {
+		if _, err := os.Stat(newIndex); errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(oldIndex, newIndex); err != nil {
+				return fmt.Errorf("move legacy index: %w", err)
+			}
+		} else if err != nil {
+			return err
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := config.SaveCentral(path, central); err != nil {
+		return fmt.Errorf("write central config: %w", err)
+	}
+	return nil
 }
 
 func fatalf(format string, args ...any) {

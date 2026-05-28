@@ -29,10 +29,16 @@ import (
 
 // Deps holds everything the HTTP handlers need.
 type Deps struct {
-	DB         *db.DB
-	Bus        *events.Bus
-	Config     *config.Config
-	ConfigPath string
+	DB            *db.DB
+	Bus           *events.Bus
+	Config        *config.Config
+	ConfigPath    string
+	SaveSettings  func(config.Config) error
+	ActiveProfile string
+	ListProfiles  func() ([]ProfileInfo, error)
+	CreateProfile func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
+	SwitchProfile func(ctx context.Context, name string) (ProfileRuntime, error)
+	DeleteProfile func(ctx context.Context, name string) error
 	// BuildEngine constructs an Engine for a new backup run with the
 	// current config. mode and scanPaths are per-run parameters: mode
 	// selects scan-only, upload-only, or full (default); scanPaths
@@ -79,6 +85,25 @@ type Deps struct {
 	// is configured because the GET handler is what tells the UI that.
 	Inventory *inventory.Manager
 	Logger    *slog.Logger
+}
+
+type ProfileInfo struct {
+	Name       string `json:"name"`
+	Active     bool   `json:"active"`
+	Bucket     string `json:"bucket,omitempty"`
+	ConfigPath string `json:"config_path"`
+	IndexPath  string `json:"index_path"`
+}
+
+type ProfileRuntime struct {
+	Info              ProfileInfo
+	DB                *db.DB
+	Config            config.Config
+	ConfigPath        string
+	StoragePrefix     string
+	RestoreScanner    *scanner.Scanner
+	Inventory         *inventory.Manager
+	SyncRestoreStatus func(ctx context.Context) (int, error)
 }
 
 // Server exposes the Router for tests and for the CLI to Serve() from.
@@ -341,6 +366,10 @@ func (s *Server) Router() http.Handler {
 
 		r.Get("/settings", s.handleGetSettings)
 		r.Put("/settings", s.handlePutSettings)
+		r.Get("/profiles", s.handleListProfiles)
+		r.Post("/profiles", s.handleCreateProfile)
+		r.Put("/profiles/active", s.handleSwitchProfile)
+		r.Delete("/profiles/{name}", s.handleDeleteProfile)
 
 		r.Get("/smb/test", s.handleTestSource)
 		r.Get("/s3/test", s.handleTestStorage)

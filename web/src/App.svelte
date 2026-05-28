@@ -7,6 +7,7 @@
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
   import Toaster from './components/Toaster.svelte';
+  import ProfileSwitcher from './components/ProfileSwitcher.svelte';
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -30,6 +31,7 @@
         >{t.label}</button>
       {/each}
     </nav>
+    <ProfileSwitcher />
   </header>
 
   <main>
@@ -57,6 +59,7 @@
     display: flex;
     align-items: center;
     gap: 1.5rem;
+    flex-wrap: wrap;
     padding: 0.5rem 0 1rem;
     border-bottom: 1px solid var(--border);
     margin-bottom: 1.5rem;

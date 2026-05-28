@@ -11,9 +11,9 @@ aws-backup serve              run HTTP API + scheduler (SIGINT-safe shutdown); a
 aws-backup -version           print baked-in version
 ```
 
-`-config <path>` overrides the default config location (resolved via `config.DefaultPath()` — see `internal/config/path.go`). Version is baked in via `-ldflags "-X main.version=..."` in the Makefile.
+`-config <path>` overrides the central config location (resolved via `config.DefaultPath()` — see `internal/config/path.go`). `-profile <name>` overrides the active profile for the current `run` / `serve` process. Version is baked in via `-ldflags "-X main.version=..."` in the Makefile.
 
-`serve` startup includes a transient HTTP boot UI on the configured port that shows progress with a Cancel button while `index.db` is downloaded from S3 if needed; the transient server is shut down before the real API binds the port (#143).
+`serve` startup includes a transient HTTP boot UI on the configured port that shows progress with a Cancel button while the active profile's `index.db` is downloaded from S3 if needed; the transient server is shut down before the real API binds the port (#143).
 
 ## Web SPA Notes
 

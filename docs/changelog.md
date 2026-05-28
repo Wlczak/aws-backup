@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Added named backup profiles: central server config plus per-profile source/S3/SQS/backup config and per-profile `index.db`, with idle-only switching from the web header |
 | — | — | Dashboard restore counts now exclude the reserved `index.db` snapshot, so it no longer inflates the restored total |
 | — | — | Restore estimates now exclude the reserved `index.db` snapshot object so the local DB does not appear as one extra restorable file |
 | — | — | Restore downloads now seed their total byte budget before the worker starts, so `/api/status` can replay the full size immediately on refresh |

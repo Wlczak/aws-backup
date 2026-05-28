@@ -300,6 +300,80 @@ func TestSettingsPutInvokesApplySettings(t *testing.T) {
 	}
 }
 
+func TestProfilesListAndSwitch(t *testing.T) {
+	_, deps := newTestServer(t)
+	called := ""
+	deps.ActiveProfile = "default"
+	deps.ListProfiles = func() ([]ProfileInfo, error) {
+		return []ProfileInfo{
+			{Name: "default", Active: true, Bucket: "a"},
+			{Name: "photos", Bucket: "b"},
+		}, nil
+	}
+	deps.SwitchProfile = func(ctx context.Context, name string) (ProfileRuntime, error) {
+		called = name
+		return ProfileRuntime{
+			Info:          ProfileInfo{Name: name, Active: true, Bucket: "b"},
+			DB:            deps.DB,
+			Config:        *deps.Config,
+			ConfigPath:    deps.ConfigPath,
+			StoragePrefix: deps.Config.S3.KeyPrefix,
+		}, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	var listed profilesResponse
+	getJSON(t, ts, "/api/profiles", &listed)
+	if listed.ActiveProfile != "default" || len(listed.Profiles) != 2 {
+		t.Fatalf("profiles response = %+v", listed)
+	}
+
+	body := strings.NewReader(`{"name":"photos"}`)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/active", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if called != "photos" || srv.deps.ActiveProfile != "photos" {
+		t.Fatalf("switch called=%q active=%q", called, srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileSwitchBlockedDuringRun(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.SwitchProfile = func(ctx context.Context, name string) (ProfileRuntime, error) {
+		t.Fatal("SwitchProfile should not be called while run is active")
+		return ProfileRuntime{}, nil
+	}
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 42
+	srv.runMu.Unlock()
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/active", strings.NewReader(`{"name":"photos"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+}
+
 func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	ts, deps := newTestServer(t)
 	origBucket := deps.Config.S3.Bucket

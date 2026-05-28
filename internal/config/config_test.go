@@ -169,6 +169,27 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
+func TestProfilePathsAndValidation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "config.json")
+	for _, name := range []string{"default", "photos-2026", "a.b_c"} {
+		if err := ValidateProfileName(name); err != nil {
+			t.Fatalf("ValidateProfileName(%q): %v", name, err)
+		}
+		p, err := ProfilePath(root, name)
+		if err != nil {
+			t.Fatalf("ProfilePath(%q): %v", name, err)
+		}
+		if !strings.Contains(p, filepath.Join("profiles", name, "config.json")) {
+			t.Fatalf("profile path %q does not include expected layout", p)
+		}
+	}
+	for _, name := range []string{"", "../x", "x/y", ".hidden", "..", strings.Repeat("a", 65)} {
+		if err := ValidateProfileName(name); err == nil {
+			t.Fatalf("ValidateProfileName(%q) succeeded; want error", name)
+		}
+	}
+}
+
 func TestLoadMissing(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "nope.json"))
 	if err == nil {
