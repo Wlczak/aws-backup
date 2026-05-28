@@ -6,6 +6,7 @@
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
+  import Profiles from './routes/Profiles.svelte';
   import Toaster from './components/Toaster.svelte';
   import ProfileSwitcher from './components/ProfileSwitcher.svelte';
 
@@ -41,6 +42,7 @@
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />
+    {:else if $route === 'profiles'}<Profiles />
     {:else if $route === 'download'}<Download />
     {:else}<p class="muted">Unknown route: {$route}</p>
     {/if}

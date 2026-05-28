@@ -720,6 +720,13 @@ func (a *appState) deleteProfile(_ context.Context, name string) error {
 	if name == active {
 		return errors.New("cannot delete the active profile")
 	}
+	central, err := config.LoadCentral(a.cfgPath)
+	if err != nil {
+		return err
+	}
+	if name == central.ActiveProfile {
+		return errors.New("cannot delete the persisted active profile")
+	}
 	profiles, err := a.listProfiles()
 	if err != nil {
 		return err
@@ -732,6 +739,198 @@ func (a *appState) deleteProfile(_ context.Context, name string) error {
 		return err
 	}
 	return os.RemoveAll(dir)
+}
+
+func (a *appState) renameProfile(rootCtx context.Context) func(context.Context, string, string) (api.ProfileRuntime, bool, error) {
+	return func(ctx context.Context, oldName, newName string) (api.ProfileRuntime, bool, error) {
+		return a.renameProfileTo(ctx, rootCtx, oldName, newName)
+	}
+}
+
+func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newName string) (api.ProfileRuntime, bool, error) {
+	if err := config.ValidateProfileName(oldName); err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	if err := config.ValidateProfileName(newName); err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	if oldName == newName {
+		return api.ProfileRuntime{}, false, errors.New("new profile name must be different")
+	}
+	oldDir, err := config.ProfileDir(a.cfgPath, oldName)
+	if err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	newDir, err := config.ProfileDir(a.cfgPath, newName)
+	if err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		return api.ProfileRuntime{}, false, fmt.Errorf("profile %q already exists", newName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return api.ProfileRuntime{}, false, err
+	}
+	if _, err := os.Stat(oldDir); err != nil {
+		return api.ProfileRuntime{}, false, fmt.Errorf("profile %q not found: %w", oldName, err)
+	}
+
+	a.mu.RLock()
+	active := a.profile
+	a.mu.RUnlock()
+	if oldName != active {
+		if err := os.Rename(oldDir, newDir); err != nil {
+			return api.ProfileRuntime{}, false, err
+		}
+		central, err := config.LoadCentral(a.cfgPath)
+		if err != nil {
+			_ = os.Rename(newDir, oldDir)
+			return api.ProfileRuntime{}, false, err
+		}
+		if central.ActiveProfile == oldName {
+			central.ActiveProfile = newName
+			if err := config.SaveCentral(a.cfgPath, central); err != nil {
+				_ = os.Rename(newDir, oldDir)
+				return api.ProfileRuntime{}, false, err
+			}
+		}
+		profilePath, _ := config.ProfilePath(a.cfgPath, newName)
+		indexPath, _ := config.ProfileIndexPath(a.cfgPath, newName)
+		prof, err := config.LoadProfile(profilePath)
+		if err != nil {
+			return api.ProfileRuntime{}, false, err
+		}
+		return api.ProfileRuntime{
+			Info: api.ProfileInfo{
+				Name:       newName,
+				Active:     false,
+				Bucket:     prof.S3.Bucket,
+				ConfigPath: profilePath,
+				IndexPath:  indexPath,
+			},
+		}, false, nil
+	}
+
+	central, prof, _, err := loadCentralAndProfile(a.cfgPath, oldName)
+	if err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	cfg := prof.ToConfig(central.Server)
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return api.ProfileRuntime{}, false, err
+	}
+	renamed := true
+	rollback := func() {
+		if renamed {
+			_ = os.Rename(newDir, oldDir)
+		}
+	}
+
+	newStore, err := storage.NewS3Storage(ctx, storage.S3Config{
+		Endpoint:           cfg.S3.Endpoint,
+		UsePathStyle:       cfg.S3.UsePathStyle,
+		Region:             cfg.S3.Region,
+		Bucket:             cfg.S3.Bucket,
+		AccessKeyID:        cfg.S3.AccessKeyID,
+		SecretAccessKey:    cfg.S3.SecretAccessKey,
+		StorageClass:       cfg.S3.StorageClass,
+		MultipartThreshold: cfg.S3.MultipartThreshold,
+		ResumeThreshold:    cfg.S3.ResumeThreshold,
+		PartSize:           cfg.S3.PartSize,
+	})
+	if err != nil {
+		rollback()
+		return api.ProfileRuntime{}, false, fmt.Errorf("init storage: %w", err)
+	}
+	dbPath := filepath.Join(newDir, "index.db")
+	newDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		newStore.Close()
+		rollback()
+		return api.ProfileRuntime{}, false, fmt.Errorf("open db %s: %w", dbPath, err)
+	}
+	newSrc, err := source.FromConfig(cfg.Source)
+	if err != nil {
+		newDB.Close()
+		newStore.Close()
+		rollback()
+		return api.ProfileRuntime{}, false, fmt.Errorf("open source: %w", err)
+	}
+	central.ActiveProfile = newName
+	if err := config.SaveCentral(a.cfgPath, central); err != nil {
+		newSrc.Close()
+		newDB.Close()
+		newStore.Close()
+		rollback()
+		return api.ProfileRuntime{}, false, fmt.Errorf("save central config: %w", err)
+	}
+	renamed = false
+
+	profilePath, err := config.ProfilePath(a.cfgPath, newName)
+	if err != nil {
+		newSrc.Close()
+		newDB.Close()
+		newStore.Close()
+		return api.ProfileRuntime{}, false, err
+	}
+	a.mu.Lock()
+	oldDB, oldSrc, oldStore := a.db, a.src, a.store
+	oldCancel, oldDone := a.sqsCancel, a.sqsDone
+	a.profile = newName
+	a.profilePath = profilePath
+	a.cfg = cfg
+	a.db = newDB
+	a.src = newSrc
+	a.store = newStore
+	a.dbPath = dbPath
+	a.sqsConsumer = nil
+	a.sqsCancel = nil
+	a.sqsDone = nil
+	a.restoreScanner = scanner.New(newDB, a.liveStorage, a.bus, a.logger)
+	a.inventoryMgr = inventory.New(func() (inventory.API, string, bool) {
+		st := a.liveStorage()
+		s3st, ok := st.(*storage.S3Storage)
+		if !ok || s3st == nil {
+			return nil, "", false
+		}
+		return s3st.Client(), s3st.Bucket(), true
+	}, "")
+	a.mu.Unlock()
+
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldDone != nil {
+		select {
+		case <-oldDone:
+		case <-time.After(3 * time.Second):
+			if a.logger != nil {
+				a.logger.Warn("old sqs consumer did not stop before profile rename continued")
+			}
+		}
+	}
+	_ = oldSrc.Close()
+	_ = oldStore.Close()
+	_ = oldDB.Close()
+	a.startSQSConsumer(rootCtx)
+	if a.logger != nil {
+		a.logger.Info("profile renamed", "old", oldName, "new", newName)
+	}
+	return api.ProfileRuntime{
+		Info: api.ProfileInfo{
+			Name:       newName,
+			Active:     true,
+			Bucket:     cfg.S3.Bucket,
+			ConfigPath: profilePath,
+			IndexPath:  dbPath,
+		},
+		DB:                newDB,
+		Config:            cfg,
+		ConfigPath:        profilePath,
+		StoragePrefix:     cfg.S3.KeyPrefix,
+		RestoreScanner:    a.restoreScanner,
+		Inventory:         a.inventoryMgr,
+		SyncRestoreStatus: a.syncRestoreStatus(),
+	}, true, nil
 }
 
 func (a *appState) switchProfile(rootCtx context.Context) func(context.Context, string) (api.ProfileRuntime, error) {
@@ -992,6 +1191,7 @@ func runServe(cfgPath, profileOverride string) {
 		ListProfiles:      app.listProfiles,
 		CreateProfile:     app.createProfile,
 		SwitchProfile:     app.switchProfile(ctx),
+		RenameProfile:     app.renameProfile(ctx),
 		DeleteProfile:     app.deleteProfile,
 		BuildEngine:       app.buildEngine,
 		Storage:           app.liveStorage,

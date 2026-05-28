@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Profile management moved to a dedicated page with create, switch, rename, and delete actions; the header now links to that page instead of inline profile controls |
 | — | — | Added named backup profiles: central server config plus per-profile source/S3/SQS/backup config and per-profile `index.db`, with idle-only switching from the web header |
 | — | — | Dashboard restore counts now exclude the reserved `index.db` snapshot, so it no longer inflates the restored total |
 | — | — | Restore estimates now exclude the reserved `index.db` snapshot object so the local DB does not appear as one extra restorable file |

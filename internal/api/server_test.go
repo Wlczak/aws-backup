@@ -374,6 +374,97 @@ func TestProfileSwitchBlockedDuringRun(t *testing.T) {
 	}
 }
 
+func TestProfileRenameInactive(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		if oldName != "photos" || newName != "archive" {
+			t.Fatalf("rename args = %q -> %q", oldName, newName)
+		}
+		return ProfileRuntime{Info: ProfileInfo{Name: newName, Bucket: "b"}}, false, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/photos/rename", strings.NewReader(`{"name":"archive"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if srv.deps.ActiveProfile != "default" {
+		t.Fatalf("active profile changed to %q", srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileRenameActiveUpdatesRuntime(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		if oldName != "default" || newName != "primary" {
+			t.Fatalf("rename args = %q -> %q", oldName, newName)
+		}
+		return ProfileRuntime{
+			Info:          ProfileInfo{Name: newName, Active: true, Bucket: "b"},
+			DB:            deps.DB,
+			Config:        *deps.Config,
+			ConfigPath:    deps.ConfigPath,
+			StoragePrefix: deps.Config.S3.KeyPrefix,
+		}, true, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/default/rename", strings.NewReader(`{"name":"primary"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if srv.deps.ActiveProfile != "primary" {
+		t.Fatalf("active profile = %q", srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileRenameActiveBlockedDuringRun(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		t.Fatal("RenameProfile should not be called while run is active")
+		return ProfileRuntime{}, false, nil
+	}
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 42
+	srv.runMu.Unlock()
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/default/rename", strings.NewReader(`{"name":"primary"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+}
+
 func TestSettingsPutApplyErrorRollsBack(t *testing.T) {
 	ts, deps := newTestServer(t)
 	origBucket := deps.Config.S3.Bucket

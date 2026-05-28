@@ -26,6 +26,10 @@ type switchProfileRequest struct {
 	Name string `json:"name"`
 }
 
+type renameProfileRequest struct {
+	Name string `json:"name"`
+}
+
 func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
 	if s.deps.ListProfiles == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("profiles not configured"))
@@ -119,6 +123,51 @@ func (s *Server) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleRenameProfile(w http.ResponseWriter, r *http.Request) {
+	if s.deps.RenameProfile == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("profiles not configured"))
+		return
+	}
+	oldName := chi.URLParam(r, "name")
+	var req renameProfileRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	s.runMu.Lock()
+	s.downloadMu.Lock()
+	s.restoreDownloadMu.Lock()
+	defer s.restoreDownloadMu.Unlock()
+	defer s.downloadMu.Unlock()
+	defer s.runMu.Unlock()
+	if oldName == s.deps.ActiveProfile {
+		if blocked, reason := s.profileSwitchBlockedLocked(); blocked {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": reason})
+			return
+		}
+	}
+
+	rt, active, err := s.deps.RenameProfile(r.Context(), oldName, req.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if active {
+		s.deps.DB = rt.DB
+		s.deps.ConfigPath = rt.ConfigPath
+		s.deps.ActiveProfile = rt.Info.Name
+		s.deps.RestoreScanner = rt.RestoreScanner
+		s.deps.Inventory = rt.Inventory
+		s.deps.SyncRestoreStatus = rt.SyncRestoreStatus
+		s.updateConfig(rt.Config)
+		s.clearProfileCaches()
+	}
+	writeJSON(w, http.StatusOK, rt.Info)
 }
 
 func (s *Server) profileSwitchBlocked() (bool, string) {

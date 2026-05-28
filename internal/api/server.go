@@ -38,6 +38,7 @@ type Deps struct {
 	ListProfiles  func() ([]ProfileInfo, error)
 	CreateProfile func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
 	SwitchProfile func(ctx context.Context, name string) (ProfileRuntime, error)
+	RenameProfile func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
 	DeleteProfile func(ctx context.Context, name string) error
 	// BuildEngine constructs an Engine for a new backup run with the
 	// current config. mode and scanPaths are per-run parameters: mode
@@ -369,6 +370,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/profiles", s.handleListProfiles)
 		r.Post("/profiles", s.handleCreateProfile)
 		r.Put("/profiles/active", s.handleSwitchProfile)
+		r.Put("/profiles/{name}/rename", s.handleRenameProfile)
 		r.Delete("/profiles/{name}", s.handleDeleteProfile)
 
 		r.Get("/smb/test", s.handleTestSource)

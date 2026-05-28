@@ -446,6 +446,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ name }),
     }),
+  renameProfile: (oldName: string, newName: string) =>
+    request<ProfileInfo>(`/api/profiles/${encodeURIComponent(oldName)}/rename`, {
+      method: 'PUT',
+      body: JSON.stringify({ name: newName }),
+    }),
   deleteProfile: (name: string) =>
     request<{ status: string }>(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
