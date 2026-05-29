@@ -126,10 +126,10 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("want exactly 1 upload_plan event, got %d", len(plans))
 	}
-	if got := plans[0].Data["total_files"]; got != 6 {
+	if got := plans[0].Data["total_files"]; got != int64(6) {
 		t.Errorf("upload_plan.total_files = %v, want 6", got)
 	}
-	if got := plans[0].Data["total_groups"]; got != 3 {
+	if got := plans[0].Data["total_groups"]; got != int64(3) {
 		t.Errorf("upload_plan.total_groups = %v, want 3", got)
 	}
 
@@ -276,6 +276,14 @@ func TestEngineBatchedFullRunPausesAndResumesScanning(t *testing.T) {
 	}
 	if paused, ok := scans[len(scans)-1].Data["paused"].(bool); !ok || paused {
 		t.Fatalf("last scan_complete paused=%v want false", scans[len(scans)-1].Data["paused"])
+	}
+
+	plans := col.byType(EventUploadPlan)
+	if len(plans) < 2 {
+		t.Fatalf("upload plan events=%d want at least 2", len(plans))
+	}
+	if got := plans[len(plans)-1].Data["total_files"]; got != int64(3) {
+		t.Fatalf("last upload_plan.total_files = %v, want 3", got)
 	}
 }
 

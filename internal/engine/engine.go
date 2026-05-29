@@ -338,7 +338,8 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	if mode == RunModeUpload {
-		return e.runUploadPhase(ctx, runID, nil, -1, -1)
+		terminal, _, _, _, err := e.runUploadPhase(ctx, runID, nil, -1, -1, true)
+		return terminal, err
 	}
 
 	// upload-phase helper: reclassify ctx cancellation as RunCancelled
@@ -472,6 +473,8 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 	completedFolders := make(map[string]struct{})
 	var totalSeen int64
 	var uploadedTotal, bytesUploadedTotal int64
+	var totalPlannedFiles, totalPlannedBytes int64
+	var totalPlannedGroups int64
 
 	for {
 		e.emit(Event{Type: EventScanStart, RunID: runID, At: e.opts.Now()})
@@ -535,10 +538,24 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing, batch.Paused,
 		))
 
-		terminal, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal)
+		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, false)
 		if uploadErr != nil {
 			return terminal, uploadErr
 		}
+		totalPlannedFiles += batchPlannedFiles
+		totalPlannedGroups += batchPlannedGroups
+		totalPlannedBytes += batchPlannedBytes
+		if err := e.opts.DB.SetRunPlan(ctx, runID, totalPlannedFiles, totalPlannedBytes); err != nil {
+			e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+		}
+		e.emit(Event{
+			Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"total_files":  totalPlannedFiles,
+				"total_groups": totalPlannedGroups,
+				"total_bytes":  totalPlannedBytes,
+			},
+		})
 		run, err := e.opts.DB.GetRun(ctx, runID)
 		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
@@ -574,15 +591,15 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 // runUploadPhase performs the reconcile → list pending → group → pipeline
 // upload phase once. It is shared by upload-only runs and by the
 // scan/upload batching loop for full runs.
-func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders map[string]struct{}, uploadedStart, bytesStart int64) (string, error) {
-	classify := func(stage string, err error) (string, error) {
+func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders map[string]struct{}, uploadedStart, bytesStart int64, emitPlan bool) (string, int64, int64, int64, error) {
+	classify := func(stage string, err error) (string, int64, int64, int64, error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return db.RunCancelled, err
+			return db.RunCancelled, 0, 0, 0, err
 		}
 		if cerr := ctx.Err(); cerr != nil {
-			return db.RunCancelled, cerr
+			return db.RunCancelled, 0, 0, 0, cerr
 		}
-		return db.RunFailed, fmt.Errorf("%s: %w", stage, err)
+		return db.RunFailed, 0, 0, 0, fmt.Errorf("%s: %w", stage, err)
 	}
 
 	// Phase 2: list S3 once — reused for reconciliation and counter seeding.
@@ -626,7 +643,7 @@ func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders ma
 	}
 	if len(pending) == 0 {
 		e.log(ctx, runID, db.LogInfo, "no pending files to upload")
-		return db.RunCompleted, nil
+		return db.RunCompleted, 0, 0, 0, nil
 	}
 
 	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.MinZipDirFiles, e.opts.ZipMaxBytes)
@@ -639,16 +656,19 @@ func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders ma
 	for _, pf := range pending {
 		totalBytes += pf.Size
 	}
-	e.emit(Event{
-		Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
-		Data: map[string]any{
-			"total_files":  len(pending),
-			"total_groups": len(groups),
-			"total_bytes":  totalBytes,
-		},
-	})
-	if err := e.opts.DB.SetRunPlan(ctx, runID, int64(len(pending)), totalBytes); err != nil {
-		e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+	groupCount := int64(len(groups))
+	if emitPlan {
+		e.emit(Event{
+			Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"total_files":  len(pending),
+				"total_groups": groupCount,
+				"total_bytes":  totalBytes,
+			},
+		})
+		if err := e.opts.DB.SetRunPlan(ctx, runID, int64(len(pending)), totalBytes); err != nil {
+			e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+		}
 	}
 
 	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
@@ -700,7 +720,8 @@ func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders ma
 		uploadedStart = run.FilesUploaded
 		bytesStart = run.BytesUploaded
 	}
-	return e.runPipeline(ctx, runID, groups, dirMaxN, uploadedStart, bytesStart)
+	terminal, err := e.runPipeline(ctx, runID, groups, dirMaxN, uploadedStart, bytesStart)
+	return terminal, int64(len(pending)), groupCount, totalBytes, err
 }
 
 // runPipeline drives the upload phase with a copy-worker pool feeding a
