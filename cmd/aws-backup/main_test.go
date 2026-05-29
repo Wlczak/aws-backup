@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestRefreshDBFromS3_NoRemote(t *testing.T) {
@@ -263,6 +265,31 @@ func TestEnsureProfileLayoutMigratesLegacyConfigAndIndex(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "index.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy index still exists or stat failed: %v", err)
+	}
+}
+
+func TestSetCentralPasswordHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	central := config.DefaultCentral()
+	if err := config.SaveCentral(path, central); err != nil {
+		t.Fatalf("save central: %v", err)
+	}
+	if err := setCentralPasswordHash(path, "s3cr3t"); err != nil {
+		t.Fatalf("setCentralPasswordHash: %v", err)
+	}
+
+	got, err := config.LoadCentral(path)
+	if err != nil {
+		t.Fatalf("load central: %v", err)
+	}
+	if got.Auth.PasswordHash == "" {
+		t.Fatal("expected password hash to be stored")
+	}
+	if got.Auth.PasswordHash == "s3cr3t" || strings.Contains(got.Auth.PasswordHash, "s3cr3t") {
+		t.Fatalf("password leaked into stored hash: %q", got.Auth.PasswordHash)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(got.Auth.PasswordHash), []byte("s3cr3t")); err != nil {
+		t.Fatalf("stored hash does not verify: %v", err)
 	}
 }
 

@@ -319,11 +319,18 @@ export class ApiError extends Error {
   }
 }
 
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {
       ...init,
+      credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
         ...(init?.headers ?? {}),
@@ -338,6 +345,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!resp.ok) {
+    if (resp.status === 401) {
+      unauthorizedHandler?.();
+    }
     let msg = resp.statusText;
     let body: string | undefined;
     try {
@@ -359,6 +369,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authStatus: () => request<AuthStatus>('/api/auth/status'),
+  login: (password: string) =>
+    request<AuthStatus>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  logout: () => request<AuthStatus>('/api/auth/logout', { method: 'POST' }),
   status: () => request<Status>('/api/status'),
   runs: (page = 1, limit = 20, signal?: AbortSignal) =>
     request<RunsPage>(`/api/runs?page=${page}&limit=${limit}`, { signal }),
@@ -564,6 +581,11 @@ export interface InventoryStatus {
   frequency?: 'Daily' | 'Weekly';
   destination?: string;
   format?: string;
+}
+
+export interface AuthStatus {
+  password_set: boolean;
+  authenticated: boolean;
 }
 
 // subscribeEvents opens a live EventSource against /api/events. Returns

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { route, go } from './lib/router';
+  import { api, setUnauthorizedHandler, type AuthStatus } from './lib/api';
+  import { toast } from './lib/toast';
   import Dashboard from './routes/Dashboard.svelte';
   import Download from './routes/Download.svelte';
   import Files from './routes/Files.svelte';
@@ -9,6 +11,7 @@
   import Profiles from './routes/Profiles.svelte';
   import Toaster from './components/Toaster.svelte';
   import ProfileSwitcher from './components/ProfileSwitcher.svelte';
+  import { onMount } from 'svelte';
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -18,36 +21,144 @@
     { id: 'settings', label: 'Settings' },
     { id: 'restore', label: 'Restore' },
   ];
+
+  type AuthPhase = 'checking' | 'locked' | 'logged-out' | 'authenticated';
+
+  let authPhase = $state<AuthPhase>('checking');
+  let authPassword = $state('');
+  let authBusy = $state(false);
+  let authMessage = $state('');
+
+  function applyAuth(status: AuthStatus) {
+    if (!status.password_set) {
+      authPhase = 'locked';
+      authMessage = 'No password is configured yet.';
+      authPassword = '';
+      return;
+    }
+    authPhase = status.authenticated ? 'authenticated' : 'logged-out';
+    authMessage = status.authenticated ? '' : 'Enter the password to unlock the app.';
+    if (status.authenticated) {
+      authPassword = '';
+    }
+  }
+
+  async function refreshAuth() {
+    try {
+      applyAuth(await api.authStatus());
+    } catch (e) {
+      authPhase = 'logged-out';
+      authMessage = String(e);
+    }
+  }
+
+  async function login() {
+    if (authBusy || authPassword.trim() === '') return;
+    authBusy = true;
+    try {
+      applyAuth(await api.login(authPassword));
+      toast.success('Signed in.');
+    } catch (e) {
+      toast.error(String(e));
+      authMessage = 'Enter the password to unlock the app.';
+    } finally {
+      authBusy = false;
+      authPassword = '';
+    }
+  }
+
+  async function logout() {
+    if (authBusy) return;
+    authBusy = true;
+    try {
+      applyAuth(await api.logout());
+      toast.info('Signed out.');
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      authBusy = false;
+      authPassword = '';
+    }
+  }
+
+  onMount(() => {
+    setUnauthorizedHandler(() => {
+      if (authPhase === 'authenticated') {
+        authPhase = 'logged-out';
+        authMessage = 'Session expired. Please sign in again.';
+      }
+    });
+    void refreshAuth();
+    return () => setUnauthorizedHandler(null);
+  });
 </script>
 
-<div class="shell">
-  <header>
-    <div class="brand">aws-backup</div>
-    <nav>
-      {#each tabs as t}
-        <button
-          class:active={$route === t.id || $route.startsWith(t.id + '/')}
-          onclick={() => go(t.id)}
-          type="button"
-        >{t.label}</button>
-      {/each}
-    </nav>
-    <ProfileSwitcher />
-  </header>
+{#if authPhase === 'authenticated'}
+  <div class="shell">
+    <header>
+      <div class="brand">aws-backup</div>
+      <nav>
+        {#each tabs as t}
+          <button
+            class:active={$route === t.id || $route.startsWith(t.id + '/')}
+            onclick={() => go(t.id)}
+            type="button"
+          >{t.label}</button>
+        {/each}
+      </nav>
+      <ProfileSwitcher />
+      <button class="logout" onclick={logout} disabled={authBusy} type="button">
+        {authBusy ? 'Signing out…' : 'Sign out'}
+      </button>
+    </header>
 
-  <main>
-    {#if $route === 'dashboard'}<Dashboard />
-    {:else if $route === 'files' || $route === 'index'}<Files />
-    {:else if $route === 'download'}<Download />
-    {:else if $route === 'logs'}<Logs />
-    {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
-    {:else if $route === 'restore'}<Restore />
-    {:else if $route === 'profiles'}<Profiles />
-    {:else if $route === 'download'}<Download />
-    {:else}<p class="muted">Unknown route: {$route}</p>
-    {/if}
-  </main>
-</div>
+    <main>
+      {#if $route === 'dashboard'}<Dashboard />
+      {:else if $route === 'files' || $route === 'index'}<Files />
+      {:else if $route === 'download'}<Download />
+      {:else if $route === 'logs'}<Logs />
+      {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
+      {:else if $route === 'restore'}<Restore />
+      {:else if $route === 'profiles'}<Profiles />
+      {:else if $route === 'download'}<Download />
+      {:else}<p class="muted">Unknown route: {$route}</p>
+      {/if}
+    </main>
+  </div>
+{:else}
+  <div class="auth-shell">
+    <div class="auth-card">
+      <div class="brand">aws-backup</div>
+      {#if authPhase === 'checking'}
+        <p class="muted">Checking authentication…</p>
+      {:else if authPhase === 'locked'}
+        <h1>Set a password first</h1>
+        <p class="muted">
+          This server is locked until an operator creates a password with
+          <code>./aws-backup passwd</code>.
+        </p>
+        <p class="muted">{authMessage}</p>
+      {:else}
+        <h1>Sign in</h1>
+        <p class="muted">{authMessage}</p>
+        <label>
+          Password
+          <input
+            bind:value={authPassword}
+            autocomplete="current-password"
+            onkeydown={(e) => { if (e.key === 'Enter') void login(); }}
+            type="password"
+          />
+        </label>
+        <div class="actions">
+          <button class="primary" onclick={login} disabled={authBusy || authPassword.trim() === ''} type="button">
+            {authBusy ? 'Signing in…' : 'Sign in'}
+          </button>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 <Toaster />
 
@@ -86,5 +197,47 @@
   main {
     display: grid;
     gap: 1.25rem;
+  }
+  .logout {
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+  }
+  .auth-shell {
+    min-height: calc(100vh - 6rem);
+    display: grid;
+    place-items: center;
+    padding: 2rem 1rem;
+  }
+  .auth-card {
+    width: min(560px, 100%);
+    display: grid;
+    gap: 1rem;
+    padding: 2rem;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--bg);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.12);
+  }
+  .auth-card h1 {
+    margin: 0;
+    font-size: 1.6rem;
+  }
+  .auth-card label {
+    display: grid;
+    gap: 0.35rem;
+    color: var(--muted);
+  }
+  .auth-card input {
+    font: inherit;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .auth-card .actions {
+    display: flex;
+    gap: 0.5rem;
   }
 </style>

@@ -13,16 +13,18 @@ aws-backup/
   profiles/<profile>/index.db
 ```
 
-Central `config.json` owns shared process settings:
+Central `config.json` owns shared process settings plus the optional login hash used by the HTTP auth cookie:
 
 ```jsonc
 {
   "active_profile": "default",
-  "server": { "host": "127.0.0.1", "port": 8080 }
+  "server": { "host": "127.0.0.1", "port": 8080 },
+  "auth": { "password_hash": "" }
 }
 ```
 
 Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to at most one bucket and one local SQLite index. Existing single-profile installs are migrated on startup by moving the old runtime config/index into `profiles/default/` and writing the central config at the old `config.json` path. Creating a new profile with `clone_active` copies operational defaults from the active profile but clears `s3.bucket` and `sqs.queue_url`, so the new profile cannot accidentally reuse the active bucket or restore queue. An empty `s3.bucket` means S3 is not configured yet; the profile can still be active, but backup upload, cloud sync, restore, download, inventory, and S3 test actions reject until a bucket is set.
+The auth hash stays in the central config, not the per-profile config, so switching profiles does not change the login state. When the hash is empty the HTTP API stays locked until the operator runs `./aws-backup passwd`.
 
 ## Effective Settings Schema (`GET /api/settings`)
 
@@ -83,6 +85,8 @@ Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to 
 Successive PUTs during one run compose against the pending config (not the live one) so a redacted-secret echo doesn't blank a credential the operator just queued.
 
 `backup.download_dir` is the persistent local mirror target used by the full-download mirror job. It must be an absolute path. The first mirror sync against a new directory performs a bootstrap scan, then caches the result in the database so later reruns can skip the filesystem walk; use `POST /api/download/rescan` or the dashboard button to refresh that cached snapshot when the folder changes on disk.
+
+`./aws-backup passwd` prompts twice in the terminal and writes a bcrypt hash into `auth.password_hash`. The password itself is never stored in plaintext.
 
 ## Default config path
 

@@ -29,17 +29,18 @@ import (
 
 // Deps holds everything the HTTP handlers need.
 type Deps struct {
-	DB            *db.DB
-	Bus           *events.Bus
-	Config        *config.Config
-	ConfigPath    string
-	SaveSettings  func(config.Config) error
-	ActiveProfile string
-	ListProfiles  func() ([]ProfileInfo, error)
-	CreateProfile func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
-	SwitchProfile func(ctx context.Context, name string) (ProfileRuntime, error)
-	RenameProfile func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
-	DeleteProfile func(ctx context.Context, name string) error
+	DB                *db.DB
+	Bus               *events.Bus
+	Config            *config.Config
+	ConfigPath        string
+	CentralConfigPath string
+	SaveSettings      func(config.Config) error
+	ActiveProfile     string
+	ListProfiles      func() ([]ProfileInfo, error)
+	CreateProfile     func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
+	SwitchProfile     func(ctx context.Context, name string) (ProfileRuntime, error)
+	RenameProfile     func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
+	DeleteProfile     func(ctx context.Context, name string) error
 	// BuildEngine constructs an Engine for a new backup run with the
 	// current config. mode and scanPaths are per-run parameters: mode
 	// selects scan-only, upload-only, or full (default); scanPaths
@@ -346,56 +347,63 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(originGuard)
-		r.Get("/status", s.handleStatus)
+		r.Get("/auth/status", s.handleAuthStatus)
+		r.Post("/auth/login", s.handleAuthLogin)
+		r.Post("/auth/logout", s.handleAuthLogout)
 
-		r.Get("/runs", s.handleListRuns)
-		r.Post("/runs", s.handleTriggerRun)
-		r.Get("/runs/{id}", s.handleGetRun)
-		r.Post("/runs/{id}/cancel", s.handleCancelRun)
-		r.Post("/runs/{id}/stop", s.handleStopRun)
-		r.Post("/runs/{id}/continue", s.handleContinueRun)
-		r.Delete("/run-logs", s.handleDeleteRunLogs)
+		r.Group(func(r chi.Router) {
+			r.Use(s.authRequired)
+			r.Get("/status", s.handleStatus)
 
-		r.Get("/files", s.handleListFiles)
-		r.Get("/files/tree", s.handleListTree)
-		r.Get("/files/subtree-ids", s.handleSubtreeIDs)
-		r.Get("/files/stats", s.handleFileStats)
-		r.Post("/files/retry", s.handleRetryFiles)
-		r.Delete("/files", s.handleDeleteFiles)
-		r.Post("/files/{id}/retry", s.handleRetryFile)
-		r.Delete("/files/{id}", s.handleDeleteFile)
+			r.Get("/runs", s.handleListRuns)
+			r.Post("/runs", s.handleTriggerRun)
+			r.Get("/runs/{id}", s.handleGetRun)
+			r.Post("/runs/{id}/cancel", s.handleCancelRun)
+			r.Post("/runs/{id}/stop", s.handleStopRun)
+			r.Post("/runs/{id}/continue", s.handleContinueRun)
+			r.Delete("/run-logs", s.handleDeleteRunLogs)
 
-		r.Get("/settings", s.handleGetSettings)
-		r.Put("/settings", s.handlePutSettings)
-		r.Get("/profiles", s.handleListProfiles)
-		r.Post("/profiles", s.handleCreateProfile)
-		r.Put("/profiles/active", s.handleSwitchProfile)
-		r.Put("/profiles/{name}/rename", s.handleRenameProfile)
-		r.Delete("/profiles/{name}", s.handleDeleteProfile)
+			r.Get("/files", s.handleListFiles)
+			r.Get("/files/tree", s.handleListTree)
+			r.Get("/files/subtree-ids", s.handleSubtreeIDs)
+			r.Get("/files/stats", s.handleFileStats)
+			r.Post("/files/retry", s.handleRetryFiles)
+			r.Delete("/files", s.handleDeleteFiles)
+			r.Post("/files/{id}/retry", s.handleRetryFile)
+			r.Delete("/files/{id}", s.handleDeleteFile)
 
-		r.Get("/smb/test", s.handleTestSource)
-		r.Get("/s3/test", s.handleTestStorage)
+			r.Get("/settings", s.handleGetSettings)
+			r.Put("/settings", s.handlePutSettings)
+			r.Get("/profiles", s.handleListProfiles)
+			r.Post("/profiles", s.handleCreateProfile)
+			r.Put("/profiles/active", s.handleSwitchProfile)
+			r.Put("/profiles/{name}/rename", s.handleRenameProfile)
+			r.Delete("/profiles/{name}", s.handleDeleteProfile)
 
-		r.Post("/restore/estimate", s.handleRestoreEstimate)
-		r.Post("/restore/trigger", s.handleRestoreTrigger)
-		r.Post("/restore/download/estimate", s.handleRestoreDownloadEstimate)
-		r.Post("/restore/download", s.handleRestoreDownload)
-		r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
-		r.Post("/restore/scan/full", s.handleRestoreScanFull)
-		r.Post("/restore/scan/pending", s.handleRestoreScanPending)
-		r.Post("/download/full", s.handleDownloadFull)
-		r.Post("/download/rescan", s.handleDownloadRescan)
-		r.Post("/download/cancel", s.handleDownloadCancel)
-		r.Get("/restore/inventory", s.handleInventoryGet)
-		r.Put("/restore/inventory", s.handleInventoryPut)
-		r.Delete("/restore/inventory", s.handleInventoryDelete)
-		r.Post("/restore/inventory/sync", s.handleInventorySync)
+			r.Get("/smb/test", s.handleTestSource)
+			r.Get("/s3/test", s.handleTestStorage)
 
-		r.Post("/sync", s.handleSync)
-		r.Post("/sync/full", s.handleSyncFull)
-		r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
+			r.Post("/restore/estimate", s.handleRestoreEstimate)
+			r.Post("/restore/trigger", s.handleRestoreTrigger)
+			r.Post("/restore/download/estimate", s.handleRestoreDownloadEstimate)
+			r.Post("/restore/download", s.handleRestoreDownload)
+			r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
+			r.Post("/restore/scan/full", s.handleRestoreScanFull)
+			r.Post("/restore/scan/pending", s.handleRestoreScanPending)
+			r.Post("/download/full", s.handleDownloadFull)
+			r.Post("/download/rescan", s.handleDownloadRescan)
+			r.Post("/download/cancel", s.handleDownloadCancel)
+			r.Get("/restore/inventory", s.handleInventoryGet)
+			r.Put("/restore/inventory", s.handleInventoryPut)
+			r.Delete("/restore/inventory", s.handleInventoryDelete)
+			r.Post("/restore/inventory/sync", s.handleInventorySync)
 
-		r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger, s.sseReplay))
+			r.Post("/sync", s.handleSync)
+			r.Post("/sync/full", s.handleSyncFull)
+			r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
+
+			r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger, s.sseReplay))
+		})
 	})
 
 	// Serve the embedded Svelte SPA at "/". Any path that doesn't resolve
