@@ -66,6 +66,13 @@ GET    /api/events                    SSE stream
 GET    /*                             embedded Svelte SPA (hash router fallback to index.html)
 ```
 
+The dashboard does not treat `/api/events` as the source of truth for run
+state. `GET /api/status` is authoritative for the current/last run, scan
+flags, and persisted counters; SSE is a best-effort live-detail channel for
+things like restore/download jobs and the active run log. Avoid adding new
+dashboard dependencies on high-frequency `scan_progress` / `upload_progress`
+frames unless they provide a visible improvement that `/api/status` cannot.
+
 Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.

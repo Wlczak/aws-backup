@@ -57,6 +57,9 @@ Runs execute against the currently active profile. The active profile determines
                                     progressReader, ChecksumSHA256, multipart
                                     over MultipartThreshold; emit upload_*.
     Between groups/files the engine polls IsStopRequested for graceful stop.
+    The dashboard should treat the persisted `/api/status` snapshot as the
+    source of truth for headline progress and use SSE only for optional live
+    detail, not as a required control plane for scan-only runs.
 
 8.  Finalize
     Drain writeBuffer (batched MarkUploaded). FinishRun with terminal status
