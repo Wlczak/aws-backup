@@ -1,0 +1,77 @@
+name: Build and release Go binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Cache node_modules
+        id: cache-nm
+        uses: actions/cache@v5
+        with:
+          path: web/node_modules
+          key: node-modules-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install frontend dependencies
+        if: steps.cache-nm.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit
+        working-directory: web
+
+      - name: Build web bundle
+        run: npm run build
+        working-directory: web
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.10"
+          cache: true
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+
+      - name: Build release binaries
+        run: |
+          make build-linux
+          make build-windows
+          make build-macos-amd64
+          make build-macos-arm64
+          mkdir -p out
+          mv aws-backup-linux-amd64 out/
+          mv aws-backup-windows-amd64.exe out/
+          mv aws-backup-darwin-amd64 out/
+          mv aws-backup-darwin-arm64 out/
+          sha256sum out/* > out/SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

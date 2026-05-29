@@ -49,6 +49,10 @@ dev-logs      docker-compose logs -f
 
 Builds use `-trimpath` for reproducibility and to keep developer paths out of panics/DWARF (#80).
 
+## Release Workflow
+
+Tag pushes that start with `v` trigger `.github/workflows/release.yml`, which builds the embedded web bundle, cross-compiles the release binaries, and publishes them as GitHub release assets alongside `SHA256SUMS`.
+
 ## Local dev stack
 
 `deploy/docker-compose.yml` brings up MinIO on `:9000` (S3 endpoint) + `:9001` (console) and a one-shot init container that creates the bucket. Combined with `web-dev` (Vite on `:5173` proxying to the Go server on `:8080`) this gives full hot-reload on both sides.

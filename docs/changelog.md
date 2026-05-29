@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Added a tag-triggered GitHub release workflow that builds the embedded web bundle once, cross-compiles `aws-backup` for Linux/Windows/macOS, and uploads the binaries plus `SHA256SUMS` to the release |
 | — | — | CI smoke test now edits the generated active profile config under `/tmp/profiles/default/config.json`, matching `serve`'s central/profile layout so the binary can start with the localdir root injected |
 | — | — | Profiles with empty `s3.bucket` can now be activated for setup/scan-only use; S3-dependent actions reject until storage is configured |
 | — | — | Cloned profile creation now clears `s3.bucket` and `sqs.queue_url` so new profiles do not accidentally attach to the active profile's bucket or restore queue |
