@@ -1,10 +1,10 @@
-# aws-backup
+# AWS-backup
 
 Self-contained Go binary with an embedded Svelte SPA that backs up files from a
 local directory or SMB share to AWS S3 (Glacier Deep Archive), with a local
 SQLite index, directory-level zipping, and a web UI for monitoring and control.
 
-See [plan.md](plan.md) for the full design.
+This project just a specific solution for my specific problem and while it is fairly functional now I do not claim it is reliable or safe for your data in any way. It has also been mostly vibe coded as I've determined this to be a good project to test LLM vibe coding on.
 
 ## Prerequisites
 
@@ -14,26 +14,20 @@ See [plan.md](plan.md) for the full design.
 
 ## Quick start
 
-```sh
-# 1. Bring up MinIO (dev S3 backend on :9000, console on :9001)
-make dev-up
+- **0.** (dev only). Bring up MinIO (dev S3 backend on :9000, console on :9001)
+`make dev-up`
 
-# 2. Build the single binary (npm build + go build)
-make build
+- **1a.** Download prebuilt
 
-# 3. Start serve once to bootstrap config.json if it does not exist yet
-./aws-backup serve
-./aws-backup config path         # prints where it ended up
+- **1b.** Build the single binary (npm build + go build)
+`make build`
 
-# 4. Edit the config — at minimum, set source.localdir.root to a
-#    directory you want to back up. The default config is already
-#    pointed at the local MinIO (endpoint: http://localhost:9000,
-#    bucket: aws-backup-dev, creds: minioadmin / minioadmin).
+- **2.** Start serve once to bootstrap config.json if it does not exist yet
+`./aws-backup serve`
+`./aws-backup config path`         # prints where it ended up
 
-# 5. Run the server (HTTP + scheduler) and open the UI
-./aws-backup serve
-# -> http://127.0.0.1:8080
-```
+- **3.** Run the server (HTTP + scheduler) and open the UI
+`./aws-backup serve` -> http://127.0.0.1:8080
 
 `aws-backup serve` uses `SIGINT`/`SIGTERM` for graceful shutdown.
 
@@ -135,35 +129,6 @@ AWS_BACKUP_TEST_SMB_USER=user AWS_BACKUP_TEST_SMB_PASS=pass \
 go test ./internal/source -run SMB -v
 ```
 
-## Recommended bucket lifecycle rule
-
-The resumable multipart path persists `UploadId` across runs but does
-not actively abort orphans (a tmp that's deleted before the next run
-or a config change to a new bucket leaves the upload stranded).
-Configure a lifecycle rule on the backup bucket so abandoned multipart
-uploads stop accruing storage cost:
-
-```json
-{
-  "Rules": [
-    {
-      "ID": "aws-backup-abort-incomplete-mpu",
-      "Status": "Enabled",
-      "Filter": {},
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
-    }
-  ]
-}
-```
-
-Apply via the AWS console or:
-
-```sh
-aws s3api put-bucket-lifecycle-configuration \
-  --bucket your-backup-bucket \
-  --lifecycle-configuration file://lifecycle.json
-```
-
 ## Layout
 
 ```text
@@ -180,9 +145,3 @@ internal/
 web/                  Svelte 5 + Vite SPA (embedded via go:embed)
 deploy/               docker-compose.yml for local MinIO
 ```
-
-## Status
-
-The whole pipeline is wired against **MinIO** by default — no real AWS calls
-happen until you change `s3.endpoint` in `config.json`. The Glacier restore
-trigger (`POST /api/restore/trigger`) returns `503` until that gate is lifted.
