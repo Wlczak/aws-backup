@@ -44,14 +44,14 @@ func TestProgressReader_Throttles(t *testing.T) {
 
 	now := time.Unix(0, 0)
 	var samples []int64
-	pr := newProgressReader(src, total, 250*time.Millisecond, func(read, _ int64) {
+	pr := newProgressReader(src, total, 500*time.Millisecond, func(read, _ int64) {
 		samples = append(samples, read)
 	})
 	pr.now = func() time.Time { return now }
 
-	// Each Read advances simulated time by 100ms — under the 250ms interval.
+	// Each Read advances simulated time by 100ms — under the 500ms interval.
 	// We expect: one emit on the first Read (lastEmit zero), then no emits
-	// until 250ms have elapsed, then one more, etc., plus a final EOF emit.
+	// until 500ms have elapsed, then one more, etc., plus a final EOF emit.
 	buf := make([]byte, 1024)
 	for {
 		_, err := pr.Read(buf)
@@ -67,10 +67,10 @@ func TestProgressReader_Throttles(t *testing.T) {
 	if len(samples) < 2 {
 		t.Fatalf("expected throttling to leave multiple samples, got %d", len(samples))
 	}
-	// 64 reads at 100ms each ≈ 6.4s; with 250ms throttle that's roughly
-	// 26 emits + 1 final. Just check it's not "every read" (64+) and not
+	// 64 reads at 100ms each ≈ 6.4s; with 500ms throttle that's roughly
+	// 13 emits + 1 final. Just check it's not "every read" (64+) and not
 	// "only one".
-	if len(samples) > 40 {
+	if len(samples) > 20 {
 		t.Errorf("too many samples %d — throttling not effective", len(samples))
 	}
 	if got := samples[len(samples)-1]; got != int64(total) {
