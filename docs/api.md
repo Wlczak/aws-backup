@@ -5,6 +5,11 @@ Routes mounted in `internal/api/server.go`. JSON over HTTP; the SPA at `/` is se
 ## Endpoints
 
 ```text
+# Auth
+GET    /api/auth/status             password_set + authenticated flag for the login/bootstrap screen
+POST   /api/auth/login              {password: "..."} → sets the auth cookie on success
+POST   /api/auth/logout             clears the auth cookie
+
 # Run lifecycle
 GET    /api/status                    current + last run, download mirror snapshot, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
@@ -59,6 +64,8 @@ POST   /api/sync/delete-cloud-paths   {paths: []} → delete corresponding S3 ob
 GET    /api/events                    SSE stream
 GET    /*                             embedded Svelte SPA (hash router fallback to index.html)
 ```
+
+Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 

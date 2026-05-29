@@ -44,6 +44,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  config init     write a default config.json (won't overwrite existing)\n")
 		fmt.Fprintf(os.Stderr, "  config path     print the resolved config file path\n")
 		fmt.Fprintf(os.Stderr, "  config validate check the config is well-formed\n")
+		fmt.Fprintf(os.Stderr, "  passwd          set the login password in the central config\n")
 		fmt.Fprintf(os.Stderr, "  run             execute one backup run against the configured source + storage\n")
 		fmt.Fprintf(os.Stderr, "  serve           run the HTTP API + scheduler (SIGINT to stop)\n\n")
 		fmt.Fprintf(os.Stderr, "flags:\n")
@@ -74,6 +75,8 @@ func main() {
 	switch args[0] {
 	case "config":
 		runConfig(path, args[1:])
+	case "passwd":
+		runPasswd(path)
 	case "run":
 		runBackup(path, *profileOverride)
 	case "serve":
@@ -1211,6 +1214,7 @@ func runServe(cfgPath, profileOverride string) {
 		Bus:               app.bus,
 		Config:            &app.cfg,
 		ConfigPath:        app.profilePath,
+		CentralConfigPath: app.cfgPath,
 		SaveSettings:      app.saveSettings,
 		ActiveProfile:     app.profile,
 		ListProfiles:      app.listProfiles,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // blockedURLHosts are link-local / metadata-service hostnames an attacker
@@ -67,6 +68,13 @@ const (
 type CentralConfig struct {
 	ActiveProfile string       `json:"active_profile"`
 	Server        ServerConfig `json:"server"`
+	Auth          AuthConfig   `json:"auth,omitempty"`
+}
+
+// AuthConfig holds the login secret for the web UI / HTTP API. The
+// password itself is never stored, only a bcrypt hash.
+type AuthConfig struct {
+	PasswordHash string `json:"password_hash,omitempty"`
 }
 
 // Config is the full runtime config tree persisted to config.json.
@@ -431,6 +439,11 @@ func (c CentralConfig) ValidateCentral() error {
 		errs = append(errs, errors.New("server.host is required"))
 	} else if ip := net.ParseIP(c.Server.Host); c.Server.Host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		errs = append(errs, fmt.Errorf("server.host %q must be a loopback address (127.0.0.1 or ::1); binding to external interfaces is not supported", c.Server.Host))
+	}
+	if c.Auth.PasswordHash != "" {
+		if _, err := bcrypt.Cost([]byte(c.Auth.PasswordHash)); err != nil {
+			errs = append(errs, fmt.Errorf("auth.password_hash is invalid: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }

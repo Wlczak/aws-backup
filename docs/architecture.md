@@ -21,10 +21,12 @@ Module: `github.com/Wlczak/aws-backup`
 ```text
 aws-backup/
 ├── cmd/aws-backup/
-│   └── main.go                  # Entry point: subcommands (config, run, serve), appState, applySettings
+│   ├── main.go                  # Entry point: subcommands (config, passwd, run, serve), appState, applySettings
+│   └── passwd.go                # Interactive central-config password bootstrap
 ├── internal/
 │   ├── api/
 │   │   ├── server.go            # chi router, Deps struct, run-state guards, cfgMu
+│   │   ├── auth.go              # Cookie auth helpers + /api/auth handlers
 │   │   ├── spa.go               # Embedded SPA fallback handler
 │   │   ├── sse.go               # EventEmitter → HTTP SSE with reconnect replay
 │   │   ├── handlers_files.go    # GET/DELETE /api/files, retry, stats (cached)
@@ -106,7 +108,7 @@ aws-backup/
 | Package | Role |
 | --- | --- |
 | `cmd/aws-backup` | CLI entry: subcommands `config` (`init`/`path`/`validate`), `run`, `serve`. Owns `appState` (cfg/db/src/store/sched/bus/sqsConsumer), wires `applySettings` for hot-swap, runs scheduler + HTTP server |
-| `internal/api` | HTTP layer: chi router, JSON handlers, SSE bridge, in-flight run tracking, cfg mutex shared with cmd via `Deps.ConfigMu` |
+| `internal/api` | HTTP layer: chi router, cookie auth middleware, JSON handlers, SSE bridge, in-flight run tracking, cfg mutex shared with cmd via `Deps.ConfigMu` |
 | `internal/config` | Config tree (`Source`/`S3`/`SQS`/`Backup`/`Server`), JSON load/save with atomic + fsync, `Validate`, `Redacted`, `Default` |
 | `internal/db` | GORM (+ glebarez/sqlite, CGO-free) models and queries. Goose migrations own the schema |
 | `internal/engine` | Backup orchestrator + zip grouping + cloud index reader + restore extractor + tmp-space guard |
@@ -131,6 +133,7 @@ aws-backup/
 | Download mirror metadata is separate from bucket state | `download_present` / `download_checked_at` track the configured local mirror without changing `uploaded` / `cloud_only` / `missing` semantics |
 | Settings deferred-apply during runs | PUT during a run persists + queues; applies post-run instead of 409 |
 | Single active profile | Profiles configure multiple bucket/source/index sets, but only one is active in a running process; switching is idle-only so DB/storage/source handles never cross profiles |
+| Central-config password hash + signed cookie auth | `passwd` stores a bcrypt hash in the central config; the API checks a signed `HttpOnly` cookie before serving protected routes |
 | Pre-flight `skipIfMatches` (HEAD + SHA256) | Avoids redundant new versions on versioned buckets without DB schema changes (#133) |
 | `Storage.PutIfAbsent` via S3 `IfNoneMatch=*` | Atomic dedup at the bucket; engine retries with next counter on collision (#116) |
 | Tmp resume via stable `ind-{fileID}` name | Cached copy is reused on upload retry when size+mtime match (#127) |
