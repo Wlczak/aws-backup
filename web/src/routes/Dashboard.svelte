@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
+  import { api, subscribeEvents, type SseEvent, type Status, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -133,6 +133,8 @@
   let es: { close: () => void } | null = null;
   let pollTimer: number | undefined;
   let pollDestroyed = false;
+  let runEventTimer: number | undefined;
+  let pendingRunEvents: SseEvent[] = [];
 
   // SSE drives most updates; polling is a backstop for missed events and
   // to surface server-side state changes the bus doesn't emit. Use 1s
@@ -202,8 +204,16 @@
 
   onMount(() => {
     refresh().then(() => scheduleNextPoll());
-    es = subscribeEvents((event) => {
-      switch (event.type) {
+    const flushRunEvents = () => {
+      if (runEventTimer) {
+        clearTimeout(runEventTimer);
+        runEventTimer = undefined;
+      }
+      if (pendingRunEvents.length === 0) return;
+      const events = pendingRunEvents;
+      pendingRunEvents = [];
+      for (const event of events) {
+        switch (event.type) {
         case 'scan_start':
           // Flip the indicator on. Don't reset scanSeen here — run_start
           // already reset it for a fresh run (live: undefined → 0; replay:
@@ -373,7 +383,16 @@
             logLines = [...logLines.slice(-49), line];
           }
           break;
+        }
       }
+    };
+    const scheduleRunFlush = () => {
+      if (runEventTimer) return;
+      runEventTimer = window.setTimeout(flushRunEvents, 100);
+    };
+    es = subscribeEvents((event) => {
+      pendingRunEvents.push(event);
+      scheduleRunFlush();
     });
   });
 
@@ -382,6 +401,7 @@
     es?.close();
     if (pollTimer) clearTimeout(pollTimer);
     if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
+    if (runEventTimer) clearTimeout(runEventTimer);
   });
 
   function dbSyncLabel(reason: string): string {
