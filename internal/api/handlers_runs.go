@@ -172,6 +172,10 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("engine not configured"))
 		return
 	}
+	if mode != engine.RunModeScan && s.storage() == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("storage not configured"))
+		return
+	}
 
 	eng, err := s.deps.BuildEngine(mode, req.Paths)
 	if err != nil {

@@ -6,7 +6,9 @@
   import Logs from './routes/Logs.svelte';
   import Settings from './routes/Settings.svelte';
   import Restore from './routes/Restore.svelte';
+  import Profiles from './routes/Profiles.svelte';
   import Toaster from './components/Toaster.svelte';
+  import ProfileSwitcher from './components/ProfileSwitcher.svelte';
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -30,6 +32,7 @@
         >{t.label}</button>
       {/each}
     </nav>
+    <ProfileSwitcher />
   </header>
 
   <main>
@@ -39,6 +42,7 @@
     {:else if $route === 'logs'}<Logs />
     {:else if $route === 'settings' || $route.startsWith('settings/')}<Settings />
     {:else if $route === 'restore'}<Restore />
+    {:else if $route === 'profiles'}<Profiles />
     {:else if $route === 'download'}<Download />
     {:else}<p class="muted">Unknown route: {$route}</p>
     {/if}
@@ -57,6 +61,7 @@
     display: flex;
     align-items: center;
     gap: 1.5rem;
+    flex-wrap: wrap;
     padding: 0.5rem 0 1rem;
     border-bottom: 1px solid var(--border);
     margin-bottom: 1.5rem;

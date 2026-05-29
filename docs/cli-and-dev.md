@@ -11,9 +11,9 @@ aws-backup serve              run HTTP API + scheduler (SIGINT-safe shutdown); a
 aws-backup -version           print baked-in version
 ```
 
-`-config <path>` overrides the default config location (resolved via `config.DefaultPath()` — see `internal/config/path.go`). Version is baked in via `-ldflags "-X main.version=..."` in the Makefile.
+`-config <path>` overrides the central config location (resolved via `config.DefaultPath()` — see `internal/config/path.go`). `-profile <name>` overrides the active profile for the current `run` / `serve` process. Version is baked in via `-ldflags "-X main.version=..."` in the Makefile.
 
-`serve` startup includes a transient HTTP boot UI on the configured port that shows progress with a Cancel button while `index.db` is downloaded from S3 if needed; the transient server is shut down before the real API binds the port (#143).
+`serve` startup includes a transient HTTP boot UI on the configured port that shows progress with a Cancel button while the active profile's `index.db` is downloaded from S3 if needed; the transient server is shut down before the real API binds the port (#143).
 
 ## Web SPA Notes
 
@@ -23,6 +23,7 @@ aws-backup -version           print baked-in version
 - `web/src/lib/toast.ts` is the canonical path for transient feedback (avoid `alert()`)
 - `npm run lint` runs ESLint across the frontend `js`/`ts`/`svelte` sources; CI includes it in the lint job alongside the Go checks
 - Settings is split into per-section sub-routes under `/settings/<section>`; each sub-component takes `bind:cfg` and edits a slice of the Config tree
+- Profiles are managed on the dedicated `#/profiles` page. The header's "Switch profile" button links there; the page handles active switching plus create/rename/delete actions.
 - Restore is split into a `Restore` tab for Glacier thaw/status and a separate `Download` tab for local S3 downloads with MD5 verification + cost estimation; the target directory is prefilled from `backup.download_dir` when Settings has one configured
 
 ## Makefile targets

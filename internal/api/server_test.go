@@ -117,6 +117,7 @@ func newTestServer(t *testing.T) (*testServer, Deps) {
 		Bus:        bus,
 		Config:     &cfg,
 		ConfigPath: cfgPath,
+		Storage:    func() storage.Storage { return store },
 		BuildEngine: func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 			return engine.New(engine.Options{
 				DB:        d,
@@ -297,6 +298,171 @@ func TestSettingsPutInvokesApplySettings(t *testing.T) {
 	}
 	if deps.Config.S3.Bucket != "new-bucket" {
 		t.Errorf("live config not updated: %q", deps.Config.S3.Bucket)
+	}
+}
+
+func TestProfilesListAndSwitch(t *testing.T) {
+	_, deps := newTestServer(t)
+	called := ""
+	deps.ActiveProfile = "default"
+	deps.ListProfiles = func() ([]ProfileInfo, error) {
+		return []ProfileInfo{
+			{Name: "default", Active: true, Bucket: "a"},
+			{Name: "photos", Bucket: "b"},
+		}, nil
+	}
+	deps.SwitchProfile = func(ctx context.Context, name string) (ProfileRuntime, error) {
+		called = name
+		return ProfileRuntime{
+			Info:          ProfileInfo{Name: name, Active: true, Bucket: "b"},
+			DB:            deps.DB,
+			Config:        *deps.Config,
+			ConfigPath:    deps.ConfigPath,
+			StoragePrefix: deps.Config.S3.KeyPrefix,
+		}, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	var listed profilesResponse
+	getJSON(t, ts, "/api/profiles", &listed)
+	if listed.ActiveProfile != "default" || len(listed.Profiles) != 2 {
+		t.Fatalf("profiles response = %+v", listed)
+	}
+
+	body := strings.NewReader(`{"name":"photos"}`)
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/active", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if called != "photos" || srv.deps.ActiveProfile != "photos" {
+		t.Fatalf("switch called=%q active=%q", called, srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileSwitchBlockedDuringRun(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.SwitchProfile = func(ctx context.Context, name string) (ProfileRuntime, error) {
+		t.Fatal("SwitchProfile should not be called while run is active")
+		return ProfileRuntime{}, nil
+	}
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 42
+	srv.runMu.Unlock()
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/active", strings.NewReader(`{"name":"photos"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+}
+
+func TestProfileRenameInactive(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		if oldName != "photos" || newName != "archive" {
+			t.Fatalf("rename args = %q -> %q", oldName, newName)
+		}
+		return ProfileRuntime{Info: ProfileInfo{Name: newName, Bucket: "b"}}, false, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/photos/rename", strings.NewReader(`{"name":"archive"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if srv.deps.ActiveProfile != "default" {
+		t.Fatalf("active profile changed to %q", srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileRenameActiveUpdatesRuntime(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		if oldName != "default" || newName != "primary" {
+			t.Fatalf("rename args = %q -> %q", oldName, newName)
+		}
+		return ProfileRuntime{
+			Info:          ProfileInfo{Name: newName, Active: true, Bucket: "b"},
+			DB:            deps.DB,
+			Config:        *deps.Config,
+			ConfigPath:    deps.ConfigPath,
+			StoragePrefix: deps.Config.S3.KeyPrefix,
+		}, true, nil
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/default/rename", strings.NewReader(`{"name":"primary"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	if srv.deps.ActiveProfile != "primary" {
+		t.Fatalf("active profile = %q", srv.deps.ActiveProfile)
+	}
+}
+
+func TestProfileRenameActiveBlockedDuringRun(t *testing.T) {
+	_, deps := newTestServer(t)
+	deps.ActiveProfile = "default"
+	deps.RenameProfile = func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error) {
+		t.Fatal("RenameProfile should not be called while run is active")
+		return ProfileRuntime{}, false, nil
+	}
+	srv := NewServer(deps)
+	srv.runMu.Lock()
+	srv.currentRun = 42
+	srv.runMu.Unlock()
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/profiles/default/rename", strings.NewReader(`{"name":"primary"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 }
 
@@ -1450,9 +1616,10 @@ func TestDeleteRunLogs(t *testing.T) {
 }
 
 func TestRestoreTriggerWithoutStorage(t *testing.T) {
-	// newTestServer doesn't wire Deps.Storage, so the handler should
-	// refuse the request rather than attempt a download.
-	ts, _ := newTestServer(t)
+	ts, deps := newTestServer(t)
+	deps.Storage = nil
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger", "application/json",
 		strings.NewReader(`{"paths":["photos"],"target_dir":"/tmp/restore"}`))
 	if err != nil {

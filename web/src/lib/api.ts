@@ -223,6 +223,21 @@ export interface TestResult {
   message?: string;
 }
 
+export interface ProfileInfo {
+  name: string;
+  active: boolean;
+  bucket?: string;
+  config_path: string;
+  index_path: string;
+}
+
+export interface ProfilesResponse {
+  profiles: ProfileInfo[];
+  active_profile: string;
+  switch_blocked: boolean;
+  blocked_reason?: string;
+}
+
 // Mirror of the Go `config.Config` tree exposed by /api/settings.
 // Credential-like fields are returned as "***" by the server and, if
 // sent back unchanged, are preserved by its mergeSecrets step.
@@ -420,6 +435,24 @@ export const api = {
   settings: () => request<SettingsResponse>('/api/settings'),
   updateSettings: (cfg: Config) =>
     request<SettingsResponse>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+  profiles: () => request<ProfilesResponse>('/api/profiles'),
+  createProfile: (name: string, cloneActive = true) =>
+    request<ProfileInfo>('/api/profiles', {
+      method: 'POST',
+      body: JSON.stringify({ name, clone_active: cloneActive }),
+    }),
+  switchProfile: (name: string) =>
+    request<ProfileInfo>('/api/profiles/active', {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }),
+  renameProfile: (oldName: string, newName: string) =>
+    request<ProfileInfo>(`/api/profiles/${encodeURIComponent(oldName)}/rename`, {
+      method: 'PUT',
+      body: JSON.stringify({ name: newName }),
+    }),
+  deleteProfile: (name: string) =>
+    request<{ status: string }>(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   testSource: () => request<TestResult>('/api/smb/test'),
   testStorage: () => request<TestResult>('/api/s3/test'),

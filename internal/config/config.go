@@ -62,6 +62,13 @@ const (
 	RedactedMarker = "***"
 )
 
+// CentralConfig is the process-wide config stored at config.json. It owns
+// settings that are shared across every backup profile.
+type CentralConfig struct {
+	ActiveProfile string       `json:"active_profile"`
+	Server        ServerConfig `json:"server"`
+}
+
 // Config is the full runtime config tree persisted to config.json.
 type Config struct {
 	Source SourceConfig `json:"source"`
@@ -69,6 +76,16 @@ type Config struct {
 	SQS    SQSConfig    `json:"sqs"`
 	Backup BackupConfig `json:"backup"`
 	Server ServerConfig `json:"server"`
+}
+
+// ProfileConfig is the per-profile config stored under profiles/<name>.
+// Server settings stay in CentralConfig because the process has one HTTP
+// listener regardless of which profile is active.
+type ProfileConfig struct {
+	Source SourceConfig `json:"source"`
+	S3     S3Config     `json:"s3"`
+	SQS    SQSConfig    `json:"sqs"`
+	Backup BackupConfig `json:"backup"`
 }
 
 // SQSConfig configures the restore-event consumer. Empty QueueURL
@@ -220,6 +237,42 @@ func Default() Config {
 	}
 }
 
+// DefaultCentral returns the shared config for a fresh install.
+func DefaultCentral() CentralConfig {
+	def := Default()
+	return CentralConfig{
+		ActiveProfile: "default",
+		Server:        def.Server,
+	}
+}
+
+// DefaultProfile returns the per-profile portion of Default.
+func DefaultProfile() ProfileConfig {
+	return ProfileFromConfig(Default())
+}
+
+// ProfileFromConfig extracts the per-profile fields from the runtime config.
+func ProfileFromConfig(c Config) ProfileConfig {
+	return ProfileConfig{
+		Source: c.Source,
+		S3:     c.S3,
+		SQS:    c.SQS,
+		Backup: c.Backup,
+	}
+}
+
+// ToConfig combines a profile with central server settings into the runtime
+// config shape used by the engine, API, and web settings page.
+func (p ProfileConfig) ToConfig(server ServerConfig) Config {
+	return Config{
+		Source: p.Source,
+		S3:     p.S3,
+		SQS:    p.SQS,
+		Backup: p.Backup,
+		Server: server,
+	}
+}
+
 // Load reads and parses a Config from path. Missing file yields os.ErrNotExist.
 func Load(path string) (Config, error) {
 	var cfg Config
@@ -232,6 +285,34 @@ func Load(path string) (Config, error) {
 	}
 	applyBackfills(data, &cfg)
 	return cfg, nil
+}
+
+// LoadCentral reads the shared central config.
+func LoadCentral(path string) (CentralConfig, error) {
+	var cfg CentralConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// LoadProfile reads a per-profile config.
+func LoadProfile(path string) (ProfileConfig, error) {
+	var cfg ProfileConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	}
+	full := cfg.ToConfig(Default().Server)
+	applyBackfills(data, &full)
+	return ProfileFromConfig(full), nil
 }
 
 // applyBackfills sets sensible defaults for fields that were added in a
@@ -276,6 +357,20 @@ func applyBackfills(data []byte, cfg *Config) {
 // directory after rename, so a hard reset between rename and
 // writeback can't leave a zero-byte file at path. (#101)
 func Save(path string, cfg Config) error {
+	return saveJSON(path, cfg)
+}
+
+// SaveCentral atomically writes the central config.
+func SaveCentral(path string, cfg CentralConfig) error {
+	return saveJSON(path, cfg)
+}
+
+// SaveProfile atomically writes a per-profile config.
+func SaveProfile(path string, cfg ProfileConfig) error {
+	return saveJSON(path, cfg)
+}
+
+func saveJSON(path string, v any) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -286,7 +381,7 @@ func Save(path string, cfg Config) error {
 	// in CI smoke tests) chmod will fail with EPERM, and that's not a
 	// reason to fail the whole save. (#221)
 	_ = os.Chmod(dir, 0o700)
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -323,6 +418,29 @@ func Save(path string, cfg Config) error {
 	return nil
 }
 
+// ValidateCentral returns nil when shared settings are usable.
+func (c CentralConfig) ValidateCentral() error {
+	var errs []error
+	if err := ValidateProfileName(c.ActiveProfile); err != nil {
+		errs = append(errs, fmt.Errorf("active_profile: %w", err))
+	}
+	if c.Server.Port <= 0 || c.Server.Port > 65535 {
+		errs = append(errs, fmt.Errorf("server.port %d out of range", c.Server.Port))
+	}
+	if c.Server.Host == "" {
+		errs = append(errs, errors.New("server.host is required"))
+	} else if ip := net.ParseIP(c.Server.Host); c.Server.Host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		errs = append(errs, fmt.Errorf("server.host %q must be a loopback address (127.0.0.1 or ::1); binding to external interfaces is not supported", c.Server.Host))
+	}
+	return errors.Join(errs...)
+}
+
+// ValidateProfile validates a per-profile config using the supplied central
+// server settings for fields that still live on the runtime Config shape.
+func (p ProfileConfig) ValidateProfile(server ServerConfig) error {
+	return p.ToConfig(server).Validate()
+}
+
 // Validate returns nil if the config is internally consistent and usable.
 func (c Config) Validate() error {
 	var errs []error
@@ -348,13 +466,11 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("source.type %q invalid (want localdir | smb)", c.Source.Type))
 	}
 
-	if c.S3.Bucket == "" {
-		errs = append(errs, errors.New("s3.bucket is required"))
-	}
-	if c.S3.Region == "" {
+	s3Configured := c.S3.Bucket != ""
+	if s3Configured && c.S3.Region == "" {
 		errs = append(errs, errors.New("s3.region is required"))
 	}
-	if c.S3.StorageClass == "" {
+	if s3Configured && c.S3.StorageClass == "" {
 		errs = append(errs, errors.New("s3.storage_class is required"))
 	}
 	if c.S3.MultipartThreshold < 0 {
@@ -382,7 +498,7 @@ func (c Config) Validate() error {
 	// etc.) reject them with InvalidStorageClass on first upload. Catch it
 	// at config time so the foot-gun shows up in the Settings UI instead
 	// of the next backup run.
-	if c.S3.Endpoint != "" {
+	if s3Configured && c.S3.Endpoint != "" {
 		if err := validateEndpointURL("s3.endpoint", c.S3.Endpoint); err != nil {
 			errs = append(errs, err)
 		}

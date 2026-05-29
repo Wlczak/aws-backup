@@ -97,7 +97,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if currentRun != 0 {
 		// Defer the apply until the run finishes. Persist to disk now so
 		// the change survives restart, but leave live state alone.
-		if s.deps.ConfigPath != "" {
+		if s.deps.SaveSettings != nil {
+			if err := s.deps.SaveSettings(merged); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
+				return
+			}
+		} else if s.deps.ConfigPath != "" {
 			if err := config.Save(s.deps.ConfigPath, merged); err != nil {
 				writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
 				return
@@ -121,13 +126,32 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.deps.ConfigPath != "" {
-		if err := config.Save(s.deps.ConfigPath, merged); err != nil {
+	if s.deps.SaveSettings != nil {
+		if err := s.deps.SaveSettings(merged); err != nil {
 			// Roll back the hot-swap so memory + components still match
 			// what's on disk. If the rollback itself fails the live
 			// process is in a half-swapped state (new src/store, old
 			// config file): surface both errors so the operator knows
 			// to restart and log the rollback failure.
+			var rollbackErr error
+			if s.deps.ApplySettings != nil {
+				rollbackErr = s.deps.ApplySettings(merged, live)
+			}
+			s.setStoragePrefix(live.S3.KeyPrefix)
+			if rollbackErr != nil {
+				if s.deps.Logger != nil {
+					s.deps.Logger.Error("settings rollback failed after save error",
+						"save_err", err, "rollback_err", rollbackErr)
+				}
+				writeError(w, http.StatusInternalServerError,
+					fmt.Errorf("save config: %w; rollback also failed: %v", err, rollbackErr))
+				return
+			}
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("save config: %w", err))
+			return
+		}
+	} else if s.deps.ConfigPath != "" {
+		if err := config.Save(s.deps.ConfigPath, merged); err != nil {
 			var rollbackErr error
 			if s.deps.ApplySettings != nil {
 				rollbackErr = s.deps.ApplySettings(merged, live)

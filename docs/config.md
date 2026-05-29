@@ -1,8 +1,30 @@
 # Configuration
 
-Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp + atomic rename + fsync of file and parent dir (#101). Credentials are returned as `"***"` by `GET /api/settings`; PUT preserves any field equal to `RedactedMarker`.
+Defined in `internal/config/config.go`. JSON files; `config.Save*` writes via tmp + atomic rename + fsync of file and parent dir (#101). Credentials are returned as `"***"` by `GET /api/settings`; PUT preserves any field equal to `RedactedMarker`.
 
-## Schema (config.json)
+## Profile layout
+
+The OS config directory now has one central config plus one subdirectory per profile:
+
+```text
+aws-backup/
+  config.json
+  profiles/<profile>/config.json
+  profiles/<profile>/index.db
+```
+
+Central `config.json` owns shared process settings:
+
+```jsonc
+{
+  "active_profile": "default",
+  "server": { "host": "127.0.0.1", "port": 8080 }
+}
+```
+
+Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to at most one bucket and one local SQLite index. Existing single-profile installs are migrated on startup by moving the old runtime config/index into `profiles/default/` and writing the central config at the old `config.json` path. Creating a new profile with `clone_active` copies operational defaults from the active profile but clears `s3.bucket` and `sqs.queue_url`, so the new profile cannot accidentally reuse the active bucket or restore queue. An empty `s3.bucket` means S3 is not configured yet; the profile can still be active, but backup upload, cloud sync, restore, download, inventory, and S3 test actions reject until a bucket is set.
+
+## Effective Settings Schema (`GET /api/settings`)
 
 ```jsonc
 {
@@ -53,7 +75,7 @@ Defined in `internal/config/config.go`. JSON file; `config.Save` writes via tmp 
 
 ## Hot-reload semantics
 
-`PUT /api/settings` validates, merges redacted secrets, then either applies live or queues:
+`PUT /api/settings` validates, merges redacted secrets, saves profile fields to the active profile config, saves server fields to the central config, then either applies live or queues:
 
 - **No run in flight**: validate → `applySettings` (hot-swap source/storage/scheduler) → `config.Save` → update in-memory snapshot. Failed save rolls back the swap.
 - **Run in flight**: validate → `config.Save` → stash as `pendingConfig`. The post-run goroutine drains pending and applies once `currentRun` clears. Response carries `pending_apply: true`.
@@ -64,10 +86,10 @@ Successive PUTs during one run compose against the pending config (not the live 
 
 ## Default config path
 
-`config.DefaultPath()` resolves an OS-specific user config dir:
+`config.DefaultPath()` resolves the central config path in the OS-specific user config dir:
 
 - Linux: `$XDG_CONFIG_HOME/aws-backup/config.json` (or `~/.config/...`)
 - macOS: `~/Library/Application Support/aws-backup/config.json`
 - Windows: `%AppData%\aws-backup\config.json`
 
-`-config <path>` overrides this. See `internal/config/path.go`.
+`-config <path>` overrides the central config path. `-profile <name>` overrides `active_profile` for the current process. Profile names are one safe path segment: letters, numbers, dot, underscore, or dash; 1-64 chars; must start with a letter or number. See `internal/config/path.go`.

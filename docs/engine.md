@@ -2,6 +2,8 @@
 
 The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engine.RunWithID(ctx, runID)` invocation that scans, reconciles, and uploads.
 
+Runs execute against the currently active profile. The active profile determines the source, optional S3 bucket/prefix, scheduler, SQS settings, and `profiles/<name>/index.db`; profile switching is rejected while any backup/download job or pending settings apply is active. Profiles with no `s3.bucket` can be activated for setup and scan-only work, but upload/cloud/restore actions are rejected until storage is configured.
+
 ## Lifecycle (`engine.RunWithID`)
 
 ```text
@@ -49,7 +51,7 @@ The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engi
 
 9.  Post-run (in api goroutine after currentRun cleared)
     Apply any pendingConfig queued via PUT /api/settings during the run.
-    maybeSyncDBToS3 snapshots the local index.db to a temp file and
+    maybeSyncDBToS3 snapshots the active profile's local index.db to a temp file and
     uploads that sidecar in STANDARD tier (#125) when the run
     completed or was gracefully stopped.
 ```
