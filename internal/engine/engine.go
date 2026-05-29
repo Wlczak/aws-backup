@@ -538,7 +538,7 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing, batch.Paused,
 		))
 
-		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, false)
+		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, true)
 		if uploadErr != nil {
 			return terminal, uploadErr
 		}

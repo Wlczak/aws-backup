@@ -37,7 +37,11 @@ Runs execute against the currently active profile. The active profile determines
     `run_scan_folders` table and exposes `runs.scan_paused` / `runs.scan_complete`
     so `/api/status` can tell the UI whether the engine is between scan batches
     or has finished scanning entirely. The upload phase filters out any pending
-    rows that belong to folders already completed in the current run.
+    rows that belong to folders already completed in the current run. It emits
+    `upload_plan` before the batch uploads begin so the dashboard has a live
+    denominator instead of waiting for the first batch to finish, then refreshes
+    the cumulative plan again after the batch completes so `/api/status` and
+    SSE replay converge on the full run total.
 
 6.  Pipeline preparation
     mkdir TmpDir; sweepOrphanTmps removes ind-N tmp files for IDs no longer

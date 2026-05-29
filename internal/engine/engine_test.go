@@ -123,14 +123,14 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	// upload_plan must arrive once with the full file count so the UI
 	// progress bar's denominator is correct from the first byte. (#126)
 	plans := col.byType(EventUploadPlan)
-	if len(plans) != 1 {
-		t.Fatalf("want exactly 1 upload_plan event, got %d", len(plans))
+	if len(plans) < 2 {
+		t.Fatalf("want at least 2 upload_plan events, got %d", len(plans))
 	}
-	if got := plans[0].Data["total_files"]; got != int64(6) {
-		t.Errorf("upload_plan.total_files = %v, want 6", got)
+	if got := plans[len(plans)-1].Data["total_files"]; got != int64(6) {
+		t.Errorf("last upload_plan.total_files = %v, want 6", got)
 	}
-	if got := plans[0].Data["total_groups"]; got != int64(3) {
-		t.Errorf("upload_plan.total_groups = %v, want 3", got)
+	if got := plans[len(plans)-1].Data["total_groups"]; got != int64(3) {
+		t.Errorf("last upload_plan.total_groups = %v, want 3", got)
 	}
 
 	// Each of the 4 upload keys (1 zip + 3 individual) must surface at
@@ -284,6 +284,27 @@ func TestEngineBatchedFullRunPausesAndResumesScanning(t *testing.T) {
 	}
 	if got := plans[len(plans)-1].Data["total_files"]; got != int64(3) {
 		t.Fatalf("last upload_plan.total_files = %v, want 3", got)
+	}
+
+	firstPlan := -1
+	firstUploadStart := -1
+	for i, ev := range col.events {
+		switch ev.Type {
+		case EventUploadPlan:
+			if firstPlan == -1 {
+				firstPlan = i
+			}
+		case EventUploadStart:
+			if firstUploadStart == -1 {
+				firstUploadStart = i
+			}
+		}
+	}
+	if firstPlan == -1 || firstUploadStart == -1 {
+		t.Fatalf("missing upload plan/start events: plan=%d start=%d", firstPlan, firstUploadStart)
+	}
+	if firstPlan > firstUploadStart {
+		t.Fatalf("first upload_plan arrived after first upload_start: plan=%d start=%d", firstPlan, firstUploadStart)
 	}
 }
 
