@@ -466,13 +466,11 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("source.type %q invalid (want localdir | smb)", c.Source.Type))
 	}
 
-	if c.S3.Bucket == "" {
-		errs = append(errs, errors.New("s3.bucket is required"))
-	}
-	if c.S3.Region == "" {
+	s3Configured := c.S3.Bucket != ""
+	if s3Configured && c.S3.Region == "" {
 		errs = append(errs, errors.New("s3.region is required"))
 	}
-	if c.S3.StorageClass == "" {
+	if s3Configured && c.S3.StorageClass == "" {
 		errs = append(errs, errors.New("s3.storage_class is required"))
 	}
 	if c.S3.MultipartThreshold < 0 {
@@ -500,7 +498,7 @@ func (c Config) Validate() error {
 	// etc.) reject them with InvalidStorageClass on first upload. Catch it
 	// at config time so the foot-gun shows up in the Settings UI instead
 	// of the next backup run.
-	if c.S3.Endpoint != "" {
+	if s3Configured && c.S3.Endpoint != "" {
 		if err := validateEndpointURL("s3.endpoint", c.S3.Endpoint); err != nil {
 			errs = append(errs, err)
 		}

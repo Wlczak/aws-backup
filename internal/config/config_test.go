@@ -66,7 +66,7 @@ func TestValidateErrors(t *testing.T) {
 			c.Source.SMB.Share = "s"
 			c.Source.SMB.Port = 0
 		}, "smb.port"},
-		{"missing bucket", func(c *Config) { c.S3.Bucket = "" }, "s3.bucket is required"},
+		{"missing region with bucket", func(c *Config) { c.S3.Region = "" }, "s3.region is required"},
 		{"bad chunk size", func(c *Config) { c.Backup.ChunkSize = 0 }, "chunk_size"},
 		{"bad cron", func(c *Config) { c.Backup.Schedule = "definitely not cron" }, "schedule invalid"},
 		{"bad port", func(c *Config) { c.Server.Port = 70000 }, "server.port"},
@@ -87,6 +87,17 @@ func TestValidateErrors(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateAllowsUnconfiguredS3(t *testing.T) {
+	cfg := Default()
+	cfg.Source.LocalDir.Root = "/tmp/x"
+	cfg.S3.Bucket = ""
+	cfg.S3.Region = ""
+	cfg.S3.StorageClass = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config without S3 bucket should validate: %v", err)
 	}
 }
 

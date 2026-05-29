@@ -826,6 +826,10 @@ func (s *Server) handleRestoreScanFull(w http.ResponseWriter, r *http.Request) {
 			errors.New("restore scanner not configured (storage missing)"))
 		return
 	}
+	if s.storage() == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("storage not configured"))
+		return
+	}
 	// Reject when a backup run is in flight: RunFull HEADs every
 	// individually-uploaded key, and the engine may be writing those
 	// same s3_key rows (status, uploaded_at). Letting the two writers
@@ -857,6 +861,10 @@ func (s *Server) handleRestoreScanPending(w http.ResponseWriter, r *http.Request
 	if s.deps.RestoreScanner == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			errors.New("restore scanner not configured (storage missing)"))
+		return
+	}
+	if s.storage() == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("storage not configured"))
 		return
 	}
 	res, err := s.deps.RestoreScanner.RunPending(r.Context())

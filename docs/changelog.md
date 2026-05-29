@@ -4,6 +4,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Profiles with empty `s3.bucket` can now be activated for setup/scan-only use; S3-dependent actions reject until storage is configured |
+| — | — | Cloned profile creation now clears `s3.bucket` and `sqs.queue_url` so new profiles do not accidentally attach to the active profile's bucket or restore queue |
 | — | — | Profile management moved to a dedicated page with create, switch, rename, and delete actions; the header now links to that page instead of inline profile controls |
 | — | — | Added named backup profiles: central server config plus per-profile source/S3/SQS/backup config and per-profile `index.db`, with idle-only switching from the web header |
 | — | — | Dashboard restore counts now exclude the reserved `index.db` snapshot, so it no longer inflates the restored total |

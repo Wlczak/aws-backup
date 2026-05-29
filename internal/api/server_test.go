@@ -117,6 +117,7 @@ func newTestServer(t *testing.T) (*testServer, Deps) {
 		Bus:        bus,
 		Config:     &cfg,
 		ConfigPath: cfgPath,
+		Storage:    func() storage.Storage { return store },
 		BuildEngine: func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 			return engine.New(engine.Options{
 				DB:        d,
@@ -1615,9 +1616,10 @@ func TestDeleteRunLogs(t *testing.T) {
 }
 
 func TestRestoreTriggerWithoutStorage(t *testing.T) {
-	// newTestServer doesn't wire Deps.Storage, so the handler should
-	// refuse the request rather than attempt a download.
-	ts, _ := newTestServer(t)
+	ts, deps := newTestServer(t)
+	deps.Storage = nil
+	srv := NewServer(deps)
+	ts.Config.Handler = srv.Router()
 	resp, err := ts.Client().Post(ts.URL+"/api/restore/trigger", "application/json",
 		strings.NewReader(`{"paths":["photos"],"target_dir":"/tmp/restore"}`))
 	if err != nil {

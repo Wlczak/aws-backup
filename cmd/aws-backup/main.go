@@ -154,18 +154,7 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 	}
 	_ = os.Chmod(dir, 0o700) // tighten loose existing dirs (#221)
 
-	store, err := storage.NewS3Storage(ctx, storage.S3Config{
-		Endpoint:           cfg.S3.Endpoint,
-		UsePathStyle:       cfg.S3.UsePathStyle,
-		Region:             cfg.S3.Region,
-		Bucket:             cfg.S3.Bucket,
-		AccessKeyID:        cfg.S3.AccessKeyID,
-		SecretAccessKey:    cfg.S3.SecretAccessKey,
-		StorageClass:       cfg.S3.StorageClass,
-		MultipartThreshold: cfg.S3.MultipartThreshold,
-		ResumeThreshold:    cfg.S3.ResumeThreshold,
-		PartSize:           cfg.S3.PartSize,
-	})
+	store, err := openConfiguredStorage(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("init storage: %w", err)
 	}
@@ -180,15 +169,19 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 	// configured server address while the download runs, with a Cancel
 	// button that lets the user proceed with whatever local state they
 	// have. (#143)
-	if withBootUI {
-		_ = bootRefreshDBFromS3(ctx, cfg.Server, store, cfg.S3.KeyPrefix, dbPath)
-	} else {
-		_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
+	if store != nil {
+		if withBootUI {
+			_ = bootRefreshDBFromS3(ctx, cfg.Server, store, cfg.S3.KeyPrefix, dbPath)
+		} else {
+			_ = refreshDBFromS3(ctx, store, cfg.S3.KeyPrefix, dbPath)
+		}
 	}
 
 	d, err := db.Open(ctx, dbPath)
 	if err != nil {
-		store.Close()
+		if store != nil {
+			store.Close()
+		}
 		return nil, fmt.Errorf("open db %s: %w", dbPath, err)
 	}
 
@@ -209,7 +202,9 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 	src, err := source.FromConfig(cfg.Source)
 	if err != nil {
 		d.Close()
-		store.Close()
+		if store != nil {
+			store.Close()
+		}
 		return nil, fmt.Errorf("open source: %w", err)
 	}
 
@@ -224,6 +219,24 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 		bus:         events.NewBus(128),
 		dbPath:      dbPath,
 	}, nil
+}
+
+func openConfiguredStorage(ctx context.Context, cfg config.Config) (storage.Storage, error) {
+	if cfg.S3.Bucket == "" {
+		return nil, nil
+	}
+	return storage.NewS3Storage(ctx, storage.S3Config{
+		Endpoint:           cfg.S3.Endpoint,
+		UsePathStyle:       cfg.S3.UsePathStyle,
+		Region:             cfg.S3.Region,
+		Bucket:             cfg.S3.Bucket,
+		AccessKeyID:        cfg.S3.AccessKeyID,
+		SecretAccessKey:    cfg.S3.SecretAccessKey,
+		StorageClass:       cfg.S3.StorageClass,
+		MultipartThreshold: cfg.S3.MultipartThreshold,
+		ResumeThreshold:    cfg.S3.ResumeThreshold,
+		PartSize:           cfg.S3.PartSize,
+	})
 }
 
 // dbRefreshNeeded reports whether the local index.db at dst is stale
@@ -409,6 +422,9 @@ func (a *appState) syncDBToS3(ctx context.Context, runID int64, reason string) e
 	store := a.store
 	keyPrefix := a.cfg.S3.KeyPrefix
 	a.mu.Unlock()
+	if store == nil {
+		return errors.New("storage not configured")
+	}
 
 	f, err := os.Open(snapPath)
 	if err != nil {
@@ -489,6 +505,12 @@ func dbS3Key(prefix string) string {
 func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if mode == "" {
+		mode = engine.RunModeFull
+	}
+	if mode != engine.RunModeScan && a.store == nil {
+		return nil, errors.New("storage not configured")
+	}
 	return engine.New(engine.Options{
 		DB:               a.db,
 		Source:           a.src,
@@ -549,18 +571,7 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 		newSrc = s
 	}
 	if s3Changed {
-		s, err := storage.NewS3Storage(ctx, storage.S3Config{
-			Endpoint:           next.S3.Endpoint,
-			UsePathStyle:       next.S3.UsePathStyle,
-			Region:             next.S3.Region,
-			Bucket:             next.S3.Bucket,
-			AccessKeyID:        next.S3.AccessKeyID,
-			SecretAccessKey:    next.S3.SecretAccessKey,
-			StorageClass:       next.S3.StorageClass,
-			MultipartThreshold: next.S3.MultipartThreshold,
-			ResumeThreshold:    next.S3.ResumeThreshold,
-			PartSize:           next.S3.PartSize,
-		})
+		s, err := openConfiguredStorage(ctx, next)
 		if err != nil {
 			if newSrc != nil {
 				newSrc.Close()
@@ -580,7 +591,7 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 			a.logger.Info("source hot-swapped", "type", next.Source.Type)
 		}
 	}
-	if newStore != nil {
+	if s3Changed {
 		oldStore = a.store
 		a.store = newStore
 		if a.logger != nil {
@@ -638,9 +649,15 @@ func (a *appState) close() {
 	if a.sqsDone != nil {
 		<-a.sqsDone
 	}
-	a.store.Close()
-	a.src.Close()
-	a.db.Close()
+	if a.store != nil {
+		a.store.Close()
+	}
+	if a.src != nil {
+		a.src.Close()
+	}
+	if a.db != nil {
+		a.db.Close()
+	}
 }
 
 func (a *appState) listProfiles() ([]api.ProfileInfo, error) {
@@ -697,6 +714,8 @@ func (a *appState) createProfile(_ context.Context, name string, cloneActive boo
 		a.mu.RLock()
 		prof = config.ProfileFromConfig(a.cfg)
 		a.mu.RUnlock()
+		prof.S3.Bucket = ""
+		prof.SQS.QueueURL = ""
 	} else {
 		prof = config.DefaultProfile()
 	}
@@ -825,18 +844,7 @@ func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newNam
 		}
 	}
 
-	newStore, err := storage.NewS3Storage(ctx, storage.S3Config{
-		Endpoint:           cfg.S3.Endpoint,
-		UsePathStyle:       cfg.S3.UsePathStyle,
-		Region:             cfg.S3.Region,
-		Bucket:             cfg.S3.Bucket,
-		AccessKeyID:        cfg.S3.AccessKeyID,
-		SecretAccessKey:    cfg.S3.SecretAccessKey,
-		StorageClass:       cfg.S3.StorageClass,
-		MultipartThreshold: cfg.S3.MultipartThreshold,
-		ResumeThreshold:    cfg.S3.ResumeThreshold,
-		PartSize:           cfg.S3.PartSize,
-	})
+	newStore, err := openConfiguredStorage(ctx, cfg)
 	if err != nil {
 		rollback()
 		return api.ProfileRuntime{}, false, fmt.Errorf("init storage: %w", err)
@@ -844,14 +852,18 @@ func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newNam
 	dbPath := filepath.Join(newDir, "index.db")
 	newDB, err := db.Open(ctx, dbPath)
 	if err != nil {
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		rollback()
 		return api.ProfileRuntime{}, false, fmt.Errorf("open db %s: %w", dbPath, err)
 	}
 	newSrc, err := source.FromConfig(cfg.Source)
 	if err != nil {
 		newDB.Close()
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		rollback()
 		return api.ProfileRuntime{}, false, fmt.Errorf("open source: %w", err)
 	}
@@ -859,7 +871,9 @@ func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newNam
 	if err := config.SaveCentral(a.cfgPath, central); err != nil {
 		newSrc.Close()
 		newDB.Close()
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		rollback()
 		return api.ProfileRuntime{}, false, fmt.Errorf("save central config: %w", err)
 	}
@@ -869,7 +883,9 @@ func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newNam
 	if err != nil {
 		newSrc.Close()
 		newDB.Close()
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		return api.ProfileRuntime{}, false, err
 	}
 	a.mu.Lock()
@@ -908,9 +924,15 @@ func (a *appState) renameProfileTo(ctx, rootCtx context.Context, oldName, newNam
 			}
 		}
 	}
-	_ = oldSrc.Close()
-	_ = oldStore.Close()
-	_ = oldDB.Close()
+	if oldSrc != nil {
+		_ = oldSrc.Close()
+	}
+	if oldStore != nil {
+		_ = oldStore.Close()
+	}
+	if oldDB != nil {
+		_ = oldDB.Close()
+	}
 	a.startSQSConsumer(rootCtx)
 	if a.logger != nil {
 		a.logger.Info("profile renamed", "old", oldName, "new", newName)
@@ -959,32 +981,27 @@ func (a *appState) switchProfileTo(ctx, rootCtx context.Context, name string) (a
 		return api.ProfileRuntime{}, err
 	}
 
-	newStore, err := storage.NewS3Storage(ctx, storage.S3Config{
-		Endpoint:           cfg.S3.Endpoint,
-		UsePathStyle:       cfg.S3.UsePathStyle,
-		Region:             cfg.S3.Region,
-		Bucket:             cfg.S3.Bucket,
-		AccessKeyID:        cfg.S3.AccessKeyID,
-		SecretAccessKey:    cfg.S3.SecretAccessKey,
-		StorageClass:       cfg.S3.StorageClass,
-		MultipartThreshold: cfg.S3.MultipartThreshold,
-		ResumeThreshold:    cfg.S3.ResumeThreshold,
-		PartSize:           cfg.S3.PartSize,
-	})
+	newStore, err := openConfiguredStorage(ctx, cfg)
 	if err != nil {
 		return api.ProfileRuntime{}, fmt.Errorf("init storage: %w", err)
 	}
 	dbPath := filepath.Join(dir, "index.db")
-	_ = refreshDBFromS3(ctx, newStore, cfg.S3.KeyPrefix, dbPath)
+	if newStore != nil {
+		_ = refreshDBFromS3(ctx, newStore, cfg.S3.KeyPrefix, dbPath)
+	}
 	newDB, err := db.Open(ctx, dbPath)
 	if err != nil {
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		return api.ProfileRuntime{}, fmt.Errorf("open db %s: %w", dbPath, err)
 	}
 	newSrc, err := source.FromConfig(cfg.Source)
 	if err != nil {
 		newDB.Close()
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		return api.ProfileRuntime{}, fmt.Errorf("open source: %w", err)
 	}
 
@@ -992,7 +1009,9 @@ func (a *appState) switchProfileTo(ctx, rootCtx context.Context, name string) (a
 	if err := config.SaveCentral(a.cfgPath, central); err != nil {
 		newSrc.Close()
 		newDB.Close()
-		newStore.Close()
+		if newStore != nil {
+			newStore.Close()
+		}
 		return api.ProfileRuntime{}, fmt.Errorf("save central config: %w", err)
 	}
 
@@ -1038,9 +1057,15 @@ func (a *appState) switchProfileTo(ctx, rootCtx context.Context, name string) (a
 			}
 		}
 	}
-	_ = oldSrc.Close()
-	_ = oldStore.Close()
-	_ = oldDB.Close()
+	if oldSrc != nil {
+		_ = oldSrc.Close()
+	}
+	if oldStore != nil {
+		_ = oldStore.Close()
+	}
+	if oldDB != nil {
+		_ = oldDB.Close()
+	}
 
 	a.startSQSConsumer(rootCtx)
 	if a.logger != nil {

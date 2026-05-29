@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wlczak/aws-backup/internal/config"
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
 )
 
@@ -262,5 +263,104 @@ func TestEnsureProfileLayoutMigratesLegacyConfigAndIndex(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "index.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy index still exists or stat failed: %v", err)
+	}
+}
+
+func TestCreateProfileCloneClearsBucketAndQueueURL(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	active := config.Default()
+	active.S3.Bucket = "prod-bucket"
+	active.SQS.QueueURL = "https://sqs.us-east-1.amazonaws.com/123/prod"
+
+	a := &appState{
+		cfgPath: cfgPath,
+		cfg:     active,
+	}
+
+	info, err := a.createProfile(ctx, "photos", true)
+	if err != nil {
+		t.Fatalf("createProfile: %v", err)
+	}
+	if info.Bucket != "" {
+		t.Fatalf("returned bucket = %q, want empty", info.Bucket)
+	}
+
+	profilePath, err := config.ProfilePath(cfgPath, "photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prof, err := config.LoadProfile(profilePath)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	if prof.S3.Bucket != "" {
+		t.Fatalf("bucket = %q, want empty", prof.S3.Bucket)
+	}
+	if prof.SQS.QueueURL != "" {
+		t.Fatalf("queue_url = %q, want empty", prof.SQS.QueueURL)
+	}
+	if prof.S3.Region != active.S3.Region {
+		t.Fatalf("region = %q, want cloned %q", prof.S3.Region, active.S3.Region)
+	}
+}
+
+func TestSwitchProfileAllowsUnconfiguredS3(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	sourceDir := t.TempDir()
+
+	central := config.DefaultCentral()
+	if err := config.SaveCentral(cfgPath, central); err != nil {
+		t.Fatal(err)
+	}
+	prof := config.DefaultProfile()
+	prof.Source.LocalDir.Root = sourceDir
+	prof.S3.Bucket = ""
+	prof.S3.Region = ""
+	prof.S3.StorageClass = ""
+	profilePath, err := config.ProfilePath(cfgPath, "photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveProfile(profilePath, prof); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSrc, err := source.NewLocalDir(sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &appState{
+		cfgPath: cfgPath,
+		cfg:     config.Default(),
+		profile: "default",
+		db:      oldDB,
+		src:     oldSrc,
+	}
+
+	rt, err := a.switchProfileTo(ctx, ctx, "photos")
+	if err != nil {
+		t.Fatalf("switchProfileTo: %v", err)
+	}
+	t.Cleanup(func() { a.close() })
+	if rt.Info.Name != "photos" || rt.Info.Bucket != "" {
+		t.Fatalf("runtime info = %+v", rt.Info)
+	}
+	if a.store != nil {
+		t.Fatal("store should be nil when S3 bucket is not configured")
+	}
+	gotCentral, err := config.LoadCentral(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCentral.ActiveProfile != "photos" {
+		t.Fatalf("active profile = %q, want photos", gotCentral.ActiveProfile)
 	}
 }

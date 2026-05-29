@@ -2,7 +2,7 @@
 
 The orchestrator lives in `internal/engine/engine.go`. A "run" is a single `Engine.RunWithID(ctx, runID)` invocation that scans, reconciles, and uploads.
 
-Runs execute against the currently active profile. The active profile determines the source, S3 bucket/prefix, scheduler, SQS settings, and `profiles/<name>/index.db`; profile switching is rejected while any backup/download job or pending settings apply is active.
+Runs execute against the currently active profile. The active profile determines the source, optional S3 bucket/prefix, scheduler, SQS settings, and `profiles/<name>/index.db`; profile switching is rejected while any backup/download job or pending settings apply is active. Profiles with no `s3.bucket` can be activated for setup and scan-only work, but upload/cloud/restore actions are rejected until storage is configured.
 
 ## Lifecycle (`engine.RunWithID`)
 

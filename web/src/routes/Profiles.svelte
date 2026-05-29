@@ -120,7 +120,7 @@
 <section class="card create">
   <div>
     <h2>Create profile</h2>
-    <p class="muted">New profiles clone the active profile. Switch to the new profile, then edit its source and bucket in Settings.</p>
+    <p class="muted">New profiles clone the active profile but leave bucket and SQS queue URL blank. Switch to the new profile, then finish Settings.</p>
   </div>
   <div class="create-row">
     <input

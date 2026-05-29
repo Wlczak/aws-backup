@@ -22,7 +22,7 @@ Central `config.json` owns shared process settings:
 }
 ```
 
-Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to exactly one bucket and one local SQLite index. Existing single-profile installs are migrated on startup by moving the old runtime config/index into `profiles/default/` and writing the central config at the old `config.json` path.
+Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to at most one bucket and one local SQLite index. Existing single-profile installs are migrated on startup by moving the old runtime config/index into `profiles/default/` and writing the central config at the old `config.json` path. Creating a new profile with `clone_active` copies operational defaults from the active profile but clears `s3.bucket` and `sqs.queue_url`, so the new profile cannot accidentally reuse the active bucket or restore queue. An empty `s3.bucket` means S3 is not configured yet; the profile can still be active, but backup upload, cloud sync, restore, download, inventory, and S3 test actions reject until a bucket is set.
 
 ## Effective Settings Schema (`GET /api/settings`)
 

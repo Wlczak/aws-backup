@@ -95,6 +95,11 @@ func (s *Server) handleTestStorage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
+	if cfg.S3.Bucket == "" {
+		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "s3 bucket is not configured"})
+		return
+	}
+
 	client, err := storage.NewS3Storage(ctx, storage.S3Config{
 		Endpoint:        cfg.S3.Endpoint,
 		UsePathStyle:    cfg.S3.UsePathStyle,
