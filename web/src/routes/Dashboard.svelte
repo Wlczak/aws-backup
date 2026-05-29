@@ -13,6 +13,7 @@
   let scanNew = $state(0);
   let scanChanged = $state(0);
   let scanActive = $state(false);
+  let scanPaused = $state(false);
   // `total` is authoritative from the `upload_plan` SSE event; the other
   // counters are derived from `itemProgress` so an SSE replay or
   // reconnect can't double-count them. (#199)
@@ -162,6 +163,7 @@
       // upward — the SSE path may have a fresher value already.
       const live = status?.current?.files_scanned ?? 0;
       if (live > scanSeen) scanSeen = live;
+      scanPaused = status?.current?.scan_paused ?? false;
       // Seed completed-uploads from the run row so a reload mid-run
       // recovers the progress count instead of starting at 0.
       const liveUp = status?.current?.files_uploaded ?? 0;
@@ -211,16 +213,19 @@
           scanNew = 0;
           scanChanged = 0;
           scanActive = true;
+          scanPaused = false;
           break;
         case 'scan_progress':
           scanSeen = event.data.seen;
           scanNew = event.data.new;
           scanChanged = event.data.changed;
           scanActive = true;
+          scanPaused = false;
           break;
         case 'scan_complete':
           scanSeen = event.data.seen;
           scanActive = false;
+          scanPaused = !!event.data.paused;
           break;
         case 'upload_plan':
           uploadsTotal = event.data.total_files;
@@ -290,6 +295,7 @@
           scanSeen = event.data.files_scanned;
           scanNew = 0;
           scanChanged = 0;
+          scanPaused = false;
           logLines = [];
           // Clear any leftover DB-sync card from the previous run so it
           // doesn't linger across a new triggerRun.
@@ -359,6 +365,7 @@
           {
             if (event.type === 'run_complete') {
               scanActive = false;
+              scanPaused = false;
             }
             const line = event.type === 'run_log'
               ? `[${event.data.level ?? 'log'}] ${event.data.message ?? ''}`
@@ -579,6 +586,9 @@
         <StatusBadge status={status.stop_requested ? 'stopping' : status.current.status} />
       </div>
       <div class="muted">started {relativeTime(status.current.started_at)}</div>
+      {#if scanPaused}
+        <div class="muted small">scan paused, uploading current batch</div>
+      {/if}
       <div class="run-actions" style="margin-top: 0.5rem">
         {#if status.stop_requested}
           <button class="primary" onclick={continueRun} type="button" disabled={stopping} title="Cancel the pending stop and keep uploading">

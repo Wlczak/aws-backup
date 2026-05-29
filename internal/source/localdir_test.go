@@ -35,6 +35,9 @@ func TestLocalDirWalk(t *testing.T) {
 
 	var got []string
 	err = src.Walk(context.Background(), func(e Entry) error {
+		if e.IsDir {
+			return nil
+		}
 		got = append(got, e.RelPath)
 		return nil
 	})

@@ -66,6 +66,7 @@ func newTestEngine(t *testing.T, threshold int) (*Engine, *db.DB, *source.LocalD
 		TmpDir:         tmp,
 		KeyPrefix:      "backups",
 		ScanChunkSize:  2,
+		ScanBatchBytes: 4 << 30,
 		ZipThresh:      threshold,
 		EnableZipIndex: true,
 		Emit:           col.emit,
@@ -232,6 +233,49 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	}
 	if head.StorageClass != "STANDARD" {
 		t.Errorf("index storage class=%q want STANDARD", head.StorageClass)
+	}
+}
+
+func TestEngineBatchedFullRunPausesAndResumesScanning(t *testing.T) {
+	eng, d, _, store, root, col := newTestEngine(t, 99)
+	eng.opts.ScanBatchBytes = 15
+	ctx := context.Background()
+
+	writeFile(t, root, "keep/a.txt", strings.Repeat("a", 10))
+	writeFile(t, root, "keep/b.txt", strings.Repeat("b", 10))
+	writeFile(t, root, "rest/c.txt", strings.Repeat("c", 10))
+
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	run, _ := d.GetRun(ctx, runID)
+	if run.Status != db.RunCompleted {
+		t.Fatalf("status=%q want completed", run.Status)
+	}
+	if run.FilesScanned != 3 {
+		t.Fatalf("files_scanned=%d want 3", run.FilesScanned)
+	}
+	if run.FilesUploaded != 3 {
+		t.Fatalf("files_uploaded=%d want 3", run.FilesUploaded)
+	}
+	if run.ScanPaused || !run.ScanComplete {
+		t.Fatalf("scan state = paused=%v complete=%v", run.ScanPaused, run.ScanComplete)
+	}
+	if got := len(store.Keys()); got != 3 {
+		t.Fatalf("stored keys=%d want 3", got)
+	}
+
+	scans := col.byType(EventScanComplete)
+	if len(scans) < 2 {
+		t.Fatalf("scan complete events=%d want at least 2", len(scans))
+	}
+	if paused, ok := scans[0].Data["paused"].(bool); !ok || !paused {
+		t.Fatalf("first scan_complete paused=%v want true", scans[0].Data["paused"])
+	}
+	if paused, ok := scans[len(scans)-1].Data["paused"].(bool); !ok || paused {
+		t.Fatalf("last scan_complete paused=%v want false", scans[len(scans)-1].Data["paused"])
 	}
 }
 

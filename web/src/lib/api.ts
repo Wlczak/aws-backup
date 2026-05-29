@@ -20,6 +20,7 @@ export interface ScanCompletePayload {
   changed: number;
   unchanged: number;
   missing: number;
+  paused?: boolean;
 }
 
 export interface UploadPlanPayload {
@@ -334,6 +335,8 @@ export interface Run {
   files_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
+  scan_paused?: boolean;
+  scan_complete?: boolean;
   error_message?: string;
 }
 
@@ -622,6 +625,7 @@ export interface S3Config {
 }
 export interface BackupConfig {
   chunk_size: number;
+  scan_batch_bytes: number;
   tmp_dir: string;
   download_dir: string;
   schedule: string;
@@ -981,7 +985,7 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
       const unchanged = readNumber(data.unchanged);
       const missing = readNumber(data.missing);
       if (seen === null || next === null || changed === null || unchanged === null || missing === null) return null;
-      return { type, data: { seen, new: next, changed, unchanged, missing } };
+      return { type, data: { seen, new: next, changed, unchanged, missing, paused: readOptionalBoolean(data.paused) } };
     }
     case 'upload_plan': {
       const total_files = readNumber(data.total_files);

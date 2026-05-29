@@ -21,6 +21,15 @@
       <input type="number" min="1" bind:value={cfg.backup.chunk_size} />
     </label>
     <label>
+      <span>Scan batch limit (bytes, soft cap)</span>
+      <input type="number" min="1" bind:value={cfg.backup.scan_batch_bytes} />
+    </label>
+  </div>
+  <p class="muted">
+    The scan stops after it crosses this byte budget, but only after finishing the current folder subtree. Uploads run between scan batches.
+  </p>
+  <div class="row-2">
+    <label>
       <span>Zip threshold (files per dir before zipping)</span>
       <input type="number" min="0" bind:value={cfg.backup.zip_threshold} />
     </label>

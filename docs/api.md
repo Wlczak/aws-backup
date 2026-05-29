@@ -11,7 +11,7 @@ POST   /api/auth/login              {password: "..."} → sets the auth cookie o
 POST   /api/auth/logout             clears the auth cookie
 
 # Run lifecycle
-GET    /api/status                    current + last run, download mirror snapshot, restore-download current + last, stop_requested flag
+GET    /api/status                    current + last run (includes scan_paused / scan_complete), download mirror snapshot, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
 GET    /api/runs/{id}                 detail + logs
 POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}

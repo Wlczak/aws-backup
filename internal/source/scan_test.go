@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,9 +33,12 @@ func TestScanNewChangedMissing(t *testing.T) {
 	d := openDB(t)
 
 	// First scan: 2 new files.
-	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("first scan batch unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 2 || s.New != 2 || s.Changed != 0 || s.Missing != 0 {
 		t.Errorf("first scan: %+v", s)
@@ -61,9 +65,12 @@ func TestScanNewChangedMissing(t *testing.T) {
 	// Sleep so scanStart is strictly after the last upload's last_seen_at.
 	time.Sleep(10 * time.Millisecond)
 
-	s, err = Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err = Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("rescan batch unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 2 {
 		t.Errorf("seen=%d want 2", s.Seen)
@@ -103,16 +110,19 @@ func TestScanRevivesMissingRowToPending(t *testing.T) {
 	defer src.Close()
 	d := openDB(t)
 
-	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err != nil {
+	if _, _, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.MarkMissingByPaths(ctx, []string{"return.txt"}); err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
 
-	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("rescan batch unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 1 || s.Missing != 0 {
 		t.Fatalf("rescan stats: %+v", s)
@@ -141,11 +151,14 @@ func TestScanProgressCallback(t *testing.T) {
 	d := openDB(t)
 
 	var samples []ScanProgress
-	s, err := Scan(ctx, src, d, nil, nil, func(p ScanProgress) {
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, func(p ScanProgress) {
 		samples = append(samples, p)
-	}, 10)
+	}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("progress scan unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != n {
 		t.Fatalf("seen=%d want %d", s.Seen, n)
@@ -173,7 +186,7 @@ func TestScanContextCancel(t *testing.T) {
 	d := openDB(t)
 
 	cancel() // cancel before scan runs
-	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err == nil {
+	if _, _, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0); err == nil {
 		t.Fatal("expected cancel error")
 	}
 }
@@ -212,9 +225,12 @@ func TestScanFlushesByBatchSize(t *testing.T) {
 	defer src.Close()
 	spy := &scanSpy{}
 
-	s, err := Scan(ctx, src, spy, nil, nil, nil, 2)
+	s, batch, err := Scan(ctx, src, spy, nil, nil, nil, nil, 2, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("batch-size test unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 5 || s.New != 5 {
 		t.Fatalf("scan stats: %+v", s)
@@ -233,5 +249,55 @@ func TestScanFlushesByBatchSize(t *testing.T) {
 	}
 	if got := len(spy.batches[2]); got != 1 {
 		t.Fatalf("third batch size=%d want 1", got)
+	}
+}
+
+func TestScanPausesOnBatchBytesAndSkipsCompletedFolders(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "keep", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "rest", "c.txt"), strings.Repeat("c", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Paused {
+		t.Fatalf("expected first batch to pause, got %+v", batch)
+	}
+	if len(batch.CompletedFolders) == 0 {
+		t.Fatal("expected at least one completed folder in first batch")
+	}
+	if s.Seen != 2 {
+		t.Fatalf("seen=%d want 2", s.Seen)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files=%d want 2", len(files))
+	}
+
+	// The second scan should skip the completed folder and only visit the
+	// remaining subtree.
+	skip := make(map[string]struct{}, len(batch.CompletedFolders))
+	for _, p := range batch.CompletedFolders {
+		skip[p] = struct{}{}
+	}
+	s2, batch2, err := Scan(ctx, src, d, nil, skip, nil, nil, 10, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch2.Paused {
+		t.Fatalf("second batch unexpectedly paused: %+v", batch2)
+	}
+	if s2.Seen != 1 {
+		t.Fatalf("second batch seen=%d want 1", s2.Seen)
 	}
 }

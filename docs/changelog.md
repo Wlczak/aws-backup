@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #141 | — | Full backup runs now alternate scan batches and uploads on a soft `backup.scan_batch_bytes` budget, persist run-scoped completed folders, and skip already-completed folders on subsequent scan batches |
 | — | — | Added cookie auth with a central-config bcrypt hash, public `/api/auth/*` endpoints, and `./aws-backup passwd` bootstrap for first-time setup |
 | #195 / #196 | — | Restore-trigger and inventory-sync now run as background jobs with `restore_job_id` / `/api/status` recovery, plus `restore_manifest_*` SSE for inventory manifest fetch/parse |
 | — | — | Added a tag-triggered GitHub release workflow that builds the embedded web bundle once, cross-compiles `aws-backup` for Linux/Windows/macOS, and uploads the binaries plus `SHA256SUMS` to the release |

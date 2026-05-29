@@ -13,13 +13,14 @@ import (
 // can still run `go test ./...` green.
 //
 // Env vars:
-//   AWS_BACKUP_TEST_SMB_HOST       (required to not skip)
-//   AWS_BACKUP_TEST_SMB_PORT       (default 445)
-//   AWS_BACKUP_TEST_SMB_USER
-//   AWS_BACKUP_TEST_SMB_PASS
-//   AWS_BACKUP_TEST_SMB_DOMAIN
-//   AWS_BACKUP_TEST_SMB_SHARE      (required to not skip)
-//   AWS_BACKUP_TEST_SMB_PATH       (optional sub-path, may be empty)
+//
+//	AWS_BACKUP_TEST_SMB_HOST       (required to not skip)
+//	AWS_BACKUP_TEST_SMB_PORT       (default 445)
+//	AWS_BACKUP_TEST_SMB_USER
+//	AWS_BACKUP_TEST_SMB_PASS
+//	AWS_BACKUP_TEST_SMB_DOMAIN
+//	AWS_BACKUP_TEST_SMB_SHARE      (required to not skip)
+//	AWS_BACKUP_TEST_SMB_PATH       (optional sub-path, may be empty)
 func TestSMBIntegration(t *testing.T) {
 	host := os.Getenv("AWS_BACKUP_TEST_SMB_HOST")
 	share := os.Getenv("AWS_BACKUP_TEST_SMB_SHARE")
@@ -50,6 +51,9 @@ func TestSMBIntegration(t *testing.T) {
 
 	count := 0
 	err = src.Walk(context.Background(), func(e Entry) error {
+		if e.IsDir {
+			return nil
+		}
 		count++
 		if count == 1 {
 			rc, err := src.Open(context.Background(), e.RelPath)

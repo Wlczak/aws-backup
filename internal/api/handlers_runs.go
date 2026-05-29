@@ -32,6 +32,8 @@ type runSummary struct {
 	FilesScanned  int64     `json:"files_scanned"`
 	FilesUploaded int64     `json:"files_uploaded"`
 	BytesUploaded int64     `json:"bytes_uploaded"`
+	ScanPaused    bool      `json:"scan_paused"`
+	ScanComplete  bool      `json:"scan_complete"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
 }
 
@@ -44,6 +46,8 @@ func toSummary(r db.Run) runSummary {
 		FilesScanned:  r.FilesScanned,
 		FilesUploaded: r.FilesUploaded,
 		BytesUploaded: r.BytesUploaded,
+		ScanPaused:    r.ScanPaused,
+		ScanComplete:  r.ScanComplete,
 		ErrorMessage:  r.ErrorMessage,
 	}
 }

@@ -65,6 +65,29 @@ func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
+		rel, rerr := filepath.Rel(l.root, path)
+		if rerr != nil {
+			slog.Warn("localdir walk: rel failed, skipping", "path", path, "err", rerr)
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			rel = ""
+		}
+		if !isValidRelPath(rel) {
+			slog.Warn("localdir walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
+			return nil
+		}
+		if d.IsDir() {
+			if rel == "" {
+				return nil
+			}
+			err = fn(Entry{RelPath: rel, IsDir: true})
+			if errors.Is(err, ErrSkipDir) {
+				return fs.SkipDir
+			}
+			return err
+		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
@@ -73,18 +96,9 @@ func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 			slog.Warn("localdir walk: stat failed, skipping", "path", path, "err", ierr)
 			return nil
 		}
-		rel, rerr := filepath.Rel(l.root, path)
-		if rerr != nil {
-			slog.Warn("localdir walk: rel failed, skipping", "path", path, "err", rerr)
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if !isValidRelPath(rel) {
-			slog.Warn("localdir walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
-			return nil
-		}
 		return fn(Entry{
 			RelPath: rel,
+			IsDir:   false,
 			Size:    info.Size(),
 			ModTime: info.ModTime().UTC(),
 		})

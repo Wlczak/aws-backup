@@ -120,16 +120,17 @@ func newTestServer(t *testing.T) (*testServer, Deps) {
 		Storage:    func() storage.Storage { return store },
 		BuildEngine: func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 			return engine.New(engine.Options{
-				DB:            d,
-				Source:        src,
-				Storage:       store,
-				TmpDir:        filepath.Join(dir, "tmp"),
-				KeyPrefix:     "backups",
-				ScanChunkSize: 2,
-				ZipThresh:     100,
-				Mode:          mode,
-				ScanPaths:     scanPaths,
-				Emit:          bus.Publish,
+				DB:             d,
+				Source:         src,
+				Storage:        store,
+				TmpDir:         filepath.Join(dir, "tmp"),
+				KeyPrefix:      "backups",
+				ScanChunkSize:  2,
+				ScanBatchBytes: 4 << 30,
+				ZipThresh:      100,
+				Mode:           mode,
+				ScanPaths:      scanPaths,
+				Emit:           bus.Publish,
 			}), nil
 		},
 	}
