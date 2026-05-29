@@ -148,6 +148,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #274 | e438112 | `Validate` URL-parses `s3.endpoint` / `sqs.queue_url`, requires http/https + non-empty host, and rejects IMDS-class hosts to block credential exfiltration / metadata SSRF |
 | #273 | c905d34 | `originGuard` chi middleware on `/api` rejects mismatched-Origin requests so a hostile page can't read /api/events on a loopback dev server |
 | #272 | 4325aef | `securityHeaders` middleware sets nosniff, frame-ancestors 'none', no-referrer, and a self+inline CSP on every response |
+| #77 | — | Dashboard / restore / download SSE handlers now consume typed event objects from `subscribeEvents` and ignore malformed payloads instead of reading `data as any` |
 | #99 | — | `backup.chunk_size` now drives scan upsert batching in `source.Scan`; the upload path no longer pretends to batch individual-file staging, so the knob once again matches the documented scan behavior |
 | #265 | 81bdbb2 | `MarkRestoreInProgress` predicate uses `COALESCE(restore_status,'') != 'restored'` so legacy NULL rows participate |
 | #266 | b072465 | Modified-file branch of `UpsertFile`/`UpsertFileBatch` resets `restore_status` + `restore_expires_at` so a re-uploaded file doesn't carry the prior Glacier-restore lifecycle |

@@ -200,175 +200,172 @@
 
   onMount(() => {
     refresh().then(() => scheduleNextPoll());
-    es = subscribeEvents((type, data) => {
-      const d = data as any;
-      const payload = d?.data ?? {};
-      if (type === 'scan_start') {
-        // Flip the indicator on. Don't reset scanSeen here — run_start
-        // already reset it for a fresh run (live: undefined → 0; replay:
-        // seeded from files_scanned), and resetting here just flashes
-        // 0 even when the SSE event arrived microseconds after a
-        // refresh() that already populated it from the run row.
-        scanNew = 0;
-        scanChanged = 0;
-        scanActive = true;
-      }
-      if (type === 'scan_progress') {
-        scanSeen = payload.seen ?? scanSeen;
-        scanNew = payload.new ?? scanNew;
-        scanChanged = payload.changed ?? scanChanged;
-        scanActive = true;
-      }
-      if (type === 'scan_complete') {
-        scanSeen = payload.seen ?? 0;
-        scanActive = false;
-      }
-      if (type === 'upload_plan') uploadsTotal = payload.total_files ?? 0;
-      if (type === 'copy_progress' && payload.key) {
-        upsertItem(payload.key, {
-          bytesUploaded: payload.bytes_copied ?? 0,
-          size: payload.size ?? 0,
-          percent: payload.percent ?? 0,
-          status: 'active',
-          phase: 'copy',
-        });
-      }
-      if (type === 'upload_start') {
-        if (payload.key) {
+    es = subscribeEvents((event) => {
+      switch (event.type) {
+        case 'scan_start':
+          // Flip the indicator on. Don't reset scanSeen here — run_start
+          // already reset it for a fresh run (live: undefined → 0; replay:
+          // seeded from files_scanned), and resetting here just flashes
+          // 0 even when the SSE event arrived microseconds after a
+          // refresh() that already populated it from the run row.
+          scanNew = 0;
+          scanChanged = 0;
+          scanActive = true;
+          break;
+        case 'scan_progress':
+          scanSeen = event.data.seen;
+          scanNew = event.data.new;
+          scanChanged = event.data.changed;
+          scanActive = true;
+          break;
+        case 'scan_complete':
+          scanSeen = event.data.seen;
+          scanActive = false;
+          break;
+        case 'upload_plan':
+          uploadsTotal = event.data.total_files;
+          break;
+        case 'copy_progress':
+          upsertItem(event.data.key, {
+            bytesUploaded: event.data.bytes_copied,
+            size: event.data.size,
+            percent: event.data.percent,
+            status: 'active',
+            phase: 'copy',
+          });
+          break;
+        case 'upload_start':
           // Reset bar to 0 on phase switch — the upload size differs from
           // the copy size for zips (compression) so we can't carry over.
-          upsertItem(payload.key, {
+          upsertItem(event.data.key, {
             bytesUploaded: 0,
-            size: payload.size ?? 0,
+            size: event.data.size,
             percent: 0,
             status: 'active',
             phase: 'upload',
-            files: payload.files ?? 1,
+            files: event.data.files ?? 1,
             error: undefined,
           });
-        }
-      }
-      if (type === 'upload_progress' && payload.key) {
-        upsertItem(payload.key, {
-          bytesUploaded: payload.bytes_uploaded ?? 0,
-          size: payload.size ?? 0,
-          percent: payload.percent ?? 0,
-          status: 'active',
-          phase: 'upload',
-        });
-      }
-      if (type === 'upload_complete') {
-        if (payload.key) {
-          upsertItem(payload.key, {
-            bytesUploaded: payload.size ?? itemProgress[payload.key]?.size ?? 0,
-            size: payload.size ?? itemProgress[payload.key]?.size ?? 0,
+          break;
+        case 'upload_progress':
+          upsertItem(event.data.key, {
+            bytesUploaded: event.data.bytes_uploaded,
+            size: event.data.size,
+            percent: event.data.percent,
+            status: 'active',
+            phase: 'upload',
+          });
+          break;
+        case 'upload_complete':
+          upsertItem(event.data.key, {
+            bytesUploaded: event.data.size ?? itemProgress[event.data.key]?.size ?? 0,
+            size: event.data.size ?? itemProgress[event.data.key]?.size ?? 0,
             percent: 100,
             status: 'done',
             phase: 'upload',
-            files: payload.files ?? itemProgress[payload.key]?.files ?? 1,
+            files: event.data.files ?? itemProgress[event.data.key]?.files ?? 1,
           });
-        }
-      }
-      if (type === 'upload_failed' && payload.key) {
-        upsertItem(payload.key, {
-          status: 'failed',
-          error: payload.error ?? '',
-        });
-      }
-      if (type === 'run_start') {
-        itemProgress = {};
-        uploadsTotal = 0;
-        // run_start also fires on SSE reconnect with files_uploaded
-        // populated from the DB, so a mid-run reconnect keeps the
-        // count; a brand-new run sends 0 and resets the bar.
-        seededFilesUploaded = payload.files_uploaded ?? 0;
-        // Don't toggle scanActive here — run_start fires both for live
-        // run starts AND on every SSE reconnect (replay), and a
-        // post-scan reconnect would otherwise stick the "Scanning…"
-        // indicator on with no follow-up scan_complete to clear it.
-        // The dedicated scan_start event drives that toggle now.
-        // Seed scanSeen from the run row (replayed run_start carries
-        // files_scanned from the DB so a mid-run reconnect doesn't show
-        // 0 until the next scan_progress tick).
-        scanSeen = payload.files_scanned ?? 0;
-        scanNew = 0;
-        scanChanged = 0;
-        logLines = [];
-        // Clear any leftover DB-sync card from the previous run so it
-        // doesn't linger across a new triggerRun.
-        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
-        dbSync = null;
-      }
-      if (type === 'db_sync_start') {
-        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
-        dbSync = {
-          reason: payload.reason ?? 'complete',
-          bytes: 0,
-          total: payload.size ?? 0,
-          percent: 0,
-          status: 'active',
-        };
-      }
-      if (type === 'db_sync_progress' && dbSync) {
-        dbSync = {
-          ...dbSync,
-          reason: payload.reason ?? dbSync.reason,
-          bytes: payload.bytes ?? dbSync.bytes,
-          total: payload.total ?? dbSync.total,
-          percent: payload.percent ?? dbSync.percent,
-          status: 'active',
-        };
-      }
-      if (type === 'db_sync_complete') {
-        dbSync = {
-          reason: payload.reason ?? dbSync?.reason ?? 'complete',
-          bytes: payload.size ?? dbSync?.total ?? 0,
-          total: payload.size ?? dbSync?.total ?? 0,
-          percent: 100,
-          status: 'done',
-        };
-        // Auto-hide the success badge so an idle dashboard doesn't keep
-        // stale "Index DB → S3 done" state forever.
-        if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
-        dbSyncHideTimer = window.setTimeout(() => { dbSync = null; }, 8000);
-      }
-      if (type === 'db_sync_failed') {
-        // Cancel any pending auto-hide from a recent `db_sync_complete`
-        // so it doesn't wipe the failure banner 8s later. (#205)
-        if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
-        dbSync = {
-          reason: payload.reason ?? dbSync?.reason ?? 'complete',
-          bytes: dbSync?.bytes ?? 0,
-          total: dbSync?.total ?? 0,
-          percent: dbSync?.percent ?? 0,
-          status: 'failed',
-          error: payload.error ?? '',
-        };
-      }
-      if (type === 'run_complete') scanActive = false;
-      // Skip high-frequency progress events: they fire continuously per
-      // upload thread and would otherwise allocate + re-render the log
-      // hundreds of times per second, evicting the run_log lines users
-      // actually want to read. The progress bar/items list already
-      // surfaces that data. (#263)
-      if (
-        type === 'run_log' ||
-        type === 'run_start' ||
-        type === 'run_complete' ||
-        type === 'run_failed' ||
-        type === 'run_cancelled' ||
-        type === 'run_stopped'
-      ) {
-        const line = type === 'run_log'
-          ? `[${payload.level ?? 'log'}] ${payload.message ?? ''}`
-          : `[${type}] ${JSON.stringify(d.data ?? d)}`;
-        logLines = [...logLines.slice(-49), line];
-      }
-      if (type === 'run_complete' || type === 'run_start') {
-        // Reset the poll cadence so an idle 30s timer doesn't keep ticking
-        // after a run starts (and vice versa after it ends). (#70)
-        if (pollTimer) clearTimeout(pollTimer);
-        refresh().then(() => scheduleNextPoll());
+          break;
+        case 'upload_failed':
+          upsertItem(event.data.key, {
+            status: 'failed',
+            error: event.data.error,
+          });
+          break;
+        case 'run_start':
+          itemProgress = {};
+          uploadsTotal = 0;
+          // run_start also fires on SSE reconnect with files_uploaded
+          // populated from the DB, so a mid-run reconnect keeps the
+          // count; a brand-new run sends 0 and resets the bar.
+          seededFilesUploaded = event.data.files_uploaded;
+          // Don't toggle scanActive here — run_start fires both for live
+          // run starts AND on every SSE reconnect (replay), and a
+          // post-scan reconnect would otherwise stick the "Scanning…"
+          // indicator on with no follow-up scan_complete to clear it.
+          // The dedicated scan_start event drives that toggle now.
+          // Seed scanSeen from the run row (replayed run_start carries
+          // files_scanned from the DB so a mid-run reconnect doesn't show
+          // 0 until the next scan_progress tick).
+          scanSeen = event.data.files_scanned;
+          scanNew = 0;
+          scanChanged = 0;
+          logLines = [];
+          // Clear any leftover DB-sync card from the previous run so it
+          // doesn't linger across a new triggerRun.
+          if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
+          dbSync = null;
+          logLines = [...logLines.slice(-49), `[run_start] ${JSON.stringify(event.data)}`];
+          // Reset the poll cadence so an idle 30s timer doesn't keep ticking
+          // after a run starts (and vice versa after it ends). (#70)
+          if (pollTimer) clearTimeout(pollTimer);
+          refresh().then(() => scheduleNextPoll());
+          break;
+        case 'db_sync_start':
+          if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
+          dbSync = {
+            reason: event.data.reason ?? 'complete',
+            bytes: 0,
+            total: event.data.size ?? 0,
+            percent: 0,
+            status: 'active',
+          };
+          break;
+        case 'db_sync_progress':
+          if (dbSync) {
+            dbSync = {
+              ...dbSync,
+              reason: event.data.reason ?? dbSync.reason,
+              bytes: event.data.bytes ?? dbSync.bytes,
+              total: event.data.total ?? dbSync.total,
+              percent: event.data.percent ?? dbSync.percent,
+              status: 'active',
+            };
+          }
+          break;
+        case 'db_sync_complete':
+          dbSync = {
+            reason: event.data.reason ?? dbSync?.reason ?? 'complete',
+            bytes: event.data.size ?? dbSync?.total ?? 0,
+            total: event.data.size ?? dbSync?.total ?? 0,
+            percent: 100,
+            status: 'done',
+          };
+          // Auto-hide the success badge so an idle dashboard doesn't keep
+          // stale "Index DB → S3 done" state forever.
+          if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
+          dbSyncHideTimer = window.setTimeout(() => { dbSync = null; }, 8000);
+          break;
+        case 'db_sync_failed':
+          // Cancel any pending auto-hide from a recent `db_sync_complete`
+          // so it doesn't wipe the failure banner 8s later. (#205)
+          if (dbSyncHideTimer) { clearTimeout(dbSyncHideTimer); dbSyncHideTimer = undefined; }
+          dbSync = {
+            reason: event.data.reason ?? dbSync?.reason ?? 'complete',
+            bytes: dbSync?.bytes ?? 0,
+            total: dbSync?.total ?? 0,
+            percent: dbSync?.percent ?? 0,
+            status: 'failed',
+            error: event.data.error ?? '',
+          };
+          break;
+        case 'run_log':
+        case 'run_complete':
+          // Skip high-frequency progress events: they fire continuously per
+          // upload thread and would otherwise allocate + re-render the log
+          // hundreds of times per second, evicting the run_log lines users
+          // actually want to read. The progress bar/items list already
+          // surfaces that data. (#263)
+          {
+            if (event.type === 'run_complete') {
+              scanActive = false;
+            }
+            const line = event.type === 'run_log'
+              ? `[${event.data.level ?? 'log'}] ${event.data.message ?? ''}`
+              : `[${event.type}] ${JSON.stringify(event.data)}`;
+            logLines = [...logLines.slice(-49), line];
+          }
+          break;
       }
     });
   });

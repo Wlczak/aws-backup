@@ -89,41 +89,43 @@
     restoreStatusTimer = setInterval(() => {
       void loadRestoreStatus();
     }, 2500);
-    const sub = subscribeEvents((type, data) => {
-      if (type === 'restore_manifest_start' || type === 'restore_manifest_progress' || type === 'restore_manifest_complete') {
-        const d = data as { stage?: string; processed?: number; total?: number; manifest_key?: string };
-        inventoryManifestProgress = {
-          stage: d.stage ?? 'manifest',
-          processed: d.processed ?? 0,
-          total: d.total ?? 0,
-          manifest_key: d.manifest_key,
-        };
-      } else if (type === 'restore_manifest_failed') {
-        inventoryManifestProgress = null;
-      } else if (type === 'restore_request_start' || type === 'restore_request_progress' || type === 'restore_request_complete') {
-        const d = data as { processed?: number; total?: number };
-        triggerProgress = {
-          processed: d.processed ?? (type === 'restore_request_start' ? 0 : triggerProgress?.processed ?? 0),
-          total: d.total ?? triggerProgress?.total ?? 0,
-        };
-      } else if (type === 'restore_request_failed') {
-        triggerProgress = null;
-      }
-      if (type === 'restore_scan_progress') {
-        const d = data as { scanned: number; total: number; mode: string };
-        scanProgress = { scanned: d.scanned, total: d.total, mode: d.mode };
-      } else if (type === 'restore_scan_complete') {
-        scanProgress = null;
-      } else if (type === 'restore_scan_failed') {
-        scanProgress = null;
-      } else if (type === 'restore_request_start') {
-        const d = data as { total: number };
-        triggerProgress = { processed: 0, total: d.total };
-      } else if (type === 'restore_request_progress') {
-        const d = data as { processed: number; total: number };
-        triggerProgress = { processed: d.processed, total: d.total };
-      } else if (type === 'restore_request_complete' || type === 'restore_request_failed') {
-        triggerProgress = null;
+    const sub = subscribeEvents((event) => {
+      switch (event.type) {
+        case 'restore_manifest_start':
+        case 'restore_manifest_progress':
+        case 'restore_manifest_complete':
+          inventoryManifestProgress = {
+            stage: event.data.stage ?? 'manifest',
+            processed: event.data.processed ?? 0,
+            total: event.data.total ?? 0,
+            manifest_key: event.data.manifest_key,
+          };
+          break;
+        case 'restore_manifest_failed':
+          inventoryManifestProgress = null;
+          break;
+        case 'restore_request_start':
+          triggerProgress = { processed: 0, total: event.data.total };
+          break;
+        case 'restore_request_progress':
+          triggerProgress = {
+            processed: event.data.processed ?? triggerProgress?.processed ?? 0,
+            total: event.data.total ?? triggerProgress?.total ?? 0,
+          };
+          break;
+        case 'restore_request_complete':
+          triggerProgress = null;
+          break;
+        case 'restore_request_failed':
+          triggerProgress = null;
+          break;
+        case 'restore_scan_progress':
+          scanProgress = { scanned: event.data.scanned, total: event.data.total, mode: event.data.mode };
+          break;
+        case 'restore_scan_complete':
+        case 'restore_scan_failed':
+          scanProgress = null;
+          break;
       }
     });
     return () => {

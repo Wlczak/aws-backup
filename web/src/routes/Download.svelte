@@ -251,16 +251,15 @@
       clearSelection();
     }
     void refresh().then(() => scheduleNextPoll());
-    const sub = subscribeEvents((type, data) => {
-      if (type === 'restore_download_start') {
-        const d = data as { total: number; total_bytes: number };
-        downloadTotalBytes = d.total_bytes ?? 0;
+    const sub = subscribeEvents((event) => {
+      if (event.type === 'restore_download_start') {
+        downloadTotalBytes = event.data.total_bytes;
         downloadItems = {};
         downloadItemOrder = [];
         currentFile = null;
         applyDownloadProgress({
           processed: 0,
-          total: d.total,
+          total: event.data.total,
           total_bytes: downloadTotalBytes,
           files_written: 0,
           bytes_written: 0,
@@ -268,51 +267,35 @@
           status: 'active',
           errors: 0,
         });
-      } else if (type === 'restore_download_progress') {
-        const d = data as {
-          processed: number;
-          total: number;
-          total_bytes: number;
-          files_written: number;
-          bytes_written: number;
-          path?: string;
-          error?: string;
-          errors: number;
-          current_path?: string;
-          current_bytes?: number;
-          current_total_bytes?: number;
-          current_percent?: number;
-          file_status?: 'active' | 'done' | 'failed';
-        };
-        if (d.path) {
-          upsertDownloadItem(d.path, {
-            bytes: d.current_bytes ?? 0,
-            total: d.current_total_bytes ?? 0,
-            percent: d.current_percent ?? 0,
-            status: d.file_status ?? 'active',
-            error: d.error,
+      } else if (event.type === 'restore_download_progress') {
+        if (event.data.path) {
+          upsertDownloadItem(event.data.path, {
+            bytes: event.data.current_bytes ?? 0,
+            total: event.data.current_total_bytes ?? 0,
+            percent: event.data.current_percent ?? 0,
+            status: event.data.file_status ?? 'active',
+            error: event.data.error,
           });
         }
         applyDownloadProgress({
-          processed: d.processed,
-          total: d.total,
-          total_bytes: d.total_bytes ?? downloadTotalBytes,
-          files_written: d.files_written,
-          bytes_written: d.bytes_written,
+          processed: event.data.processed,
+          total: event.data.total,
+          total_bytes: event.data.total_bytes ?? downloadTotalBytes,
+          files_written: event.data.files_written,
+          bytes_written: event.data.bytes_written,
           phase: 'download',
           status: 'active',
-          path: d.path,
-          error: d.error,
-          errors: d.errors,
-          current_path: d.current_path ?? d.path,
-          current_bytes: d.current_bytes,
-          current_total_bytes: d.current_total_bytes,
-          current_percent: d.current_percent,
-          file_status: d.file_status,
+          path: event.data.path,
+          error: event.data.error,
+          errors: event.data.errors,
+          current_path: event.data.current_path ?? event.data.path,
+          current_bytes: event.data.current_bytes,
+          current_total_bytes: event.data.current_total_bytes,
+          current_percent: event.data.current_percent,
+          file_status: event.data.file_status,
         });
-      } else if (type === 'restore_download_complete') {
-        const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number };
-        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
+      } else if (event.type === 'restore_download_complete') {
+        downloadTotalBytes = event.data.total_bytes ?? downloadTotalBytes;
         const currentPath = downloadProgress?.current_path;
         const currentBytes = downloadProgress?.current_bytes;
         const currentTotalBytes = downloadProgress?.current_total_bytes;
@@ -320,12 +303,12 @@
         applyDownloadProgress({
           processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
           total: downloadProgress?.total ?? 0,
-          total_bytes: d.total_bytes ?? downloadTotalBytes,
-          files_written: d.files_written,
-          bytes_written: d.bytes_written,
+          total_bytes: event.data.total_bytes ?? downloadTotalBytes,
+          files_written: event.data.files_written,
+          bytes_written: event.data.bytes_written,
           phase: 'download',
           status: 'done',
-          errors: d.errors,
+          errors: event.data.errors,
           current_path: currentPath,
           current_bytes: currentBytes,
           current_total_bytes: currentTotalBytes,
@@ -344,18 +327,17 @@
           upsertDownloadItem(currentPath, currentFile);
         }
         downloadResult = resultFromProgress({
-          processed: downloadProgress?.processed ?? d.files_written,
-          total: downloadProgress?.total ?? d.files_written,
-          total_bytes: d.total_bytes ?? downloadTotalBytes,
-          files_written: d.files_written,
-          bytes_written: d.bytes_written,
+          processed: downloadProgress?.processed ?? event.data.files_written,
+          total: downloadProgress?.total ?? event.data.files_written,
+          total_bytes: event.data.total_bytes ?? downloadTotalBytes,
+          files_written: event.data.files_written,
+          bytes_written: event.data.bytes_written,
           phase: 'download',
           status: 'done',
-          errors: d.errors,
+          errors: event.data.errors,
         });
-      } else if (type === 'restore_download_failed') {
-        const d = data as { files_written: number; bytes_written: number; total_bytes: number; errors: number; error?: string };
-        downloadTotalBytes = d.total_bytes ?? downloadTotalBytes;
+      } else if (event.type === 'restore_download_failed') {
+        downloadTotalBytes = event.data.total_bytes ?? downloadTotalBytes;
         const currentPath = downloadProgress?.current_path;
         const currentBytes = downloadProgress?.current_bytes;
         const currentTotalBytes = downloadProgress?.current_total_bytes;
@@ -363,13 +345,13 @@
         applyDownloadProgress({
           processed: downloadProgress?.processed ?? downloadProgress?.total ?? 0,
           total: downloadProgress?.total ?? 0,
-          total_bytes: d.total_bytes ?? downloadTotalBytes,
-          files_written: d.files_written,
-          bytes_written: d.bytes_written,
+          total_bytes: event.data.total_bytes ?? downloadTotalBytes,
+          files_written: event.data.files_written,
+          bytes_written: event.data.bytes_written,
           phase: 'download',
           status: 'failed',
-          errors: d.errors,
-          error: d.error,
+          errors: event.data.errors,
+          error: event.data.error,
           current_path: currentPath,
           current_bytes: currentBytes,
           current_total_bytes: currentTotalBytes,
@@ -383,20 +365,20 @@
             total: currentTotalBytes ?? 0,
             percent: currentPercent ?? 0,
             status: 'failed',
-            error: d.error,
+            error: event.data.error,
           };
           upsertDownloadItem(currentPath, currentFile);
         }
         downloadResult = resultFromProgress({
-          processed: downloadProgress?.processed ?? d.files_written,
-          total: downloadProgress?.total ?? d.files_written,
-          total_bytes: d.total_bytes ?? downloadTotalBytes,
-          files_written: d.files_written,
-          bytes_written: d.bytes_written,
+          processed: downloadProgress?.processed ?? event.data.files_written,
+          total: downloadProgress?.total ?? event.data.files_written,
+          total_bytes: event.data.total_bytes ?? downloadTotalBytes,
+          files_written: event.data.files_written,
+          bytes_written: event.data.bytes_written,
           phase: 'download',
           status: 'failed',
-          errors: d.errors,
-          error: d.error,
+          errors: event.data.errors,
+          error: event.data.error,
         });
       }
     });

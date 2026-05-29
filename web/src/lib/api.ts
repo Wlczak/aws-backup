@@ -6,6 +6,326 @@ export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_o
 export type RestoreStatus = '' | 'in_progress' | 'restored';
 export type RestoreTier = 'bulk' | 'standard';
 
+type EmptyPayload = Record<string, never>;
+
+export interface ScanProgressPayload {
+  seen: number;
+  new: number;
+  changed: number;
+}
+
+export interface ScanCompletePayload {
+  seen: number;
+  new: number;
+  changed: number;
+  unchanged: number;
+  missing: number;
+}
+
+export interface UploadPlanPayload {
+  total_files: number;
+  total_groups: number;
+  total_bytes: number;
+}
+
+export interface CopyProgressPayload {
+  key: string;
+  size: number;
+  bytes_copied: number;
+  percent: number;
+}
+
+export interface UploadStartPayload {
+  key: string;
+  size: number;
+  files?: number;
+}
+
+export interface UploadProgressPayload {
+  key: string;
+  bytes_uploaded: number;
+  size: number;
+  percent: number;
+}
+
+export interface UploadCompletePayload {
+  key: string;
+  size: number;
+  etag?: string;
+  checksum_sha256?: string;
+  files?: number;
+  skipped?: boolean;
+}
+
+export interface UploadFailedPayload {
+  key: string;
+  error: string;
+}
+
+export interface RunStartPayload {
+  files_scanned: number;
+  files_uploaded: number;
+  bytes_uploaded: number;
+}
+
+export interface RunLogPayload {
+  level?: 'info' | 'warn' | 'error';
+  message?: string;
+}
+
+export interface RunCompletePayload {
+  status: string;
+  files_scanned: number;
+  files_uploaded: number;
+  bytes_uploaded: number;
+  error_message?: string;
+}
+
+export interface DBSyncStartPayload {
+  reason?: 'complete' | 'stop' | 'cancel';
+  size?: number;
+}
+
+export interface DBSyncProgressPayload {
+  reason?: 'complete' | 'stop' | 'cancel';
+  bytes?: number;
+  total?: number;
+  percent?: number;
+}
+
+export interface DBSyncCompletePayload {
+  reason?: 'complete' | 'stop' | 'cancel';
+  size?: number;
+}
+
+export interface DBSyncFailedPayload {
+  reason?: 'complete' | 'stop' | 'cancel';
+  error?: string;
+}
+
+export interface RestoreManifestStartPayload {
+  stage: string;
+  processed: number;
+  total: number;
+  manifest_key?: string;
+}
+
+export interface RestoreManifestProgressPayload {
+  stage: string;
+  processed: number;
+  total: number;
+  manifest_key?: string;
+  data_key?: string;
+  keys?: number;
+}
+
+export interface RestoreManifestCompletePayload {
+  stage: string;
+  processed: number;
+  total: number;
+  manifest_key?: string;
+  keys?: number;
+}
+
+export interface RestoreManifestFailedPayload {
+  stage: string;
+  error: string;
+  manifest_key?: string;
+  data_key?: string;
+}
+
+export interface RestoreScanStartPayload {
+  mode: string;
+  total: number;
+}
+
+export interface RestoreScanProgressPayload {
+  mode: string;
+  scanned: number;
+  updated: number;
+  errors: number;
+  total: number;
+}
+
+export interface RestoreScanCompletePayload {
+  mode: string;
+  scanned: number;
+  updated: number;
+  errors: number;
+}
+
+export interface RestoreScanFailedPayload {
+  mode: string;
+  error: string;
+}
+
+export interface RestoreRequestStartPayload {
+  total: number;
+}
+
+export interface RestoreRequestProgressPayload {
+  processed: number;
+  total: number;
+  keys_requested?: number;
+  keys_already_thawed?: number;
+  errors?: number;
+}
+
+export interface RestoreRequestCompletePayload {
+  total: number;
+  keys_requested: number;
+  keys_already_in_progress: number;
+  keys_already_available: number;
+  files_affected: number;
+  bytes_affected: number;
+  errors?: number;
+}
+
+export interface RestoreRequestFailedPayload {
+  error: string;
+  processed?: number;
+  total?: number;
+}
+
+export interface RestoreDownloadStartPayload {
+  total: number;
+  total_bytes: number;
+}
+
+export interface RestoreDownloadProgressPayload {
+  path: string;
+  processed: number;
+  total: number;
+  total_bytes: number;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  current_path?: string;
+  current_bytes?: number;
+  current_total_bytes?: number;
+  current_percent?: number;
+  file_status?: 'active' | 'done' | 'failed';
+  error?: string;
+}
+
+export interface RestoreDownloadCompletePayload {
+  files_written: number;
+  bytes_written: number;
+  total_bytes: number;
+  errors: number;
+}
+
+export interface RestoreDownloadFailedPayload {
+  files_written: number;
+  bytes_written: number;
+  total_bytes: number;
+  errors: number;
+  error?: string;
+}
+
+export interface DownloadMirrorScanStartPayload {
+  total: number;
+  download_after: boolean;
+}
+
+export interface DownloadMirrorScanProgressPayload {
+  scanned: number;
+  present: number;
+  missing: number;
+  total: number;
+  download_after: boolean;
+}
+
+export interface DownloadMirrorScanCompletePayload {
+  scanned: number;
+  present: number;
+  missing: number;
+  total: number;
+  download_after: boolean;
+}
+
+export interface DownloadMirrorScanFailedPayload {
+  error: string;
+  download_after: boolean;
+}
+
+export interface DownloadMirrorStartPayload {
+  total: number;
+}
+
+export interface DownloadMirrorProgressPayload {
+  processed: number;
+  total: number;
+  path?: string;
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error?: string;
+}
+
+export interface DownloadMirrorCompletePayload {
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+}
+
+export interface DownloadMirrorFailedPayload {
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error?: string;
+}
+
+export interface DownloadMirrorCancelledPayload {
+  files_written: number;
+  bytes_written: number;
+  errors: number;
+  error?: string;
+}
+
+export type SseEvent =
+  | { type: 'scan_start'; data: EmptyPayload }
+  | { type: 'scan_progress'; data: ScanProgressPayload }
+  | { type: 'scan_complete'; data: ScanCompletePayload }
+  | { type: 'upload_plan'; data: UploadPlanPayload }
+  | { type: 'copy_progress'; data: CopyProgressPayload }
+  | { type: 'upload_start'; data: UploadStartPayload }
+  | { type: 'upload_progress'; data: UploadProgressPayload }
+  | { type: 'upload_complete'; data: UploadCompletePayload }
+  | { type: 'upload_failed'; data: UploadFailedPayload }
+  | { type: 'run_start'; data: RunStartPayload }
+  | { type: 'run_log'; data: RunLogPayload }
+  | { type: 'run_complete'; data: RunCompletePayload }
+  | { type: 'db_sync_start'; data: DBSyncStartPayload }
+  | { type: 'db_sync_progress'; data: DBSyncProgressPayload }
+  | { type: 'db_sync_complete'; data: DBSyncCompletePayload }
+  | { type: 'db_sync_failed'; data: DBSyncFailedPayload }
+  | { type: 'restore_manifest_start'; data: RestoreManifestStartPayload }
+  | { type: 'restore_manifest_progress'; data: RestoreManifestProgressPayload }
+  | { type: 'restore_manifest_complete'; data: RestoreManifestCompletePayload }
+  | { type: 'restore_manifest_failed'; data: RestoreManifestFailedPayload }
+  | { type: 'restore_scan_start'; data: RestoreScanStartPayload }
+  | { type: 'restore_scan_progress'; data: RestoreScanProgressPayload }
+  | { type: 'restore_scan_complete'; data: RestoreScanCompletePayload }
+  | { type: 'restore_scan_failed'; data: RestoreScanFailedPayload }
+  | { type: 'restore_request_start'; data: RestoreRequestStartPayload }
+  | { type: 'restore_request_progress'; data: RestoreRequestProgressPayload }
+  | { type: 'restore_request_complete'; data: RestoreRequestCompletePayload }
+  | { type: 'restore_request_failed'; data: RestoreRequestFailedPayload }
+  | { type: 'restore_download_start'; data: RestoreDownloadStartPayload }
+  | { type: 'restore_download_progress'; data: RestoreDownloadProgressPayload }
+  | { type: 'restore_download_complete'; data: RestoreDownloadCompletePayload }
+  | { type: 'restore_download_failed'; data: RestoreDownloadFailedPayload }
+  | { type: 'download_mirror_scan_start'; data: DownloadMirrorScanStartPayload }
+  | { type: 'download_mirror_scan_progress'; data: DownloadMirrorScanProgressPayload }
+  | { type: 'download_mirror_scan_complete'; data: DownloadMirrorScanCompletePayload }
+  | { type: 'download_mirror_scan_failed'; data: DownloadMirrorScanFailedPayload }
+  | { type: 'download_mirror_start'; data: DownloadMirrorStartPayload }
+  | { type: 'download_mirror_progress'; data: DownloadMirrorProgressPayload }
+  | { type: 'download_mirror_complete'; data: DownloadMirrorCompletePayload }
+  | { type: 'download_mirror_failed'; data: DownloadMirrorFailedPayload }
+  | { type: 'download_mirror_cancelled'; data: DownloadMirrorCancelledPayload };
+
 export interface Run {
   id: number;
   started_at: string;
@@ -611,6 +931,382 @@ export interface AuthStatus {
   authenticated: boolean;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function parseSseEvent(type: string, data: unknown): SseEvent | null {
+  if (!isRecord(data)) {
+    return type === 'scan_start' ? { type, data: {} } : null;
+  }
+
+  switch (type) {
+    case 'scan_start':
+      return { type, data: {} };
+    case 'scan_progress': {
+      const seen = readNumber(data.seen);
+      const next = readNumber(data.new);
+      const changed = readNumber(data.changed);
+      if (seen === null || next === null || changed === null) return null;
+      return { type, data: { seen, new: next, changed } };
+    }
+    case 'scan_complete': {
+      const seen = readNumber(data.seen);
+      const next = readNumber(data.new);
+      const changed = readNumber(data.changed);
+      const unchanged = readNumber(data.unchanged);
+      const missing = readNumber(data.missing);
+      if (seen === null || next === null || changed === null || unchanged === null || missing === null) return null;
+      return { type, data: { seen, new: next, changed, unchanged, missing } };
+    }
+    case 'upload_plan': {
+      const total_files = readNumber(data.total_files);
+      const total_groups = readNumber(data.total_groups);
+      const total_bytes = readNumber(data.total_bytes);
+      if (total_files === null || total_groups === null || total_bytes === null) return null;
+      return { type, data: { total_files, total_groups, total_bytes } };
+    }
+    case 'copy_progress': {
+      const key = readString(data.key);
+      const size = readNumber(data.size);
+      const bytes_copied = readNumber(data.bytes_copied);
+      const percent = readNumber(data.percent);
+      if (key === null || size === null || bytes_copied === null || percent === null) return null;
+      return { type, data: { key, size, bytes_copied, percent } };
+    }
+    case 'upload_start': {
+      const key = readString(data.key);
+      const size = readNumber(data.size);
+      if (key === null || size === null) return null;
+      return { type, data: { key, size, files: readOptionalNumber(data.files) } };
+    }
+    case 'upload_progress': {
+      const key = readString(data.key);
+      const bytes_uploaded = readNumber(data.bytes_uploaded);
+      const size = readNumber(data.size);
+      const percent = readNumber(data.percent);
+      if (key === null || bytes_uploaded === null || size === null || percent === null) return null;
+      return { type, data: { key, bytes_uploaded, size, percent } };
+    }
+    case 'upload_complete': {
+      const key = readString(data.key);
+      const size = readNumber(data.size);
+      if (key === null || size === null) return null;
+      return {
+        type,
+        data: {
+          key,
+          size,
+          etag: readOptionalString(data.etag),
+          checksum_sha256: readOptionalString(data.checksum_sha256),
+          files: readOptionalNumber(data.files),
+          skipped: readOptionalBoolean(data.skipped),
+        },
+      };
+    }
+    case 'upload_failed': {
+      const key = readString(data.key);
+      const error = readString(data.error);
+      if (key === null || error === null) return null;
+      return { type, data: { key, error } };
+    }
+    case 'run_start': {
+      const files_scanned = readNumber(data.files_scanned);
+      const files_uploaded = readNumber(data.files_uploaded);
+      const bytes_uploaded = readNumber(data.bytes_uploaded);
+      if (files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      return { type, data: { files_scanned, files_uploaded, bytes_uploaded } };
+    }
+    case 'run_log': {
+      const message = readString(data.message);
+      if (message === null) return null;
+      return { type, data: { level: readOptionalString(data.level) as RunLogPayload['level'], message } };
+    }
+    case 'run_complete': {
+      const status = readString(data.status);
+      const files_scanned = readNumber(data.files_scanned);
+      const files_uploaded = readNumber(data.files_uploaded);
+      const bytes_uploaded = readNumber(data.bytes_uploaded);
+      if (status === null || files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      return {
+        type,
+        data: {
+          status,
+          files_scanned,
+          files_uploaded,
+          bytes_uploaded,
+          error_message: readOptionalString(data.error_message),
+        },
+      };
+    }
+    case 'db_sync_start':
+      return { type, data: { reason: readOptionalString(data.reason) as DBSyncStartPayload['reason'], size: readOptionalNumber(data.size) } };
+    case 'db_sync_progress':
+      return {
+        type,
+        data: {
+          reason: readOptionalString(data.reason) as DBSyncProgressPayload['reason'],
+          bytes: readOptionalNumber(data.bytes),
+          total: readOptionalNumber(data.total),
+          percent: readOptionalNumber(data.percent),
+        },
+      };
+    case 'db_sync_complete':
+      return { type, data: { reason: readOptionalString(data.reason) as DBSyncCompletePayload['reason'], size: readOptionalNumber(data.size) } };
+    case 'db_sync_failed':
+      return { type, data: { reason: readOptionalString(data.reason) as DBSyncFailedPayload['reason'], error: readOptionalString(data.error) } };
+    case 'restore_manifest_start': {
+      const stage = readString(data.stage);
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      if (stage === null || processed === null || total === null) return null;
+      return { type, data: { stage, processed, total, manifest_key: readOptionalString(data.manifest_key) } };
+    }
+    case 'restore_manifest_progress': {
+      const stage = readString(data.stage);
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      if (stage === null || processed === null || total === null) return null;
+      return {
+        type,
+        data: {
+          stage,
+          processed,
+          total,
+          manifest_key: readOptionalString(data.manifest_key),
+          data_key: readOptionalString(data.data_key),
+          keys: readOptionalNumber(data.keys),
+        },
+      };
+    }
+    case 'restore_manifest_complete': {
+      const stage = readString(data.stage);
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      if (stage === null || processed === null || total === null) return null;
+      return { type, data: { stage, processed, total, manifest_key: readOptionalString(data.manifest_key), keys: readOptionalNumber(data.keys) } };
+    }
+    case 'restore_manifest_failed': {
+      const stage = readString(data.stage);
+      const error = readString(data.error);
+      if (stage === null || error === null) return null;
+      return { type, data: { stage, error, manifest_key: readOptionalString(data.manifest_key), data_key: readOptionalString(data.data_key) } };
+    }
+    case 'restore_scan_start': {
+      const mode = readString(data.mode);
+      const total = readNumber(data.total);
+      if (mode === null || total === null) return null;
+      return { type, data: { mode, total } };
+    }
+    case 'restore_scan_progress': {
+      const mode = readString(data.mode);
+      const scanned = readNumber(data.scanned);
+      const updated = readNumber(data.updated);
+      const errors = readNumber(data.errors);
+      const total = readNumber(data.total);
+      if (mode === null || scanned === null || updated === null || errors === null || total === null) return null;
+      return { type, data: { mode, scanned, updated, errors, total } };
+    }
+    case 'restore_scan_complete': {
+      const mode = readString(data.mode);
+      const scanned = readNumber(data.scanned);
+      const updated = readNumber(data.updated);
+      const errors = readNumber(data.errors);
+      if (mode === null || scanned === null || updated === null || errors === null) return null;
+      return { type, data: { mode, scanned, updated, errors } };
+    }
+    case 'restore_scan_failed': {
+      const mode = readString(data.mode);
+      const error = readString(data.error);
+      if (mode === null || error === null) return null;
+      return { type, data: { mode, error } };
+    }
+    case 'restore_request_start': {
+      const total = readNumber(data.total);
+      if (total === null) return null;
+      return { type, data: { total } };
+    }
+    case 'restore_request_progress': {
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      if (processed === null || total === null) return null;
+      return {
+        type,
+        data: {
+          processed,
+          total,
+          keys_requested: readOptionalNumber(data.keys_requested),
+          keys_already_thawed: readOptionalNumber(data.keys_already_thawed),
+          errors: readOptionalNumber(data.errors),
+        },
+      };
+    }
+    case 'restore_request_complete': {
+      const total = readNumber(data.total);
+      const keys_requested = readNumber(data.keys_requested);
+      const keys_already_in_progress = readNumber(data.keys_already_in_progress);
+      const keys_already_available = readNumber(data.keys_already_available);
+      const files_affected = readNumber(data.files_affected);
+      const bytes_affected = readNumber(data.bytes_affected);
+      if (
+        total === null || keys_requested === null || keys_already_in_progress === null ||
+        keys_already_available === null || files_affected === null || bytes_affected === null
+      ) return null;
+      return {
+        type,
+        data: {
+          total,
+          keys_requested,
+          keys_already_in_progress,
+          keys_already_available,
+          files_affected,
+          bytes_affected,
+          errors: readOptionalNumber(data.errors),
+        },
+      };
+    }
+    case 'restore_request_failed': {
+      const error = readString(data.error);
+      if (error === null) return null;
+      return { type, data: { error, processed: readOptionalNumber(data.processed), total: readOptionalNumber(data.total) } };
+    }
+    case 'restore_download_start': {
+      const total = readNumber(data.total);
+      const total_bytes = readNumber(data.total_bytes);
+      if (total === null || total_bytes === null) return null;
+      return { type, data: { total, total_bytes } };
+    }
+    case 'restore_download_progress': {
+      const path = readString(data.path);
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      const total_bytes = readNumber(data.total_bytes);
+      const files_written = readNumber(data.files_written);
+      const bytes_written = readNumber(data.bytes_written);
+      const errors = readNumber(data.errors);
+      if (
+        path === null || processed === null || total === null || total_bytes === null ||
+        files_written === null || bytes_written === null || errors === null
+      ) return null;
+      return {
+        type,
+        data: {
+          path,
+          processed,
+          total,
+          total_bytes,
+          files_written,
+          bytes_written,
+          errors,
+          current_path: readOptionalString(data.current_path),
+          current_bytes: readOptionalNumber(data.current_bytes),
+          current_total_bytes: readOptionalNumber(data.current_total_bytes),
+          current_percent: readOptionalNumber(data.current_percent),
+          file_status: readOptionalString(data.file_status) as RestoreDownloadProgressPayload['file_status'],
+          error: readOptionalString(data.error),
+        },
+      };
+    }
+    case 'restore_download_complete':
+    case 'restore_download_failed': {
+      const files_written = readNumber(data.files_written);
+      const bytes_written = readNumber(data.bytes_written);
+      const total_bytes = readNumber(data.total_bytes);
+      const errors = readNumber(data.errors);
+      if (files_written === null || bytes_written === null || total_bytes === null || errors === null) return null;
+      const base = { files_written, bytes_written, total_bytes, errors };
+      return type === 'restore_download_complete'
+        ? { type, data: base }
+        : { type, data: { ...base, error: readOptionalString(data.error) } };
+    }
+    case 'download_mirror_scan_start': {
+      const total = readNumber(data.total);
+      const download_after = readBoolean(data.download_after);
+      if (total === null || download_after === null) return null;
+      return { type, data: { total, download_after } };
+    }
+    case 'download_mirror_scan_progress':
+    case 'download_mirror_scan_complete': {
+      const scanned = readNumber(data.scanned);
+      const present = readNumber(data.present);
+      const missing = readNumber(data.missing);
+      const total = readNumber(data.total);
+      const download_after = readBoolean(data.download_after);
+      if (scanned === null || present === null || missing === null || total === null || download_after === null) return null;
+      return { type, data: { scanned, present, missing, total, download_after } };
+    }
+    case 'download_mirror_scan_failed': {
+      const error = readString(data.error);
+      const download_after = readBoolean(data.download_after);
+      if (error === null || download_after === null) return null;
+      return { type, data: { error, download_after } };
+    }
+    case 'download_mirror_start': {
+      const total = readNumber(data.total);
+      if (total === null) return null;
+      return { type, data: { total } };
+    }
+    case 'download_mirror_progress': {
+      const processed = readNumber(data.processed);
+      const total = readNumber(data.total);
+      const files_written = readNumber(data.files_written);
+      const bytes_written = readNumber(data.bytes_written);
+      const errors = readNumber(data.errors);
+      if (processed === null || total === null || files_written === null || bytes_written === null || errors === null) return null;
+      return {
+        type,
+        data: {
+          processed,
+          total,
+          path: readOptionalString(data.path),
+          files_written,
+          bytes_written,
+          errors,
+          error: readOptionalString(data.error),
+        },
+      };
+    }
+    case 'download_mirror_complete':
+    case 'download_mirror_failed':
+    case 'download_mirror_cancelled': {
+      const files_written = readNumber(data.files_written);
+      const bytes_written = readNumber(data.bytes_written);
+      const errors = readNumber(data.errors);
+      if (files_written === null || bytes_written === null || errors === null) return null;
+      const base = { files_written, bytes_written, errors };
+      return type === 'download_mirror_complete'
+        ? { type, data: base }
+        : { type, data: { ...base, error: readOptionalString(data.error) } };
+    }
+    default:
+      return null;
+  }
+}
+
 // subscribeEvents opens a live EventSource against /api/events. Returns
 // an AbortController-style { close } — callers should invoke it on
 // component teardown to unsubscribe. The optional onStatus callback fires
@@ -619,18 +1315,27 @@ export interface AuthStatus {
 // freezing silently when the connection drops. The browser auto-reconnects
 // on transient network errors; onStatus('open') will fire again once it's back.
 export function subscribeEvents(
-  onEvent: (type: string, data: unknown) => void,
+  onEvent: (event: SseEvent) => void,
   onStatus?: (status: 'open' | 'error') => void,
 ): { close: () => void } {
   const es = new EventSource('/api/events');
   const handler = (ev: MessageEvent) => {
+    let raw: unknown;
     try {
-      onEvent(ev.type, JSON.parse(ev.data));
+      raw = JSON.parse(ev.data);
     } catch {
-      onEvent(ev.type, ev.data);
+      raw = ev.data;
     }
+    const parsed = parseSseEvent(ev.type, raw);
+    if (!parsed) {
+      if (import.meta.env.DEV) {
+        console.warn('[subscribeEvents] invalid SSE payload — ignoring:', ev.type, raw);
+      }
+      return;
+    }
+    onEvent(parsed);
   };
-  const types = [
+  const types: SseEvent['type'][] = [
     'scan_start', 'scan_progress', 'scan_complete',
     'upload_plan',
     'copy_progress',
@@ -645,14 +1350,10 @@ export function subscribeEvents(
     'download_mirror_start', 'download_mirror_progress', 'download_mirror_complete', 'download_mirror_failed', 'download_mirror_cancelled',
   ];
   for (const t of types) es.addEventListener(t, handler as EventListener);
-  // Fallback for default-typed (`event: message`) frames: forward them so
-  // new server event types aren't silently dropped while the typed list
-  // catches up. In dev, surface them so missing entries are easy to spot. (#201)
   es.onmessage = (ev) => {
-    if ((import.meta as any).env?.DEV) {
-      console.warn('[subscribeEvents] untyped SSE message — add to types list:', ev.data);
+    if (import.meta.env.DEV) {
+      console.warn('[subscribeEvents] untyped SSE message — ignoring:', ev.data);
     }
-    handler(ev);
   };
   if (onStatus) {
     // EventSource fires 'error' on every reconnect attempt while the
