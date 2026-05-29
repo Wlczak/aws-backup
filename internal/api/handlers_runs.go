@@ -469,16 +469,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.RestoreDownloadLast = &last
 	}
 	s.restoreDownloadMu.Unlock()
-	s.restoreJobMu.Lock()
-	if s.currentRestoreJob != nil {
-		cur := *s.currentRestoreJob
-		resp.RestoreJobCurrent = &cur
-	}
-	if s.lastRestoreJob != nil {
-		last := *s.lastRestoreJob
-		resp.RestoreJobLast = &last
-	}
-	s.restoreJobMu.Unlock()
+	resp.RestoreJobCurrent, resp.RestoreJobLast = s.snapshotRestoreJob()
 	writeJSON(w, http.StatusOK, resp)
 }
 

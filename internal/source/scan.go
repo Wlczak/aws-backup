@@ -266,7 +266,7 @@ func Scan(
 	}
 
 	const stopWalkErrText = "source: scan batch paused"
-	stopWalkErr := fmt.Errorf(stopWalkErrText)
+	stopWalkErr := errors.New(stopWalkErrText)
 
 	walkErr := src.Walk(scanCtx, func(e Entry) error {
 		if err := scanCtx.Err(); err != nil {
