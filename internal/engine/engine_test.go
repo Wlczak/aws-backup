@@ -65,7 +65,7 @@ func newTestEngine(t *testing.T, threshold int) (*Engine, *db.DB, *source.LocalD
 		Storage:        store,
 		TmpDir:         tmp,
 		KeyPrefix:      "backups",
-		ChunkSize:      2,
+		ScanChunkSize:  2,
 		ZipThresh:      threshold,
 		EnableZipIndex: true,
 		Emit:           col.emit,

@@ -46,13 +46,13 @@ const (
 
 // Options wires the engine to the outside world.
 type Options struct {
-	DB        *db.DB
-	Source    source.Source
-	Storage   storage.Storage
-	TmpDir    string
-	KeyPrefix string // e.g. "backups/"
-	ChunkSize int    // how many individual files to upload per batch
-	ZipThresh int    // files in a top-dir group >= this -> zip
+	DB            *db.DB
+	Source        source.Source
+	Storage       storage.Storage
+	TmpDir        string
+	KeyPrefix     string // e.g. "backups/"
+	ScanChunkSize int    // batch size for source.Scan upserts
+	ZipThresh     int    // files in a top-dir group >= this -> zip
 	// ZipMaxBytes caps the uncompressed byte total of a single zip
 	// group. Subtrees larger than this are split along subdirectory
 	// boundaries; only loose files at one directory level that still
@@ -122,8 +122,8 @@ func New(opts Options) *Engine {
 	if opts.Emit == nil {
 		opts.Emit = DiscardEvents
 	}
-	if opts.ChunkSize <= 0 {
-		opts.ChunkSize = 10
+	if opts.ScanChunkSize <= 0 {
+		opts.ScanChunkSize = 10
 	}
 	if opts.ZipThresh <= 0 {
 		opts.ZipThresh = 50
@@ -280,6 +280,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 				// accurate files_scanned via /api/status.
 				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, 0, 0)
 			},
+			e.opts.ScanChunkSize,
 		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -890,60 +891,54 @@ func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN i
 // refuses concurrent runs, so two runs never share a tmp. (#127)
 func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group) (stagedItem, error) {
 	item := stagedItem{group: g, isZip: false}
-	for i := 0; i < len(g.Files); i += e.opts.ChunkSize {
-		j := i + e.opts.ChunkSize
-		if j > len(g.Files) {
-			j = len(g.Files)
+	for _, pf := range g.Files {
+		if err := ctx.Err(); err != nil {
+			return stagedItem{}, err
 		}
-		for _, pf := range g.Files[i:j] {
-			if err := ctx.Err(); err != nil {
-				return stagedItem{}, err
-			}
-			if e.opts.StopRequested != nil && e.opts.StopRequested() {
-				return stagedItem{}, ErrStopRequested
-			}
-			key := path.Join(e.opts.KeyPrefix, pf.RelPath)
-			tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d", pf.ID))
+		if e.opts.StopRequested != nil && e.opts.StopRequested() {
+			return stagedItem{}, ErrStopRequested
+		}
+		key := path.Join(e.opts.KeyPrefix, pf.RelPath)
+		tmp := filepath.Join(e.opts.TmpDir, fmt.Sprintf("ind-%d", pf.ID))
 
-			// Resume path: a usable cached tmp from a prior run's failed
-			// upload skips the source read entirely. tryReuseTmp removes
-			// stale / mismatched tmp itself so the fallback copy starts
-			// clean.
-			size, md5hex, sha256hex, reused, err := uploadHashes(tmp, pf)
-			if err != nil {
-				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("inspect cached tmp %s: %v — falling back to copy", tmp, err))
-			}
-			if reused {
-				e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reusing cached tmp %s for %s", tmp, pf.RelPath))
-				// No copy_progress emit on reuse — there was no source read.
-			} else {
-				size, md5hex, sha256hex, err = copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
-				if err != nil {
-					// Partial copy is unusable for next run's resume; remove
-					// now so we don't poison a future tryReuseTmp with a
-					// wrong-sized tmp.
-					_ = os.Remove(tmp)
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						return stagedItem{}, err
-					}
-					if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
-						e.log(ctx, runID, db.LogWarn, fmt.Sprintf("mark failed %s: %v (copy error: %v)", pf.RelPath, mErr, err))
-					} else {
-						e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after copy error: %v", pf.RelPath, err))
-					}
-					continue
-				}
-				e.emitCopyProgress(runID, key, size, size)
-			}
-			item.individuals = append(item.individuals, stagedIndividual{
-				pf:        pf,
-				tmpPath:   tmp,
-				key:       key,
-				size:      size,
-				md5hex:    md5hex,
-				sha256hex: sha256hex,
-			})
+		// Resume path: a usable cached tmp from a prior run's failed
+		// upload skips the source read entirely. tryReuseTmp removes
+		// stale / mismatched tmp itself so the fallback copy starts
+		// clean.
+		size, md5hex, sha256hex, reused, err := uploadHashes(tmp, pf)
+		if err != nil {
+			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("inspect cached tmp %s: %v — falling back to copy", tmp, err))
 		}
+		if reused {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf("reusing cached tmp %s for %s", tmp, pf.RelPath))
+			// No copy_progress emit on reuse — there was no source read.
+		} else {
+			size, md5hex, sha256hex, err = copyAndHash(ctx, e.opts.Source, pf.RelPath, tmp, e.copyWrap(runID, key, pf.Size))
+			if err != nil {
+				// Partial copy is unusable for next run's resume; remove
+				// now so we don't poison a future tryReuseTmp with a
+				// wrong-sized tmp.
+				_ = os.Remove(tmp)
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return stagedItem{}, err
+				}
+				if mErr := e.opts.DB.MarkFailed(ctx, pf.ID); mErr != nil {
+					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("mark failed %s: %v (copy error: %v)", pf.RelPath, mErr, err))
+				} else {
+					e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after copy error: %v", pf.RelPath, err))
+				}
+				continue
+			}
+			e.emitCopyProgress(runID, key, size, size)
+		}
+		item.individuals = append(item.individuals, stagedIndividual{
+			pf:        pf,
+			tmpPath:   tmp,
+			key:       key,
+			size:      size,
+			md5hex:    md5hex,
+			sha256hex: sha256hex,
+		})
 	}
 	return item, nil
 }

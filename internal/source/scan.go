@@ -11,6 +11,13 @@ import (
 	"github.com/Wlczak/aws-backup/internal/db"
 )
 
+// scanDB is the narrow DB surface Scan needs. Keeping it small lets tests
+// inject a spy without having to stand up a full sqlite-backed DB.
+type scanDB interface {
+	UpsertFileBatch(ctx context.Context, entries []db.BatchEntry, seenAt time.Time) ([]db.UpsertResult, error)
+	MarkMissing(ctx context.Context, scanStart time.Time) (int64, error)
+}
+
 // ScanStats summarises the outcome of a Scan call.
 type ScanStats struct {
 	Seen      int64 // files observed during walk
@@ -49,20 +56,24 @@ const (
 )
 
 // Scan walks src, accumulates discovered files in RAM, and flushes them to the
-// DB in batches every few seconds. This avoids hammering SQLite with one
-// transaction per file during large scans.
+// DB in batches every few seconds or whenever buf reaches batchSize. This
+// avoids hammering SQLite with one transaction per file during large scans.
 //
 // When paths is non-empty, only files whose RelPath matches or is under one
 // of the given paths are processed (partial rescan). Missing-detection is
 // skipped for partial scans because the walker only visited a subset.
-func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger, onProgress ProgressFn) (ScanStats, error) {
+func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger, onProgress ProgressFn, batchSize int) (ScanStats, error) {
 	var stats ScanStats
 	scanStart := time.Now().UTC()
+	if batchSize <= 0 {
+		batchSize = 1
+	}
 
 	var (
 		mu  sync.Mutex
 		buf []db.BatchEntry
 	)
+	var flushMu sync.Mutex
 
 	// walkSeen / atomicNew / atomicChanged are written by walker and
 	// flusher concurrently and read by emitWalkProgress under no lock.
@@ -101,9 +112,12 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 		})
 	}
 
-	// flush drains the buffer and upserts into DB. Called only from the
-	// flusher goroutine so stats are updated without a lock.
+	// flush drains the buffer and upserts into DB. flushMu serializes the
+	// timer and batch-triggered callers so only one upsert runs at a time.
 	flush := func() error {
+		flushMu.Lock()
+		defer flushMu.Unlock()
+
 		mu.Lock()
 		if len(buf) == 0 {
 			mu.Unlock()
@@ -183,11 +197,18 @@ func Scan(ctx context.Context, src Source, d *db.DB, paths []string, log Logger,
 		}
 		mu.Lock()
 		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
+		bufLen := len(buf)
 		mu.Unlock()
 		walkSeen.Add(1)
 		// Throttled emit so a fast walker over a million-file tree
 		// doesn't fan out a million events to the SSE bus.
 		emitWalkProgress(false)
+		if bufLen >= batchSize {
+			if err := flush(); err != nil {
+				cancelScan(err)
+				return err
+			}
+		}
 		return nil
 	})
 

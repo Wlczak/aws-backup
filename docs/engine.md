@@ -12,8 +12,9 @@ Runs execute against the currently active profile. The active profile determines
     source.Scan → batched UpsertFileBatch, preserve existing bucket-backed
     state on unchanged rows, reclassify vanished uploaded/zipped rows to
     cloud_only and vanished pending/failed rows to missing, emit scan_progress
-    per batch, then scan_complete. Update run.files_scanned. If mode=scan,
-    jump to finalize.
+    per batch, then scan_complete. The batch size comes from
+    `backup.chunk_size`. Update run.files_scanned. If mode=scan, jump to
+    finalize.
 
 3.  S3 list  (modes: full | upload)
     Storage.List under KeyPrefix (single round-trip, reused below).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	d := openDB(t)
 
 	// First scan: 2 new files.
-	s, err := Scan(ctx, src, d, nil, nil, nil)
+	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestScanNewChangedMissing(t *testing.T) {
 	// Sleep so scanStart is strictly after the last upload's last_seen_at.
 	time.Sleep(10 * time.Millisecond)
 
-	s, err = Scan(ctx, src, d, nil, nil, nil)
+	s, err = Scan(ctx, src, d, nil, nil, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,14 +103,14 @@ func TestScanRevivesMissingRowToPending(t *testing.T) {
 	defer src.Close()
 	d := openDB(t)
 
-	if _, err := Scan(ctx, src, d, nil, nil, nil); err != nil {
+	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.MarkMissingByPaths(ctx, []string{"return.txt"}); err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
 
-	s, err := Scan(ctx, src, d, nil, nil, nil)
+	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestScanProgressCallback(t *testing.T) {
 	var samples []ScanProgress
 	s, err := Scan(ctx, src, d, nil, nil, func(p ScanProgress) {
 		samples = append(samples, p)
-	})
+	}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,65 @@ func TestScanContextCancel(t *testing.T) {
 	d := openDB(t)
 
 	cancel() // cancel before scan runs
-	if _, err := Scan(ctx, src, d, nil, nil, nil); err == nil {
+	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err == nil {
 		t.Fatal("expected cancel error")
+	}
+}
+
+type scanSpy struct {
+	mu      sync.Mutex
+	batches [][]string
+}
+
+func (s *scanSpy) UpsertFileBatch(ctx context.Context, entries []db.BatchEntry, seenAt time.Time) ([]db.UpsertResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	batch := make([]string, len(entries))
+	for i, e := range entries {
+		batch[i] = e.Path
+	}
+	s.batches = append(s.batches, batch)
+	results := make([]db.UpsertResult, len(entries))
+	for i := range results {
+		results[i].Created = true
+	}
+	return results, nil
+}
+
+func (s *scanSpy) MarkMissing(ctx context.Context, scanStart time.Time) (int64, error) {
+	return 0, nil
+}
+
+func TestScanFlushesByBatchSize(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for i := 0; i < 5; i++ {
+		writeFile(t, filepath.Join(root, "f"+string(rune('0'+i))+".txt"), "x")
+	}
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	spy := &scanSpy{}
+
+	s, err := Scan(ctx, src, spy, nil, nil, nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Seen != 5 || s.New != 5 {
+		t.Fatalf("scan stats: %+v", s)
+	}
+
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if len(spy.batches) != 3 {
+		t.Fatalf("batches=%d want 3", len(spy.batches))
+	}
+	if got := len(spy.batches[0]); got != 2 {
+		t.Fatalf("first batch size=%d want 2", got)
+	}
+	if got := len(spy.batches[1]); got != 2 {
+		t.Fatalf("second batch size=%d want 2", got)
+	}
+	if got := len(spy.batches[2]); got != 1 {
+		t.Fatalf("third batch size=%d want 1", got)
 	}
 }
