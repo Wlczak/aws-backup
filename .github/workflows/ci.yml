@@ -75,7 +75,7 @@ jobs:
       - name: Smoke test (binary serves /)
         run: |
           ./aws-backup -config /tmp/smoke.json config init
-          jq '.source.localdir.root = "/tmp"' /tmp/smoke.json > /tmp/smoke2.json && mv /tmp/smoke2.json /tmp/smoke.json
+          jq '.source.localdir.root = "/tmp"' /tmp/profiles/default/config.json > /tmp/profiles/default/config2.json && mv /tmp/profiles/default/config2.json /tmp/profiles/default/config.json
           ./aws-backup -config /tmp/smoke.json serve &
           # 127.0.0.1 not localhost: dual-stack runners may resolve localhost
           # to ::1 and the server only binds 127.0.0.1.
