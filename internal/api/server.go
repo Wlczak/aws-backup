@@ -137,6 +137,8 @@ type Server struct {
 	// restoreDownloadWg tracks the background restore-download job so
 	// Shutdown can wait for its goroutine before tearing down DB / storage.
 	restoreDownloadWg sync.WaitGroup
+	// restoreJobWg tracks restore-trigger / inventory-sync background jobs.
+	restoreJobWg sync.WaitGroup
 	// pendingConfig holds a validated, on-disk-persisted Config that the
 	// operator saved while a backup run was in flight. The post-run
 	// goroutine drains it and calls ApplySettings + updateConfig once the
@@ -163,6 +165,13 @@ type Server struct {
 	currentRestoreDownload       *restoreDownloadSummary
 	currentRestoreDownloadCancel context.CancelFunc
 	lastRestoreDownload          *restoreDownloadSummary
+	// restoreJobMu guards restore-trigger and inventory-sync background
+	// job state so /api/status and /api/restore/jobs/{id} can replay it.
+	restoreJobMu            sync.Mutex
+	restoreJobSeq           atomic.Int64
+	currentRestoreJob       *restoreJobSummary
+	currentRestoreJobCancel context.CancelFunc
+	lastRestoreJob          *restoreJobSummary
 	// shutdownCh is closed once at the top of Shutdown. The post-run
 	// DB-sync goroutine watches it so an in-flight DB upload aborts
 	// promptly when the service is shutting down — otherwise a 600 s
@@ -198,11 +207,6 @@ type Server struct {
 	allFilesMu    sync.Mutex
 	allFilesCache map[string]allFilesCacheEntry
 	allFilesSF    singleflight.Group
-
-	// inventorySyncBusy serialises /api/restore/inventory-sync so two
-	// concurrent clicks don't both download the (potentially huge)
-	// manifest before the scanner contention check fires. (#197)
-	inventorySyncBusy atomic.Bool
 }
 
 type allFilesCacheEntry struct {
@@ -305,12 +309,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.currentRestoreDownloadCancel()
 	}
 	s.restoreDownloadMu.Unlock()
+	s.restoreJobMu.Lock()
+	if s.currentRestoreJobCancel != nil {
+		s.currentRestoreJobCancel()
+	}
+	s.restoreJobMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
 		s.runWg.Wait()
 		s.downloadWg.Wait()
 		s.restoreDownloadWg.Wait()
+		s.restoreJobWg.Wait()
 		close(done)
 	}()
 	select {
@@ -390,6 +400,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/restore/sync-status", s.handleRestoreSyncStatus)
 			r.Post("/restore/scan/full", s.handleRestoreScanFull)
 			r.Post("/restore/scan/pending", s.handleRestoreScanPending)
+			r.Get("/restore/jobs/{id}", s.handleGetRestoreJob)
 			r.Post("/download/full", s.handleDownloadFull)
 			r.Post("/download/rescan", s.handleDownloadRescan)
 			r.Post("/download/cancel", s.handleDownloadCancel)

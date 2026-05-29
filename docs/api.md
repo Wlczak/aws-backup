@@ -48,12 +48,13 @@ GET    /api/s3/test                   HeadBucket round-trip
 
 # Restore (Glacier)
 POST   /api/restore/estimate          {paths: [], tier: bulk|standard, days: 1..180} → cost + wait estimate (request fee counts actual S3 objects, zip groups count once; the reserved `index.db` snapshot is excluded)
-POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..180} → s3:RestoreObject per unique key; matched rows flip to in_progress (does NOT download)
+POST   /api/restore/trigger           {paths: [], tier: bulk|standard, days: 1..180} → starts an async restore job that issues s3:RestoreObject per unique key; returns a restore_job_id immediately and matched rows flip to in_progress (does NOT download)
 POST   /api/restore/download/estimate {paths: []} → restored-file estimate for the Download tab (breaks out restored / in_progress / not_restoring; request fee counts actual downloadable S3 objects, zip groups count once; the reserved `index.db` snapshot is excluded)
 POST   /api/restore/download          {paths: [], target_dir: "/abs/path", verify_checksum?: bool} → starts a background local download/verify job; live progress is exposed through `/api/status` and SSE `restore_download_*`
 POST   /api/restore/sync-status       drains SQS queue, applies restore events to DB
 POST   /api/restore/scan/full          HEADs every uploaded/zipped/cloud_only S3 object key and reconciles restore status authoritatively
 POST   /api/restore/scan/pending       HEADs only rows currently marked `in_progress`
+GET    /api/restore/jobs/{id}         restore-trigger / inventory-sync job lookup for reload recovery
 
 # Sync / reconcile
 POST   /api/sync                      authoritative cloud compare; lists bucket objects + zip indexes, compares them to the locally scanned rows, recreates cloud-only objects as `cloud_only`, and normalizes S3-present rows into `uploaded` or `cloud_only`
@@ -80,6 +81,10 @@ Profiles are single-active at runtime. Each profile has its own config and `inde
 `POST /api/restore/download/estimate` uses the same DB path matching as `RestoreToDir` to split the selected rows into restored / in_progress / not_restoring buckets, estimate the number of S3 objects and indexed bytes that are actually downloadable, and then price GET requests plus outbound egress. The reserved `index.db` snapshot object is excluded from these counts.
 
 `POST /api/restore/trigger` issues `s3:RestoreObject` for every unique key covering the selected paths and asks AWS to keep the thawed copy in standard storage for `days` (1..180). The request can choose `bulk` or `standard`; Glacier objects aren't readable until they thaw (about 48 h Bulk or 12 h Standard for Deep Archive). Matched DB rows immediately flip to `restore_status='in_progress'` so the UI reflects the request; final state lands via SQS (`s3:ObjectRestore:Completed`) or a HEAD scan. Rows already at `restore_status IN (in_progress, restored)` are filtered out before the S3 call (counted in `files_skipped_*` of the response). Storage-level `RestoreAlreadyInProgress` / `InvalidObjectState` from S3 are still mapped to soft-success counts, not errors.
+
+`POST /api/restore/trigger` now returns `202 Accepted` with a `restore_job_id` and runs in the background under a server-scoped context. The live job state is exposed through `/api/status` as `restore_job_current` / `restore_job_last` and can be fetched directly via `GET /api/restore/jobs/{id}` after a refresh.
+
+`POST /api/restore/inventory/sync` follows the same background-job model. It first emits `restore_manifest_*` SSE events while locating and parsing the latest inventory manifest, then reuses the existing `restore_scan_*` events for the HEAD reconciliation pass.
 
 `POST /api/sync` / `/api/sync/full` keep S3-present rows explicit as either `uploaded` or `cloud_only`. Rows that are `cloud_only` but no longer have a matching S3 object are converted to `missing`; rows absent from the DB but present in S3 are recreated as `cloud_only`. Standalone root objects come straight from the bucket listing, not from prior DB history. Zip-backed rows are relinked through the `zips` table, while `files.md5` always stores the per-file checksum.
 
@@ -108,6 +113,10 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 | `restore_scan_progress` | mode, scanned, updated, errors, total |
 | `restore_scan_complete` | mode, scanned, updated, errors |
 | `restore_scan_failed` | mode, error |
+| `restore_manifest_start` | stage, processed, total, manifest_key |
+| `restore_manifest_progress` | stage, processed, total, manifest_key, data_key, keys |
+| `restore_manifest_complete` | stage, processed, total, manifest_key, keys |
+| `restore_manifest_failed` | stage, error, manifest_key, data_key |
 | `restore_request_start` | total |
 | `restore_request_progress` | processed, total, keys_requested, keys_already_thawed, errors |
 | `restore_request_complete` | total, keys_requested, keys_already_in_progress, keys_already_available, files_affected, bytes_affected, errors |

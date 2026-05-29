@@ -393,6 +393,8 @@ type statusResponse struct {
 	DownloadSnapshot       *downloadMirrorSnapshotSummary `json:"download_mirror_snapshot,omitempty"`
 	RestoreDownloadCurrent *restoreDownloadSummary        `json:"restore_download_current,omitempty"`
 	RestoreDownloadLast    *restoreDownloadSummary        `json:"restore_download_last,omitempty"`
+	RestoreJobCurrent      *restoreJobSummary             `json:"restore_job_current,omitempty"`
+	RestoreJobLast         *restoreJobSummary             `json:"restore_job_last,omitempty"`
 	// StopRequested is true while a graceful stop is pending: the engine
 	// will exit cleanly after the in-flight upload. Lets the UI flip the
 	// Stop button to a Continue affordance and render a "stopping" badge.
@@ -463,6 +465,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.RestoreDownloadLast = &last
 	}
 	s.restoreDownloadMu.Unlock()
+	s.restoreJobMu.Lock()
+	if s.currentRestoreJob != nil {
+		cur := *s.currentRestoreJob
+		resp.RestoreJobCurrent = &cur
+	}
+	if s.lastRestoreJob != nil {
+		last := *s.lastRestoreJob
+		resp.RestoreJobLast = &last
+	}
+	s.restoreJobMu.Unlock()
 	writeJSON(w, http.StatusOK, resp)
 }
 

@@ -4,7 +4,9 @@
     api,
     subscribeEvents,
     type RestoreEstimate,
+    type RestoreJobSummary,
     type RestoreTier,
+    type Status,
     type RestoreScanResult,
     type InventoryStatus,
   } from '../lib/api';
@@ -32,6 +34,7 @@
   let loading = $state(false);
   let confirmTrigger = $state(false);
   let syncing = $state(false);
+  let restoreStatusTimer: ReturnType<typeof setInterval> | null = null;
 
   // Reset the double-click confirm if the user edits the inputs between
   // the first and second click — otherwise switching path A → B fires the
@@ -55,6 +58,7 @@
   let scanBusy = $state(false);
   let scanResult = $state<RestoreScanResult | null>(null);
   let scanProgress = $state<{ scanned: number; total: number; mode: string } | null>(null);
+  let inventoryManifestProgress = $state<{ stage: string; processed: number; total: number; manifest_key?: string } | null>(null);
 
   // Live progress while a "Request retrieval" is in flight — driven by
   // restore_request_* SSE events from RequestRestore. A 5000-file restore
@@ -81,7 +85,30 @@
     }
     // Best-effort load of inventory status; absence is normal.
     loadInventory();
+    loadRestoreStatus();
+    restoreStatusTimer = setInterval(() => {
+      void loadRestoreStatus();
+    }, 2500);
     const sub = subscribeEvents((type, data) => {
+      if (type === 'restore_manifest_start' || type === 'restore_manifest_progress' || type === 'restore_manifest_complete') {
+        const d = data as { stage?: string; processed?: number; total?: number; manifest_key?: string };
+        inventoryManifestProgress = {
+          stage: d.stage ?? 'manifest',
+          processed: d.processed ?? 0,
+          total: d.total ?? 0,
+          manifest_key: d.manifest_key,
+        };
+      } else if (type === 'restore_manifest_failed') {
+        inventoryManifestProgress = null;
+      } else if (type === 'restore_request_start' || type === 'restore_request_progress' || type === 'restore_request_complete') {
+        const d = data as { processed?: number; total?: number };
+        triggerProgress = {
+          processed: d.processed ?? (type === 'restore_request_start' ? 0 : triggerProgress?.processed ?? 0),
+          total: d.total ?? triggerProgress?.total ?? 0,
+        };
+      } else if (type === 'restore_request_failed') {
+        triggerProgress = null;
+      }
       if (type === 'restore_scan_progress') {
         const d = data as { scanned: number; total: number; mode: string };
         scanProgress = { scanned: d.scanned, total: d.total, mode: d.mode };
@@ -99,7 +126,10 @@
         triggerProgress = null;
       }
     });
-    return () => sub.close();
+    return () => {
+      sub.close();
+      if (restoreStatusTimer) clearInterval(restoreStatusTimer);
+    };
   });
 
   async function loadInventory() {
@@ -113,6 +143,80 @@
       if (aborted) return;
       inventory = null;
     }
+  }
+
+  async function loadRestoreStatus() {
+    try {
+      const status = await api.status();
+      if (aborted) return;
+      applyRestoreStatus(status);
+    } catch {
+      if (aborted) return;
+    }
+  }
+
+  function applyRestoreStatus(status: Status) {
+    const job = status.restore_job_current ?? status.restore_job_last;
+    if (!job) return;
+    if (job.status === 'running') {
+      if (job.kind === 'trigger') {
+        triggerProgress = { processed: job.processed, total: job.total };
+        triggerResult = null;
+      } else if (job.kind === 'inventory') {
+        if (job.phase === 'manifest') {
+          inventoryManifestProgress = {
+            stage: 'manifest',
+            processed: job.processed,
+            total: job.total,
+            manifest_key: job.manifest_key,
+          };
+          scanResult = null;
+        } else if (job.phase === 'scan') {
+          scanProgress = { scanned: job.scanned || job.processed, total: job.total, mode: 'inventory' };
+          inventoryManifestProgress = null;
+        }
+      }
+      return;
+    }
+
+    if (job.kind === 'trigger') {
+      triggerProgress = null;
+      if (job.status === 'completed') {
+        triggerResult = triggerResultFromJob(job);
+      }
+    } else if (job.kind === 'inventory') {
+      inventoryManifestProgress = null;
+      scanProgress = null;
+      if (job.status === 'completed') {
+        scanResult = scanResultFromJob(job);
+      }
+    }
+  }
+
+  function triggerResultFromJob(job: RestoreJobSummary) {
+    return {
+      keys_requested: job.keys_requested ?? 0,
+      keys_already_in_progress: job.keys_already_in_progress ?? 0,
+      keys_already_available: job.keys_already_available ?? 0,
+      files_affected: job.files_affected ?? 0,
+      bytes_affected: job.bytes_affected ?? 0,
+      files_skipped_in_progress: job.files_skipped_in_progress ?? 0,
+      bytes_skipped_in_progress: job.bytes_skipped_in_progress ?? 0,
+      files_skipped_restored: job.files_skipped_restored ?? 0,
+      bytes_skipped_restored: job.bytes_skipped_restored ?? 0,
+      unknown_paths: job.unknown_paths ?? [],
+      errors: job.error_message ? [job.error_message] : [],
+    };
+  }
+
+  function scanResultFromJob(job: RestoreJobSummary): RestoreScanResult {
+    return {
+      mode: 'inventory',
+      scanned: job.scanned,
+      updated: job.updated,
+      errors: job.errors,
+      duration_ns: 0,
+    };
   }
 
   async function doScanFull() {
@@ -174,8 +278,8 @@
     inventoryBusy = true;
     scanResult = null;
     try {
-      scanResult = await api.inventorySync();
-      toast.success(`Inventory sync: ${scanResult.scanned} keys HEADed, ${scanResult.updated} updated.`);
+      const job = await api.inventorySync();
+      toast.info(`Inventory sync started as job #${job.restore_job_id}.`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -243,16 +347,8 @@
     loading = true;
     triggerResult = null;
     try {
-      triggerResult = await api.restoreTrigger(p, days, tier);
-      const r = triggerResult;
-      const parts: string[] = [];
-      if (r.keys_requested > 0) parts.push(`${r.keys_requested} requested`);
-      if (r.keys_already_in_progress > 0) parts.push(`${r.keys_already_in_progress} already thawing`);
-      if (r.keys_already_available > 0) parts.push(`${r.keys_already_available} already available`);
-      const skipped = r.files_skipped_in_progress + r.files_skipped_restored;
-      if (skipped > 0) parts.push(`${skipped.toLocaleString()} skipped (already thawed)`);
-      const summary = parts.length > 0 ? parts.join(' · ') : 'no keys to restore';
-      toast.success(`Retrieval ${summary} for ${r.files_affected.toLocaleString()} file(s).`);
+      const job = await api.restoreTrigger(p, days, tier);
+      toast.info(`Restore request started as job #${job.restore_job_id}.`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -316,6 +412,20 @@
       {/if}
     </div>
   {/if}
+  {#if inventoryManifestProgress}
+    {@const manifestPct = inventoryManifestProgress.total > 0
+      ? Math.min(100, Math.round((inventoryManifestProgress.processed / inventoryManifestProgress.total) * 100))
+      : 0}
+    <p class="muted small" style="margin-top: 0.75rem">
+      Inventory manifest {inventoryManifestProgress.stage}: {inventoryManifestProgress.processed.toLocaleString()} / {inventoryManifestProgress.total.toLocaleString()}
+      {#if inventoryManifestProgress.manifest_key}
+        <span class="mono">({inventoryManifestProgress.manifest_key})</span>
+      {/if}
+    </p>
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={manifestPct} style="margin-top: 0.35rem">
+      <div class="fill" style="width: {manifestPct}%"></div>
+    </div>
+  {/if}
   <div class="actions">
     <select bind:value={inventoryFreq} disabled={inventoryBusy}>
       <option value="daily">Daily</option>
@@ -326,9 +436,9 @@
     </button>
     {#if inventory?.enabled}
       <button onclick={doInventoryDisable} disabled={inventoryBusy} type="button">
-        Disable
+      Disable
       </button>
-      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy} type="button">
+      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy || !!inventoryManifestProgress} type="button">
         Sync from inventory
       </button>
     {/if}
@@ -365,7 +475,7 @@
     <button class="primary" onclick={doEstimate} disabled={loading} type="button">
       {loading ? 'Estimating…' : 'Estimate cost'}
     </button>
-    <button onclick={doTrigger} disabled={loading || !estimate} type="button">
+    <button onclick={doTrigger} disabled={loading || !estimate || !!triggerProgress} type="button">
       {#if loading && triggerProgress}
         Requesting… {triggerProgress.processed.toLocaleString()} / {triggerProgress.total.toLocaleString()}
       {:else if loading}
@@ -433,6 +543,16 @@
         <ul class="mono small">{#each triggerResult.errors as p}<li>{p}</li>{/each}</ul>
       </details>
     {/if}
+  </div>
+{/if}
+
+{#if scanResult && scanResult.mode === 'inventory'}
+  <div class="card">
+    <div class="label">Inventory sync result</div>
+    <p class="muted">
+      Inventory sync completed: {scanResult.scanned.toLocaleString()} keys HEADed,
+      {scanResult.updated.toLocaleString()} updated, {scanResult.errors.toLocaleString()} error(s).
+    </p>
   </div>
 {/if}
 

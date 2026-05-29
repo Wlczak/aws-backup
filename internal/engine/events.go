@@ -46,6 +46,12 @@ const (
 	EventRestoreScanProgress = "restore_scan_progress"
 	EventRestoreScanComplete = "restore_scan_complete"
 	EventRestoreScanFailed   = "restore_scan_failed"
+	// Inventory-manifest events accompany the manifest locate/fetch/parse
+	// phase before the inventory-driven HEAD scan begins.
+	EventRestoreManifestStart    = "restore_manifest_start"
+	EventRestoreManifestProgress = "restore_manifest_progress"
+	EventRestoreManifestComplete = "restore_manifest_complete"
+	EventRestoreManifestFailed   = "restore_manifest_failed"
 	// Restore-request events accompany RequestRestore — one s3:RestoreObject
 	// call per archive key, batched across many files. A 5000-file restore
 	// can issue hundreds of API calls so the UI shows a progress bar

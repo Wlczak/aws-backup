@@ -3,8 +3,10 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/md5"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,10 +21,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
 	"github.com/Wlczak/aws-backup/internal/config"
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/events"
+	"github.com/Wlczak/aws-backup/internal/restore/inventory"
+	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 	"github.com/Wlczak/aws-backup/internal/storage"
+	"log/slog"
 )
 
 func md5hex(s string) string {
@@ -344,10 +353,10 @@ func (s *slowStatusReadCloser) Read(p []byte) (int, error) {
 	return 0, err
 }
 
-// TestRestoreTriggerRequestsRestore covers the new request-only flow:
-// /api/restore/trigger calls Storage.Restore for each unique key and
-// flips matching DB rows to restore_status='in_progress'. It does NOT
-// download anything.
+// TestRestoreTriggerRequestsRestore covers the async job flow:
+// /api/restore/trigger returns 202 immediately, then the background job
+// calls Storage.Restore for each unique key and flips matching DB rows
+// to restore_status='in_progress'. It does NOT download anything.
 func TestRestoreTriggerRequestsRestore(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -388,19 +397,34 @@ func TestRestoreTriggerRequestsRestore(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.handleRestoreTrigger(rr, req)
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status: %d", rr.Code)
 	}
 
-	var out restoreTriggerResponse
+	var out restoreJobStartResponse
 	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// MemStorage's Restore returns ErrUnsupported for non-archive
-	// classes, so the per-key call lands in Errors. We're really
-	// testing request shape + that the file was matched.
-	if out.FilesAffected != 1 {
-		t.Errorf("FilesAffected: got %d (%+v)", out.FilesAffected, out)
+	if out.RestoreJobID == 0 {
+		t.Fatalf("restore_job_id missing in %+v", out)
+	}
+
+	srv.restoreJobWg.Wait()
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	statusRR := httptest.NewRecorder()
+	srv.handleStatus(statusRR, statusReq)
+	var status statusResponse
+	if err := json.NewDecoder(statusRR.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.RestoreJobLast == nil {
+		t.Fatal("restore job did not finish")
+	}
+	if status.RestoreJobLast.Status != "completed" {
+		t.Fatalf("status=%q want completed", status.RestoreJobLast.Status)
+	}
+	if status.RestoreJobLast.KeysRequested != 1 || status.RestoreJobLast.FilesAffected != 1 {
+		t.Fatalf("job summary = %+v", status.RestoreJobLast)
 	}
 }
 
@@ -421,6 +445,289 @@ func (s *tierSpyStorage) Restore(_ context.Context, key string, _ int, tier stor
 	s.calls = append(s.calls, tier)
 	s.keys = append(s.keys, key)
 	return nil
+}
+
+type blockingRestoreStorage struct {
+	*storage.MemStorage
+	startOnce sync.Once
+	started   chan struct{}
+	release   chan struct{}
+}
+
+func newBlockingRestoreStorage() *blockingRestoreStorage {
+	return &blockingRestoreStorage{
+		MemStorage: storage.NewMemStorage(),
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (s *blockingRestoreStorage) Restore(ctx context.Context, key string, days int, tier storage.RestoreTier) error {
+	s.startOnce.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+		return s.MemStorage.Restore(ctx, key, days, tier)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *blockingRestoreStorage) releaseRestore() {
+	close(s.release)
+}
+
+type fakeInventoryAPI struct {
+	bucket          string
+	manifestKey     string
+	dataKey         string
+	manifestBody    []byte
+	manifestHashHex string
+	dataBody        []byte
+	startOnce       sync.Once
+	started         chan struct{}
+	release         chan struct{}
+}
+
+func (f *fakeInventoryAPI) GetBucketInventoryConfiguration(_ context.Context, _ *s3.GetBucketInventoryConfigurationInput, _ ...func(*s3.Options)) (*s3.GetBucketInventoryConfigurationOutput, error) {
+	return &s3.GetBucketInventoryConfigurationOutput{
+		InventoryConfiguration: &s3types.InventoryConfiguration{
+			Id:        aws.String(inventory.ConfigID),
+			IsEnabled: aws.Bool(true),
+			Schedule: &s3types.InventorySchedule{
+				Frequency: s3types.InventoryFrequencyDaily,
+			},
+			Destination: &s3types.InventoryDestination{
+				S3BucketDestination: &s3types.InventoryS3BucketDestination{
+					Bucket: aws.String("arn:aws:s3:::" + f.bucket),
+					Format: s3types.InventoryFormatCsv,
+					Prefix: aws.String(strings.TrimSuffix(inventory.DestinationPrefix, "/")),
+				},
+			},
+		},
+	}, nil
+}
+
+func (f *fakeInventoryAPI) PutBucketInventoryConfiguration(_ context.Context, _ *s3.PutBucketInventoryConfigurationInput, _ ...func(*s3.Options)) (*s3.PutBucketInventoryConfigurationOutput, error) {
+	return &s3.PutBucketInventoryConfigurationOutput{}, nil
+}
+
+func (f *fakeInventoryAPI) DeleteBucketInventoryConfiguration(_ context.Context, _ *s3.DeleteBucketInventoryConfigurationInput, _ ...func(*s3.Options)) (*s3.DeleteBucketInventoryConfigurationOutput, error) {
+	return &s3.DeleteBucketInventoryConfigurationOutput{}, nil
+}
+
+func (f *fakeInventoryAPI) ListObjectsV2(_ context.Context, _ *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	modified := time.Now().Add(-10 * time.Minute)
+	return &s3.ListObjectsV2Output{
+		Contents: []s3types.Object{
+			{Key: aws.String(f.manifestKey), LastModified: aws.Time(modified)},
+		},
+	}, nil
+}
+
+func (f *fakeInventoryAPI) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	key := aws.ToString(in.Key)
+	if key == f.manifestKey {
+		f.startOnce.Do(func() { close(f.started) })
+		select {
+		case <-f.release:
+		}
+		return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(f.manifestBody))}, nil
+	}
+	if key == strings.TrimSuffix(f.manifestKey, "manifest.json")+"manifest.checksum" {
+		return &s3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(f.manifestHashHex))}, nil
+	}
+	if key == f.dataKey {
+		return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(f.dataBody))}, nil
+	}
+	return nil, fmt.Errorf("unexpected key %q", key)
+}
+
+func buildInventoryData(t *testing.T, bucket, dataKey string) (manifestBody []byte, manifestHashHex string, dataBody []byte) {
+	t.Helper()
+	var csvBuf bytes.Buffer
+	cw := csv.NewWriter(&csvBuf)
+	if err := cw.Write([]string{bucket, dataKey, "1", "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		t.Fatal(err)
+	}
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	if _, err := gz.Write(csvBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dataBody = append([]byte(nil), gzBuf.Bytes()...)
+	dataHash := md5.Sum(dataBody)
+	dataHashHex := hex.EncodeToString(dataHash[:])
+	mf := map[string]any{
+		"sourceBucket": bucket,
+		"fileFormat":   "CSV",
+		"fileSchema":   "Bucket, Key, Size, MD5checksum",
+		"files": []map[string]any{{
+			"key":         "data.csv.gz",
+			"size":        len(dataBody),
+			"MD5checksum": dataHashHex,
+		}},
+	}
+	manifestBody, err := json.Marshal(mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHash := md5.Sum(manifestBody)
+	manifestHashHex = hex.EncodeToString(manifestHash[:])
+	return manifestBody, manifestHashHex, dataBody
+}
+
+func TestInventorySyncIgnoresRequestCancel(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	bucket := "bucket"
+	dataKey := "docs/readme.txt"
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: dataKey, Size: 5, ModTime: now}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("hello"), "backups/"+dataKey, now); err != nil {
+		t.Fatal(err)
+	}
+
+	store := storage.NewMemStorage()
+	if _, err := store.Put(ctx, "backups/"+dataKey, strings.NewReader("hello"), 5); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestKey := "_inventory/" + bucket + "/" + inventory.ConfigID + "/2026-01-01T00-00Z/manifest.json"
+	manifestBody, manifestHashHex, dataBody := buildInventoryData(t, bucket, dataKey)
+	api := &fakeInventoryAPI{
+		bucket:          bucket,
+		manifestKey:     manifestKey,
+		dataKey:         "data.csv.gz",
+		manifestBody:    manifestBody,
+		manifestHashHex: manifestHashHex,
+		dataBody:        dataBody,
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	inv := inventory.New(func() (inventory.API, string, bool) { return api, bucket, true }, "")
+	srv := &Server{deps: Deps{
+		DB:             d,
+		Bus:            events.NewBus(16),
+		Config:         &config.Config{},
+		Storage:        func() storage.Storage { return store },
+		Inventory:      inv,
+		RestoreScanner: scanner.New(d, func() storage.Storage { return store }, events.NewBus(16), slog.Default()),
+	}}
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodPost, "/api/restore/inventory/sync", nil)
+	rr := httptest.NewRecorder()
+	srv.handleInventorySync(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d want 202", rr.Code)
+	}
+	cancelReq()
+	select {
+	case <-api.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("inventory sync did not start")
+	}
+	srv.restoreJobMu.Lock()
+	if srv.currentRestoreJob == nil {
+		srv.restoreJobMu.Unlock()
+		t.Fatal("inventory job cleared before release")
+	}
+	srv.restoreJobMu.Unlock()
+	close(api.release)
+	srv.restoreJobWg.Wait()
+	srv.restoreJobMu.Lock()
+	defer srv.restoreJobMu.Unlock()
+	if srv.currentRestoreJob != nil {
+		t.Fatalf("current inventory job still active: %+v", srv.currentRestoreJob)
+	}
+	if srv.lastRestoreJob == nil || srv.lastRestoreJob.Status != "completed" {
+		t.Fatalf("inventory job did not complete: %+v", srv.lastRestoreJob)
+	}
+	if srv.lastRestoreJob.Kind != restoreJobKindInventory {
+		t.Fatalf("kind=%q want inventory", srv.lastRestoreJob.Kind)
+	}
+}
+
+func TestRestoreTriggerIgnoresRequestCancel(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	store := newBlockingRestoreStorage()
+	cfg := config.Default()
+	srv := &Server{deps: Deps{
+		DB:            d,
+		Bus:           events.NewBus(16),
+		Config:        &cfg,
+		Storage:       func() storage.Storage { return store },
+		StoragePrefix: "backups/",
+	}}
+	now := time.Now()
+	res, err := d.UpsertFileBatch(ctx, []db.BatchEntry{{Path: "notes.txt", Size: 5, ModTime: now}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkUploadedBatch(ctx, []int64{res[0].ID}, md5hex("hello"), "backups/notes.txt", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, "backups/notes.txt", strings.NewReader("hello"), 5); err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	body, _ := json.Marshal(map[string]any{"paths": []string{"/"}, "days": 7, "tier": "standard"})
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodPost, "/api/restore/trigger", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleRestoreTrigger(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d want 202", rr.Code)
+	}
+	cancelReq()
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restore job never started")
+	}
+
+	srv.restoreJobMu.Lock()
+	if srv.currentRestoreJob == nil {
+		srv.restoreJobMu.Unlock()
+		t.Fatal("restore job cleared before release")
+	}
+	srv.restoreJobMu.Unlock()
+
+	store.releaseRestore()
+	srv.restoreJobWg.Wait()
+	srv.restoreJobMu.Lock()
+	defer srv.restoreJobMu.Unlock()
+	if srv.currentRestoreJob != nil {
+		t.Fatalf("current restore job still active: %+v", srv.currentRestoreJob)
+	}
+	if srv.lastRestoreJob == nil || srv.lastRestoreJob.Status != "completed" {
+		t.Fatalf("restore job did not complete: %+v", srv.lastRestoreJob)
+	}
 }
 
 func TestRestoreEstimateValidatesTier(t *testing.T) {
@@ -733,9 +1040,11 @@ func TestRestoreTriggerForwardsTier(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			srv.handleRestoreTrigger(rr, req)
-			if rr.Code != http.StatusOK {
-				t.Fatalf("status=%d want 200", rr.Code)
+			if rr.Code != http.StatusAccepted {
+				t.Fatalf("status=%d want 202", rr.Code)
 			}
+
+			srv.restoreJobWg.Wait()
 
 			spy.mu.Lock()
 			defer spy.mu.Unlock()

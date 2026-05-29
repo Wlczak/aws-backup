@@ -7,7 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/Wlczak/aws-backup/internal/engine"
@@ -298,6 +301,13 @@ type restoreTriggerResponse struct {
 	Errors                 []string `json:"errors,omitempty"`
 }
 
+type restoreJobStartResponse struct {
+	RestoreJobID int64  `json:"restore_job_id"`
+	Status       string `json:"status"`
+	Kind         string `json:"kind"`
+	Phase        string `json:"phase"`
+}
+
 type restoreDownloadRequest struct {
 	Paths          []string `json:"paths"`
 	TargetDir      string   `json:"target_dir"`
@@ -382,36 +392,90 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("days must be in [%d, %d] (got %d)", restoreDaysMin, restoreDaysMax, req.Days))
 		return
 	}
-
-	var emit engine.EventEmitter
-	if s.deps.Bus != nil {
-		emit = s.deps.Bus.Publish
-	}
-	stats, err := engine.RequestRestore(r.Context(), engine.RestoreRequestOptions{
-		DB:        s.deps.DB,
-		Storage:   st,
-		KeyPrefix: s.storagePrefix(),
-		Tier:      tier,
-		Paths:     req.Paths,
-		Days:      req.Days,
-		Emit:      emit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	job, busy := s.startRestoreJob(restoreJobKindTrigger)
+	if busy != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                "a restore job is already in progress",
+			"restore_job_id":       busy.ID,
+			"restore_job_kind":     busy.Kind,
+			"restore_job_phase":    busy.Phase,
+			"restore_job_status":   busy.Status,
+			"restore_job_started":  busy.StartedAt,
+			"restore_job_finished": busy.FinishedAt,
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, restoreTriggerResponse{
-		KeysRequested:          stats.KeysRequested,
-		KeysAlreadyInProgress:  stats.KeysAlreadyInProgress,
-		KeysAlreadyAvailable:   stats.KeysAlreadyAvailable,
-		FilesAffected:          stats.FilesAffected,
-		BytesAffected:          stats.BytesAffected,
-		FilesSkippedInProgress: stats.FilesSkippedInProgress,
-		BytesSkippedInProgress: stats.BytesSkippedInProgress,
-		FilesSkippedRestored:   stats.FilesSkippedRestored,
-		BytesSkippedRestored:   stats.BytesSkippedRestored,
-		UnknownPaths:           stats.UnknownPaths,
-		Errors:                 stats.Errors,
+	ctx, cancel := context.WithCancel(context.Background())
+	s.restoreJobMu.Lock()
+	s.currentRestoreJobCancel = cancel
+	s.restoreJobMu.Unlock()
+
+	s.restoreJobWg.Add(1)
+	go func(jobID int64) {
+		defer s.restoreJobWg.Done()
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-s.shutdownCh:
+				cancel()
+			case <-done:
+			}
+		}()
+		defer close(done)
+
+		wrappedEmit := func(ev engine.Event) {
+			s.emitRestoreJobEvent(jobID, ev)
+		}
+		stats, err := engine.RequestRestore(ctx, engine.RestoreRequestOptions{
+			DB:        s.deps.DB,
+			Storage:   st,
+			KeyPrefix: s.storagePrefix(),
+			Tier:      tier,
+			Paths:     req.Paths,
+			Days:      req.Days,
+			Emit:      wrappedEmit,
+		})
+		if err != nil {
+			status := "failed"
+			if errors.Is(err, context.Canceled) {
+				status = "cancelled"
+			}
+			s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+				job.KeysRequested = stats.KeysRequested
+				job.KeysAlreadyInProgress = stats.KeysAlreadyInProgress
+				job.KeysAlreadyAvailable = stats.KeysAlreadyAvailable
+				job.FilesAffected = stats.FilesAffected
+				job.BytesAffected = stats.BytesAffected
+				job.FilesSkippedInProgress = stats.FilesSkippedInProgress
+				job.BytesSkippedInProgress = stats.BytesSkippedInProgress
+				job.FilesSkippedRestored = stats.FilesSkippedRestored
+				job.BytesSkippedRestored = stats.BytesSkippedRestored
+				job.UnknownPaths = append([]string(nil), stats.UnknownPaths...)
+			})
+			s.finishRestoreJob(jobID, status, err)
+			return
+		}
+		s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+			job.KeysRequested = stats.KeysRequested
+			job.KeysAlreadyInProgress = stats.KeysAlreadyInProgress
+			job.KeysAlreadyAvailable = stats.KeysAlreadyAvailable
+			job.FilesAffected = stats.FilesAffected
+			job.BytesAffected = stats.BytesAffected
+			job.FilesSkippedInProgress = stats.FilesSkippedInProgress
+			job.BytesSkippedInProgress = stats.BytesSkippedInProgress
+			job.FilesSkippedRestored = stats.FilesSkippedRestored
+			job.BytesSkippedRestored = stats.BytesSkippedRestored
+			job.UnknownPaths = append([]string(nil), stats.UnknownPaths...)
+		})
+		s.finishRestoreJob(jobID, "completed", nil)
+	}(job.ID)
+
+	writeJSON(w, http.StatusAccepted, restoreJobStartResponse{
+		RestoreJobID: job.ID,
+		Status:       job.Status,
+		Kind:         job.Kind,
+		Phase:        job.Phase,
 	})
 }
 
@@ -879,6 +943,20 @@ func (s *Server) handleRestoreScanPending(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) handleGetRestoreJob(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid restore job id"))
+		return
+	}
+	job := s.lookupRestoreJob(id)
+	if job == nil {
+		writeError(w, http.StatusNotFound, errors.New("restore job not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
 // handleInventoryGet returns the current S3 inventory configuration on
 // the backup bucket, or {enabled: false} when none is set.
 func (s *Server) handleInventoryGet(w http.ResponseWriter, r *http.Request) {
@@ -951,38 +1029,101 @@ func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
 			errors.New("inventory manager or scanner not configured (storage missing)"))
 		return
 	}
-	// Same engine-idle gate as handleRestoreScanFull — an inventory sync
-	// HEADs every key in the manifest, racing engine writes on the same
-	// s3_key. (#191)
-	s.runMu.Lock()
-	busy := s.currentRun != 0
-	s.runMu.Unlock()
-	if busy {
-		writeError(w, http.StatusConflict,
-			errors.New("a backup run is in progress — inventory sync would race engine writes; try again when idle"))
+	if s.deps.RestoreScanner.Busy() {
+		writeError(w, http.StatusConflict, errors.New("restore scanner is already running"))
 		return
 	}
-	// Serialise concurrent clicks so two callers don't both download a
-	// multi-million-key manifest before the scanner's `running` flag
-	// rejects the second RunKeys with 409. (#197)
-	if !s.inventorySyncBusy.CompareAndSwap(false, true) {
-		writeError(w, http.StatusConflict, errors.New("inventory sync already in progress"))
+	job, busy := s.startRestoreJob(restoreJobKindInventory)
+	if busy != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                "a restore job is already in progress",
+			"restore_job_id":       busy.ID,
+			"restore_job_kind":     busy.Kind,
+			"restore_job_phase":    busy.Phase,
+			"restore_job_status":   busy.Status,
+			"restore_job_started":  busy.StartedAt,
+			"restore_job_finished": busy.FinishedAt,
+		})
 		return
 	}
-	defer s.inventorySyncBusy.Store(false)
-	keys, err := s.deps.Inventory.ListLatestKeys(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("list inventory keys: %w", err))
-		return
-	}
-	res, err := s.deps.RestoreScanner.RunKeys(r.Context(), scanner.ModeInventory, keys)
-	if err != nil {
-		if errors.Is(err, scanner.ErrBusy) {
-			writeError(w, http.StatusConflict, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.restoreJobMu.Lock()
+	s.currentRestoreJobCancel = cancel
+	s.restoreJobMu.Unlock()
+
+	s.restoreJobWg.Add(1)
+	go func(jobID int64) {
+		defer s.restoreJobWg.Done()
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-s.shutdownCh:
+				cancel()
+			case <-done:
+			}
+		}()
+		defer close(done)
+
+		s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+			job.Phase = "manifest"
+			job.Status = "running"
+			job.Total = 0
+			job.Processed = 0
+			job.Scanned = 0
+			job.Updated = 0
+			job.Errors = 0
+		})
+		wrappedEmit := func(ev engine.Event) {
+			s.emitRestoreJobEvent(jobID, ev)
+		}
+		keys, err := s.deps.Inventory.ListLatestKeys(ctx, wrappedEmit)
+		if err != nil {
+			status := "failed"
+			if errors.Is(err, context.Canceled) {
+				status = "cancelled"
+			}
+			s.finishRestoreJob(jobID, status, fmt.Errorf("list inventory keys: %w", err))
 			return
 		}
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("inventory scan: %w", err))
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+		s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+			job.Total = int64(len(keys))
+			job.Processed = 0
+			job.Phase = "scan"
+			job.ManifestKey = ""
+		})
+		if s.deps.RestoreScanner.Busy() {
+			s.finishRestoreJob(jobID, "failed", errors.New("restore scanner is already running"))
+			return
+		}
+		res, err := s.deps.RestoreScanner.RunKeys(ctx, scanner.ModeInventory, keys)
+		if err != nil {
+			status := "failed"
+			if errors.Is(err, context.Canceled) {
+				status = "cancelled"
+			} else if errors.Is(err, scanner.ErrBusy) {
+				status = "failed"
+			}
+			s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+				job.Scanned = int64(res.Scanned)
+				job.Updated = int64(res.Updated)
+				job.Errors = int64(res.Errors)
+			})
+			s.finishRestoreJob(jobID, status, fmt.Errorf("inventory scan: %w", err))
+			return
+		}
+		s.updateRestoreJob(jobID, func(job *restoreJobSummary) {
+			job.Scanned = int64(res.Scanned)
+			job.Updated = int64(res.Updated)
+			job.Errors = int64(res.Errors)
+		})
+		s.finishRestoreJob(jobID, "completed", nil)
+	}(job.ID)
+
+	writeJSON(w, http.StatusAccepted, restoreJobStartResponse{
+		RestoreJobID: job.ID,
+		Status:       job.Status,
+		Kind:         job.Kind,
+		Phase:        job.Phase,
+	})
 }

@@ -138,6 +138,13 @@ func (s *Scanner) RunKeys(ctx context.Context, mode Mode, keys []string) (Result
 	return s.run(ctx, mode, keys)
 }
 
+// Busy reports whether a scan is currently running. It lets API handlers
+// reject work that would otherwise fail with ErrBusy after they have
+// already committed to a background job.
+func (s *Scanner) Busy() bool {
+	return s.running.Load()
+}
+
 func (s *Scanner) run(ctx context.Context, mode Mode, keys []string) (Result, error) {
 	if !s.running.CompareAndSwap(false, true) {
 		return Result{}, ErrBusy

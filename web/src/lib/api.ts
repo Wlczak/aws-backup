@@ -96,7 +96,35 @@ export interface Status {
   download_mirror_snapshot?: DownloadMirrorSnapshot;
   restore_download_current?: RestoreDownloadSummary;
   restore_download_last?: RestoreDownloadSummary;
+  restore_job_current?: RestoreJobSummary;
+  restore_job_last?: RestoreJobSummary;
   stop_requested?: boolean;
+}
+
+export interface RestoreJobSummary {
+  id: number;
+  kind: 'trigger' | 'inventory';
+  started_at: string;
+  finished_at?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  phase: 'starting' | 'manifest' | 'request' | 'scan' | 'complete' | 'failed' | 'cancelled';
+  total: number;
+  processed: number;
+  scanned: number;
+  updated: number;
+  errors: number;
+  keys_requested?: number;
+  keys_already_in_progress?: number;
+  keys_already_available?: number;
+  files_affected?: number;
+  bytes_affected?: number;
+  files_skipped_in_progress?: number;
+  bytes_skipped_in_progress?: number;
+  files_skipped_restored?: number;
+  bytes_skipped_restored?: number;
+  unknown_paths?: string[];
+  manifest_key?: string;
+  error_message?: string;
 }
 
 export interface DownloadJobSummary {
@@ -156,6 +184,13 @@ export interface RestoreDownloadSummary {
 
 export interface RestoreDownloadTriggerResponse {
   restore_download_id: number;
+}
+
+export interface RestoreJobStartResponse {
+  restore_job_id: number;
+  status: string;
+  kind: 'trigger' | 'inventory';
+  phase: string;
 }
 
 export interface RestoreEstimate {
@@ -503,19 +538,7 @@ export const api = {
    * so the UI reflects the request.
    */
   restoreTrigger: (paths: string[], days: number, tier: RestoreTier) =>
-    request<{
-      keys_requested: number;
-      keys_already_in_progress: number;
-      keys_already_available: number;
-      files_affected: number;
-      bytes_affected: number;
-      files_skipped_in_progress: number;
-      bytes_skipped_in_progress: number;
-      files_skipped_restored: number;
-      bytes_skipped_restored: number;
-      unknown_paths?: string[];
-      errors?: string[];
-    }>('/api/restore/trigger', {
+    request<RestoreJobStartResponse>('/api/restore/trigger', {
       method: 'POST',
       body: JSON.stringify({ paths, days, tier }),
     }),
@@ -562,7 +585,7 @@ export const api = {
       method: 'DELETE',
     }),
   inventorySync: () =>
-    request<RestoreScanResult>('/api/restore/inventory/sync', {
+    request<RestoreJobStartResponse>('/api/restore/inventory/sync', {
       method: 'POST',
     }),
 };
@@ -614,6 +637,7 @@ export function subscribeEvents(
     'upload_start', 'upload_progress', 'upload_complete', 'upload_failed',
     'run_start', 'run_log', 'run_complete',
     'db_sync_start', 'db_sync_progress', 'db_sync_complete', 'db_sync_failed',
+    'restore_manifest_start', 'restore_manifest_progress', 'restore_manifest_complete', 'restore_manifest_failed',
     'restore_scan_start', 'restore_scan_progress', 'restore_scan_complete', 'restore_scan_failed',
     'restore_request_start', 'restore_request_progress', 'restore_request_complete', 'restore_request_failed',
     'restore_download_start', 'restore_download_progress', 'restore_download_complete', 'restore_download_failed',

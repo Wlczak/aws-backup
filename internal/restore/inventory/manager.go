@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wlczak/aws-backup/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -173,8 +174,8 @@ func (m *Manager) Put(ctx context.Context, freq Frequency) error {
 	}
 	bucketARN := "arn:aws:s3:::" + bucket
 	cfg := &s3types.InventoryConfiguration{
-		Id:        aws.String(ConfigID),
-		IsEnabled: aws.Bool(true),
+		Id:                     aws.String(ConfigID),
+		IsEnabled:              aws.Bool(true),
 		IncludedObjectVersions: s3types.InventoryIncludedObjectVersionsCurrent,
 		Schedule: &s3types.InventorySchedule{
 			Frequency: s3types.InventoryFrequency(freq),
@@ -234,18 +235,48 @@ func (m *Manager) Delete(ctx context.Context) error {
 // `_inventory/<bucket>/<id>/`, parses it, and streams every CSV data
 // file to assemble the list of source object keys. The returned slice
 // excludes any inventory artefacts under `_inventory/` itself so the
-// caller does not waste HEADs on its own metadata.
-func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
+// caller does not waste HEADs on its own metadata. When emit is non-nil
+// it receives restore_manifest_* progress events for the locate/fetch/
+// parse phase.
+func (m *Manager) ListLatestKeys(ctx context.Context, emit func(engine.Event)) ([]string, error) {
 	client, bucket, err := m.snapshot()
 	if err != nil {
 		return nil, err
 	}
+	if emit != nil {
+		emit(engine.Event{
+			Type: engine.EventRestoreManifestStart,
+			At:   time.Now(),
+			Data: map[string]any{"stage": "locating", "processed": 0, "total": 0},
+		})
+	}
 	manifestKey, manifestAge, err := findLatestManifest(ctx, client, bucket)
 	if err != nil {
+		if emit != nil {
+			emit(engine.Event{
+				Type: engine.EventRestoreManifestFailed,
+				At:   time.Now(),
+				Data: map[string]any{"stage": "locating", "error": err.Error()},
+			})
+		}
 		return nil, err
 	}
 	if manifestKey == "" {
+		if emit != nil {
+			emit(engine.Event{
+				Type: engine.EventRestoreManifestFailed,
+				At:   time.Now(),
+				Data: map[string]any{"stage": "locating", "error": "no inventory manifest found yet"},
+			})
+		}
 		return nil, errors.New("no inventory manifest found yet — first report can take up to 48h after enabling")
+	}
+	if emit != nil {
+		emit(engine.Event{
+			Type: engine.EventRestoreManifestProgress,
+			At:   time.Now(),
+			Data: map[string]any{"stage": "manifest", "manifest_key": manifestKey, "processed": 1, "total": 2},
+		})
 	}
 	// Warn when the chosen manifest is older than 2× the configured
 	// frequency — typically signals inventory generation is silently
@@ -267,7 +298,21 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 
 	mf, err := fetchManifest(ctx, client, bucket, manifestKey)
 	if err != nil {
+		if emit != nil {
+			emit(engine.Event{
+				Type: engine.EventRestoreManifestFailed,
+				At:   time.Now(),
+				Data: map[string]any{"stage": "manifest", "manifest_key": manifestKey, "error": err.Error()},
+			})
+		}
 		return nil, fmt.Errorf("fetch manifest %s: %w", manifestKey, err)
+	}
+	if emit != nil {
+		emit(engine.Event{
+			Type: engine.EventRestoreManifestProgress,
+			At:   time.Now(),
+			Data: map[string]any{"stage": "manifest", "manifest_key": manifestKey, "processed": 2, "total": 2},
+		})
 	}
 
 	schema := parseSchema(mf.FileSchema)
@@ -277,9 +322,16 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 	}
 
 	var keys []string
-	for _, f := range mf.Files {
+	for i, f := range mf.Files {
 		dataKeys, err := fetchDataKeys(ctx, client, bucket, f.Key, keyCol, f.MD5Checksum, f.Size)
 		if err != nil {
+			if emit != nil {
+				emit(engine.Event{
+					Type: engine.EventRestoreManifestFailed,
+					At:   time.Now(),
+					Data: map[string]any{"stage": "data", "manifest_key": manifestKey, "data_key": f.Key, "error": err.Error()},
+				})
+			}
 			return nil, fmt.Errorf("fetch data %s: %w", f.Key, err)
 		}
 		for _, k := range dataKeys {
@@ -290,6 +342,33 @@ func (m *Manager) ListLatestKeys(ctx context.Context) ([]string, error) {
 			}
 			keys = append(keys, k)
 		}
+		if emit != nil {
+			emit(engine.Event{
+				Type: engine.EventRestoreManifestProgress,
+				At:   time.Now(),
+				Data: map[string]any{
+					"stage":        "data",
+					"manifest_key": manifestKey,
+					"processed":    i + 1,
+					"total":        len(mf.Files),
+					"data_key":     f.Key,
+					"keys":         len(keys),
+				},
+			})
+		}
+	}
+	if emit != nil {
+		emit(engine.Event{
+			Type: engine.EventRestoreManifestComplete,
+			At:   time.Now(),
+			Data: map[string]any{
+				"stage":        "complete",
+				"manifest_key": manifestKey,
+				"processed":    len(mf.Files),
+				"total":        len(mf.Files),
+				"keys":         len(keys),
+			},
+		})
 	}
 	return keys, nil
 }

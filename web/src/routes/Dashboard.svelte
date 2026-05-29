@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse } from '../lib/api';
+  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -482,15 +482,7 @@
   let showRestoreForm = $state(false);
   let restoreDays = $state(7);
   let restoring = $state(false);
-  let restoreResult = $state<{
-    keys_requested: number;
-    keys_already_in_progress: number;
-    keys_already_available: number;
-    files_affected: number;
-    bytes_affected: number;
-    unknown_paths?: string[];
-    errors?: string[];
-  } | null>(null);
+  let restoreResult = $state<RestoreJobStartResponse | null>(null);
 
   let showDeleteConfirm = $state(false);
   let deleting = $state(false);
@@ -529,7 +521,9 @@
     }
     restoring = true; restoreResult = null;
     try {
-      restoreResult = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays, 'standard');
+      const job = await api.restoreTrigger(fullSyncResult.cloud_missing_from_local, restoreDays, 'standard');
+      restoreResult = job;
+      toast.info(`Restore request queued as job #${job.restore_job_id}.`);
     } catch (e) {
       toast.error(String(e)); // (#226)
     } finally {
@@ -846,10 +840,7 @@
           <div class="fix-row">
             {#if restoreResult}
               <span class="ok-text">
-                Retrieval requested · {restoreResult.keys_requested} key(s) · {restoreResult.files_affected} file(s) · {bytes(restoreResult.bytes_affected)}
-                {#if restoreResult.keys_already_in_progress > 0} · {restoreResult.keys_already_in_progress} already thawing{/if}
-                {#if restoreResult.keys_already_available > 0} · {restoreResult.keys_already_available} already available{/if}
-                {#if restoreResult.errors?.length} · {restoreResult.errors.length} error(s){/if}
+                Retrieval queued as job #{restoreResult.restore_job_id} · {restoreResult.status} · {restoreResult.phase}
               </span>
             {:else if deleteResult}
               <span class="ok-text">
