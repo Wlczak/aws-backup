@@ -113,6 +113,45 @@
     selectedClientLog = row;
   }
 
+  function buildRunLogText() {
+    if (!detail) return '';
+    const lines = [
+      `Run #${detail.run.id}`,
+      `Started: ${formatDate(detail.run.started_at)}`,
+      `Finished: ${detail.run.finished_at ? formatDate(detail.run.finished_at) : '—'}`,
+      `Status: ${detail.run.status}`,
+      `Scanned: ${detail.run.files_scanned.toLocaleString()} files (${bytes(detail.run.bytes_scanned)})`,
+      `Uploaded: ${detail.run.files_uploaded.toLocaleString()} files (${bytes(detail.run.bytes_uploaded)})`,
+      detail.run.error_message ? `Error: ${detail.run.error_message}` : '',
+      '',
+      ...detail.logs.map((l) => `${formatDate(l.timestamp)} [${l.level}] ${l.message}`),
+    ];
+    return lines.filter((line) => line !== '').join('\n');
+  }
+
+  async function copyRunLog() {
+    const text = buildRunLogText();
+    if (!text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', 'true');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      toast.success('Copied run log.');
+    } catch (e) {
+      toast.error(`Copy failed: ${String(e)}`);
+    }
+  }
+
   onMount(() => {
     void loadRuns();
     void loadClientLogs();
@@ -175,6 +214,9 @@
 
   <div class="card">
     {#if detail}
+      <div class="toolbar card-actions">
+        <button onclick={copyRunLog} type="button">Copy run log</button>
+      </div>
       <div class="row"><span class="label">Run</span>
         <span>#{detail.run.id} <StatusBadge status={detail.run.status} /></span>
       </div>
@@ -275,6 +317,7 @@
     margin-top: 1rem;
   }
   .toolbar { display: flex; justify-content: flex-end; }
+  .card-actions { margin-bottom: 0.75rem; }
   .danger {
     border-color: var(--err);
     color: var(--err);

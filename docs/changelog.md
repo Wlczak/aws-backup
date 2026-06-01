@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Logs page now has a "Copy run log" button that copies the selected run's header and full log text to the clipboard |
 | — | — | Added a separate browser-log pipeline: public same-origin `/api/client-logs` ingest, authenticated list/clear endpoints, frontend error/toast/request capture, and a debug toggle in the app header |
 | — | — | Batched full runs now fail fast on the first real upload error instead of cycling into the next scan batch with the same bad row still pending |
 | — | — | Documented that `/api/status` is the authoritative dashboard source of truth and `/api/events` is optional live detail, not a required control plane for scan-only runs |
