@@ -23,6 +23,7 @@ type scanDB interface {
 // ScanStats summarises the outcome of a Scan call.
 type ScanStats struct {
 	Seen      int64 // files observed during walk
+	Bytes     int64 // total bytes observed during walk
 	New       int64 // rows inserted into DB
 	Changed   int64 // existing rows whose size/mtime differed
 	Unchanged int64 // existing rows with no size/mtime change
@@ -45,6 +46,7 @@ type Logger func(msg string)
 // moment the latest batch was committed.
 type ScanProgress struct {
 	Seen    int64
+	Bytes   int64
 	New     int64
 	Changed int64
 }
@@ -100,7 +102,8 @@ func Scan(
 	// flusher concurrently and read by emitWalkProgress under no lock.
 	// stats (the function-return aggregate) is hydrated from these at
 	// return time.
-	var walkSeen, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
+	var walkSeen, walkBytes, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
+	var batchBytesSeen int64
 	var (
 		lastEmitMu  sync.Mutex
 		lastEmitAt  time.Time
@@ -124,6 +127,7 @@ func Scan(
 		lastEmitMu.Unlock()
 		onProgress(ScanProgress{
 			Seen:    seen,
+			Bytes:   walkBytes.Load(),
 			New:     atomicNew.Load(),
 			Changed: atomicChanged.Load(),
 		})
@@ -297,13 +301,11 @@ func Scan(
 		bufLen := len(buf)
 		mu.Unlock()
 		walkSeen.Add(1)
+		walkBytes.Add(e.Size)
+		batchBytesSeen += e.Size
 		emitWalkProgress(false)
 		if batchBytes > 0 && !paused {
-			var batchTotal int64
-			for _, entry := range buf {
-				batchTotal += entry.Size
-			}
-			if batchTotal >= batchBytes {
+			if batchBytesSeen >= batchBytes {
 				paused = true
 				stopAfter = currentDir()
 				if stopAfter == "" {
@@ -333,6 +335,7 @@ func Scan(
 	stats.Changed = atomicChanged.Load()
 	stats.Unchanged = atomicUnchanged.Load()
 	stats.Seen = stats.New + stats.Changed + stats.Unchanged
+	stats.Bytes = walkBytes.Load()
 
 	if flushErr != nil {
 		return stats, ScanBatchResult{}, flushErr

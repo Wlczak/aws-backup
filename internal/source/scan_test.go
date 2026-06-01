@@ -43,6 +43,9 @@ func TestScanNewChangedMissing(t *testing.T) {
 	if s.Seen != 2 || s.New != 2 || s.Changed != 0 || s.Missing != 0 {
 		t.Errorf("first scan: %+v", s)
 	}
+	if s.Bytes != 6 {
+		t.Errorf("first scan bytes=%d want 6", s.Bytes)
+	}
 
 	// Mark both as uploaded so we can see the disappearance reclassification.
 	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
@@ -74,6 +77,9 @@ func TestScanNewChangedMissing(t *testing.T) {
 	}
 	if s.Seen != 2 {
 		t.Errorf("seen=%d want 2", s.Seen)
+	}
+	if s.Bytes != 5 {
+		t.Errorf("bytes=%d want 5", s.Bytes)
 	}
 	if s.New != 1 {
 		t.Errorf("new=%d want 1", s.New)
@@ -162,6 +168,9 @@ func TestScanProgressCallback(t *testing.T) {
 	}
 	if s.Seen != n {
 		t.Fatalf("seen=%d want %d", s.Seen, n)
+	}
+	if s.Bytes != n {
+		t.Fatalf("bytes=%d want %d", s.Bytes, n)
 	}
 	if len(samples) == 0 {
 		t.Fatal("expected at least one progress callback")
@@ -276,6 +285,9 @@ func TestScanPausesOnBatchBytesAndSkipsCompletedFolders(t *testing.T) {
 	if s.Seen != 2 {
 		t.Fatalf("seen=%d want 2", s.Seen)
 	}
+	if s.Bytes != 20 {
+		t.Fatalf("bytes=%d want 20", s.Bytes)
+	}
 	files, _, err := d.ListFiles(ctx, db.FilesFilter{})
 	if err != nil {
 		t.Fatal(err)
@@ -299,5 +311,35 @@ func TestScanPausesOnBatchBytesAndSkipsCompletedFolders(t *testing.T) {
 	}
 	if s2.Seen != 1 {
 		t.Fatalf("second batch seen=%d want 1", s2.Seen)
+	}
+	if s2.Bytes != 10 {
+		t.Fatalf("second batch bytes=%d want 10", s2.Bytes)
+	}
+}
+
+func TestScanPausesOnBatchBytesAcrossFlushes(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "folder", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "folder", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "folder", "c.txt"), strings.Repeat("c", 10))
+	writeFile(t, filepath.Join(root, "rest", "d.txt"), strings.Repeat("d", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 1, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Paused {
+		t.Fatalf("expected batch to pause across flushes, got %+v", batch)
+	}
+	if s.Seen != 3 {
+		t.Fatalf("seen=%d want 3", s.Seen)
+	}
+	if s.Bytes != 30 {
+		t.Fatalf("bytes=%d want 30", s.Bytes)
 	}
 }
