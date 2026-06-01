@@ -32,6 +32,8 @@ type runSummary struct {
 	FilesScanned  int64     `json:"files_scanned"`
 	FilesUploaded int64     `json:"files_uploaded"`
 	BytesUploaded int64     `json:"bytes_uploaded"`
+	FilesPlanned  int64     `json:"files_planned"`
+	BytesPlanned  int64     `json:"bytes_planned"`
 	ScanPaused    bool      `json:"scan_paused"`
 	ScanComplete  bool      `json:"scan_complete"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
@@ -46,6 +48,8 @@ func toSummary(r db.Run) runSummary {
 		FilesScanned:  r.FilesScanned,
 		FilesUploaded: r.FilesUploaded,
 		BytesUploaded: r.BytesUploaded,
+		FilesPlanned:  r.FilesPlanned,
+		BytesPlanned:  r.BytesPlanned,
 		ScanPaused:    r.ScanPaused,
 		ScanComplete:  r.ScanComplete,
 		ErrorMessage:  r.ErrorMessage,
@@ -404,6 +408,10 @@ type statusResponse struct {
 	// Stop button to a Continue affordance and render a "stopping" badge.
 	// (#124 follow-up)
 	StopRequested bool `json:"stop_requested"`
+	// CancelRequested is true after a user /cancel until the current run
+	// exits. Lets the dashboard show "cancelling" from the server's view
+	// rather than a purely local transient flag.
+	CancelRequested bool `json:"cancel_requested"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -431,6 +439,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			sum := toSummary(run)
 			resp.Current = &sum
 			resp.StopRequested = s.currentRunStopReq.Load()
+			resp.CancelRequested = s.currentRunCancelReq.Load()
 		}
 	}
 

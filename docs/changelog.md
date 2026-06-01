@@ -5,6 +5,9 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | # | Commit | Summary |
 | --- | --- | --- |
 | — | — | Documented that `/api/status` is the authoritative dashboard source of truth and `/api/events` is optional live detail, not a required control plane for scan-only runs |
+| — | — | Dashboard now shows a pending current-run card from the returned run ID immediately after start, then reconciles with `/api/status` and SSE once the engine catches up |
+| — | — | Fixed the dashboard SSE client to unwrap the event payload correctly, so upload and scan progress events are no longer dropped on parse |
+| — | — | Dashboard cancel now shows a local cancelling state, and the scan status line falls back to the run row's scanned count when SSE lags so it stays in sync with the index gadget |
 | — | — | Dashboard now batches live SSE run updates every 100 ms so scan-only runs stay responsive when the event stream is chatty |
 | — | — | Throttled live copy/upload progress to a 500 ms cadence so the dashboard gets fewer state mutations and the SSE stream carries less chatter |
 | #141 | — | Full backup runs now alternate scan batches and uploads on a soft `backup.scan_batch_bytes` budget, persist run-scoped completed folders, and skip already-completed folders on subsequent scan batches |

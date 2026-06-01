@@ -183,6 +183,37 @@ func TestStatusEmpty(t *testing.T) {
 	}
 }
 
+func TestStatusCurrentRunIncludesPlanAndCancelFlags(t *testing.T) {
+	_, deps := newTestServer(t)
+	ctx := context.Background()
+	runID, err := deps.DB.CreateRun(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.SetRunPlan(ctx, runID, 42, 1234); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+	srv.runMu.Lock()
+	srv.currentRun = runID
+	srv.currentRunCancelReq.Store(true)
+	srv.runMu.Unlock()
+
+	var got statusResponse
+	getJSON(t, ts, "/api/status", &got)
+	if got.Current == nil {
+		t.Fatal("current run missing")
+	}
+	if got.Current.FilesPlanned != 42 || got.Current.BytesPlanned != 1234 {
+		t.Fatalf("plan=%+v want files=42 bytes=1234", got.Current)
+	}
+	if !got.CancelRequested {
+		t.Fatal("cancel_requested=false want true")
+	}
+}
+
 // TestStatusStaleCurrentRunIDIsClean verifies that when currentRun
 // points at a row that no longer exists (manual delete, test cleanup
 // race), /api/status returns 200 with no current run rather than a

@@ -335,6 +335,8 @@ export interface Run {
   files_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
+  files_planned?: number;
+  bytes_planned?: number;
   scan_paused?: boolean;
   scan_complete?: boolean;
   error_message?: string;
@@ -422,6 +424,7 @@ export interface Status {
   restore_job_current?: RestoreJobSummary;
   restore_job_last?: RestoreJobSummary;
   stop_requested?: boolean;
+  cancel_requested?: boolean;
 }
 
 export interface RestoreJobSummary {
@@ -1330,7 +1333,10 @@ export function subscribeEvents(
     } catch {
       raw = ev.data;
     }
-    const parsed = parseSseEvent(ev.type, raw);
+    const parsed = parseSseEvent(
+      ev.type,
+      isRecord(raw) && 'data' in raw ? raw.data : raw,
+    );
     if (!parsed) {
       if (import.meta.env.DEV) {
         console.warn('[subscribeEvents] invalid SSE payload — ignoring:', ev.type, raw);
