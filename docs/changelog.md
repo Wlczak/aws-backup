@@ -12,7 +12,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | — | Throttled live copy/upload progress to a 500 ms cadence so the dashboard gets fewer state mutations and the SSE stream carries less chatter |
 | — | — | Dashboard current-run stats now show scanned bytes from a real `bytes_scanned` counter instead of reusing upload bytes |
 | — | — | Fixed segmented scan pause accounting so the byte budget accumulates across flushes instead of resetting after every DB batch |
-| — | — | Batched full scans now stop after the first paused folder batch instead of resuming the rest of the tree automatically |
+| — | — | Batched full scans now resume after each paused folder batch so scan/upload cycles continue until the tree is fully covered |
 | #141 | — | Full backup runs now alternate scan batches and uploads on a soft `backup.scan_batch_bytes` budget, persist run-scoped completed folders, and skip already-completed folders on subsequent scan batches |
 | — | — | Added cookie auth with a central-config bcrypt hash, public `/api/auth/*` endpoints, and `./aws-backup passwd` bootstrap for first-time setup |
 | #195 / #196 | — | Restore-trigger and inventory-sync now run as background jobs with `restore_job_id` / `/api/status` recovery, plus `restore_manifest_*` SSE for inventory manifest fetch/parse |

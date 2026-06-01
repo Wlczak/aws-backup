@@ -15,8 +15,8 @@ Runs execute against the currently active profile. The active profile determines
     per batch, then scan_complete. The row batch size comes from
     `backup.chunk_size`; the batched full-run byte budget comes from
     `backup.scan_batch_bytes` and pauses only after the current folder
-    finishes. Paused full runs stop after that batch instead of resuming the
-    rest of the tree automatically.
+    finishes. Paused full runs upload the current batch, then continue with
+    the next scan batch until the tree is fully covered.
     Update run.files_scanned. If mode=scan, jump to finalize.
 
 3.  S3 list  (modes: full | upload)
@@ -34,16 +34,15 @@ Runs execute against the currently active profile. The active profile determines
     parent-level zip pools when that reduces S3 object count; emit upload_plan
     with totals.
 
-    Batched full runs stop after the first paused scan batch instead of
-    continuing through the rest of the tree. Each scan batch records completed
-    folders in the run-scoped `run_scan_folders` table and exposes
-    `runs.scan_paused` / `runs.scan_complete` so `/api/status` can tell the UI
-    whether the engine is between scan batches or has finished scanning
-    entirely. The upload phase filters out any pending rows that belong to
-    folders already completed in the current run. It emits `upload_plan`
-    before the batch uploads begin so the dashboard has a live denominator
-    instead of waiting for the first batch to finish, then refreshes the
-    cumulative plan again after the batch completes so `/api/status` and SSE
+    Batched full runs continue after each paused scan batch until the tree is
+    fully covered. Each scan batch records completed folders in the run-scoped
+    `run_scan_folders` table and exposes `runs.scan_paused` / `runs.scan_complete`
+    so `/api/status` can tell the UI whether the engine is between scan batches
+    or has finished scanning entirely. The upload phase filters out any pending
+    rows that belong to folders already completed in the current run. It emits
+    `upload_plan` before the batch uploads begin so the dashboard has a live
+    denominator instead of waiting for the first batch to finish, then refreshes
+    the cumulative plan again after the batch completes so `/api/status` and SSE
     replay converge on the run's current totals.
 
 6.  Pipeline preparation

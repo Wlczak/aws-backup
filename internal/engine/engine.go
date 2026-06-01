@@ -602,10 +602,10 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			return db.RunCompleted, nil
 		}
 
-		// A paused full run stops after the current folder batch instead of
-		// immediately resuming the rest of the tree. Operators can trigger a
-		// fresh run later if they want to continue with the remaining files.
-		return db.RunStopped, nil
+		// A paused full run continues with the next scan batch after uploading
+		// the current batch's pending rows. The resumable skip-set carries the
+		// completed folders forward so the next loop iteration only walks the
+		// remaining tree.
 	}
 }
 
