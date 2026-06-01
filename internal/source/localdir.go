@@ -89,6 +89,7 @@ func (l *LocalDir) Walk(ctx context.Context, fn WalkFunc) error {
 			return err
 		}
 		if !d.Type().IsRegular() {
+			slog.Info("localdir walk: non-regular file skipped", "path", path, "type", d.Type().String())
 			return nil
 		}
 		info, ierr := d.Info()

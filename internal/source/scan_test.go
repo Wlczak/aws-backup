@@ -200,6 +200,50 @@ func TestScanContextCancel(t *testing.T) {
 	}
 }
 
+func TestScanPauseSkipsExactRootFileOnResume(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "root.bin"), strings.Repeat("a", 16))
+	writeFile(t, filepath.Join(root, "sub", "child.txt"), "b")
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	firstStats, firstBatch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstBatch.Paused {
+		t.Fatalf("first batch not paused: %+v", firstBatch)
+	}
+	if len(firstBatch.CompletedFolders) == 0 {
+		t.Fatalf("first batch completed set empty: %+v", firstBatch)
+	}
+	if firstStats.Seen != 1 {
+		t.Fatalf("first batch seen=%d want 1", firstStats.Seen)
+	}
+	if firstBatch.PausePath != "root.bin" {
+		t.Fatalf("pause path=%q want root.bin", firstBatch.PausePath)
+	}
+
+	resumeSkip := map[string]struct{}{}
+	for _, p := range firstBatch.CompletedFolders {
+		resumeSkip[p] = struct{}{}
+	}
+
+	secondStats, secondBatch, err := Scan(ctx, src, d, nil, resumeSkip, nil, nil, 10, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondStats.Seen == 0 {
+		t.Fatalf("resume scan saw no files; expected child.txt to advance the batch")
+	}
+	if secondBatch.Paused && secondBatch.PausePath == "root.bin" {
+		t.Fatalf("resume scan paused again on the same root file: %+v", secondBatch)
+	}
+}
+
 type scanSpy struct {
 	mu      sync.Mutex
 	batches [][]string

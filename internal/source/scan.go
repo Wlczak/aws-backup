@@ -104,6 +104,11 @@ func Scan(
 	// return time.
 	var walkSeen, walkBytes, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
 	var batchBytesSeen int64
+	var walkDirs, walkFiles atomic.Int64
+	var skipResumeDirs, skipResumeFiles atomic.Int64
+	var skipPartialDirs, skipPartialFiles atomic.Int64
+	var walkNonRegular atomic.Int64
+	var walkInvalid atomic.Int64
 	var (
 		lastEmitMu  sync.Mutex
 		lastEmitAt  time.Time
@@ -277,9 +282,11 @@ func Scan(
 			return err
 		}
 		if !e.IsDir && len(paths) > 0 && !matchesPartial(e.RelPath, paths) {
+			skipPartialFiles.Add(1)
 			return nil
 		}
 		if e.IsDir && len(paths) > 0 && !matchesPartial(e.RelPath, paths) {
+			skipPartialDirs.Add(1)
 			return ErrSkipDir
 		}
 
@@ -290,11 +297,24 @@ func Scan(
 
 		if e.IsDir {
 			if _, ok := skipFolders[e.RelPath]; ok {
+				skipResumeDirs.Add(1)
+				if log != nil {
+					log("scan skip resume dir: " + e.RelPath)
+				}
 				return ErrSkipDir
 			}
+			walkDirs.Add(1)
 			dirStack = append(dirStack, dirFrame{path: e.RelPath})
 			return nil
 		}
+		if _, ok := skipFolders[e.RelPath]; ok {
+			skipResumeFiles.Add(1)
+			if log != nil {
+				log("scan skip resume file: " + e.RelPath)
+			}
+			return nil
+		}
+		walkFiles.Add(1)
 
 		mu.Lock()
 		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
@@ -310,6 +330,9 @@ func Scan(
 				stopAfter = currentDir()
 				if stopAfter == "" {
 					stopAfter = e.RelPath
+				}
+				if log != nil {
+					log("scan batch pause requested at " + stopAfter + " (bytes=" + strconv.FormatInt(batchBytesSeen, 10) + ")")
 				}
 			}
 		}
@@ -328,6 +351,9 @@ func Scan(
 	// Close out any directories that were fully traversed before the walk
 	// ended or before the pause sentinel fired.
 	popFinished("")
+	if paused && stopAfter != "" {
+		completedFolders = uniqueAppend(completedFolders, stopAfter)
+	}
 
 	// Hydrate the return aggregate from the atomic counters now that
 	// both walker and flusher are done writing them.
@@ -361,6 +387,19 @@ func Scan(
 		}
 	}
 
+	if log != nil {
+		log("scan batch done: paused=" + strconv.FormatBool(paused && errors.Is(walkErr, stopWalkErr)) +
+			" completed=" + strconv.Itoa(len(completedFolders)) +
+			" pause_path=" + stopAfter +
+			" visited_dirs=" + strconv.FormatInt(walkDirs.Load(), 10) +
+			" visited_files=" + strconv.FormatInt(walkFiles.Load(), 10) +
+			" resume_skipped_dirs=" + strconv.FormatInt(skipResumeDirs.Load(), 10) +
+			" resume_skipped_files=" + strconv.FormatInt(skipResumeFiles.Load(), 10) +
+			" partial_skipped_dirs=" + strconv.FormatInt(skipPartialDirs.Load(), 10) +
+			" partial_skipped_files=" + strconv.FormatInt(skipPartialFiles.Load(), 10) +
+			" non_regular=" + strconv.FormatInt(walkNonRegular.Load(), 10) +
+			" invalid_paths=" + strconv.FormatInt(walkInvalid.Load(), 10))
+	}
 	return stats, ScanBatchResult{
 		CompletedFolders: completedFolders,
 		Paused:           paused && errors.Is(walkErr, stopWalkErr),
