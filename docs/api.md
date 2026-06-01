@@ -11,7 +11,7 @@ POST   /api/auth/login              {password: "..."} → sets the auth cookie o
 POST   /api/auth/logout             clears the auth cookie
 
 # Run lifecycle
-GET    /api/status                    current + last run (includes scan_paused / scan_complete), download mirror snapshot, restore-download current + last, stop_requested flag
+GET    /api/status                    current + last run (includes scan_paused / scan_complete / bytes_scanned), download mirror snapshot, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
 GET    /api/runs/{id}                 detail + logs
 POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}
@@ -101,11 +101,11 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 
 | Type | Payload (Data fields) |
 | --- | --- |
-| `run_start` | files_scanned, files_uploaded, bytes_uploaded |
+| `run_start` | files_scanned, bytes_scanned, files_uploaded, bytes_uploaded |
 | `run_log` | level, message — replayed as a burst on SSE reconnect (#130) |
-| `run_complete` | status, files_scanned, files_uploaded, bytes_uploaded, error_message |
-| `scan_progress` | seen, new, changed (#137) |
-| `scan_complete` | seen, new, changed, unchanged, missing |
+| `run_complete` | status, files_scanned, bytes_scanned, files_uploaded, bytes_uploaded, error_message |
+| `scan_progress` | seen, bytes, new, changed (#137) |
+| `scan_complete` | seen, bytes, new, changed, unchanged, missing |
 | `upload_plan` | total_files, total_groups, total_bytes (#126) |
 | `copy_progress` | file_id, name, bytes_copied, size, percent |
 | `upload_start` | group_id |

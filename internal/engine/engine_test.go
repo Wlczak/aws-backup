@@ -257,6 +257,9 @@ func TestEngineBatchedFullRunStopsAfterFirstPausedBatch(t *testing.T) {
 	if run.FilesScanned != 2 {
 		t.Fatalf("files_scanned=%d want 2", run.FilesScanned)
 	}
+	if run.BytesScanned != 20 {
+		t.Fatalf("bytes_scanned=%d want 20", run.BytesScanned)
+	}
 	if run.FilesUploaded != 2 {
 		t.Fatalf("files_uploaded=%d want 2", run.FilesUploaded)
 	}

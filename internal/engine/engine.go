@@ -183,7 +183,17 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 	buf.start(ctx)
 	e.buf = buf
 
-	e.emit(Event{Type: EventRunStart, RunID: runID, At: start})
+	e.emit(Event{
+		Type:  EventRunStart,
+		RunID: runID,
+		At:    start,
+		Data: map[string]any{
+			"files_scanned":  0,
+			"bytes_scanned":   0,
+			"files_uploaded": 0,
+			"bytes_uploaded":  0,
+		},
+	})
 	e.log(ctx, runID, db.LogInfo, "run started")
 
 	finalStatus, runErr := e.runInner(ctx, runID)
@@ -248,6 +258,7 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 		Data: map[string]any{
 			"status":         finalStatus,
 			"files_scanned":  stats.FilesScanned,
+			"bytes_scanned":  stats.BytesScanned,
 			"files_uploaded": stats.FilesUploaded,
 			"bytes_uploaded": stats.BytesUploaded,
 			"error_message":  errMsg,
@@ -285,14 +296,15 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 					Type: EventScanProgress, RunID: runID, At: e.opts.Now(),
 					Data: map[string]any{
 						"seen":    p.Seen,
+						"bytes":   p.Bytes,
 						"new":     p.New,
 						"changed": p.Changed,
 					},
 				})
 				// Mirror the running count to the run row so a poller that
 				// missed an SSE frame (or reconnected mid-scan) still sees
-				// accurate files_scanned via /api/status.
-				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, 0, 0)
+				// accurate files_scanned / bytes_scanned via /api/status.
+				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, p.Bytes, 0, 0)
 			},
 			e.opts.ScanChunkSize, 0,
 		)
@@ -310,7 +322,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			}
 			return db.RunFailed, fmt.Errorf("scan: %w", err)
 		}
-		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, 0, 0); err != nil {
+		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, scanStats.Bytes, 0, 0); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return db.RunCancelled, cerr
 			}
@@ -322,14 +334,14 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		e.emit(Event{
 			Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{
-				"seen": scanStats.Seen, "new": scanStats.New,
+				"seen": scanStats.Seen, "bytes": scanStats.Bytes, "new": scanStats.New,
 				"changed": scanStats.Changed, "unchanged": scanStats.Unchanged,
 				"missing": scanStats.Missing,
 			},
 		})
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
-			"scan: seen=%d new=%d changed=%d missing=%d",
-			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing,
+			"scan: seen=%d bytes=%d new=%d changed=%d missing=%d",
+			scanStats.Seen, scanStats.Bytes, scanStats.New, scanStats.Changed, scanStats.Missing,
 		))
 		if mode == RunModeScan {
 			e.log(ctx, runID, db.LogInfo, "scan-only mode: skipping upload")
@@ -472,6 +484,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error) {
 	completedFolders := make(map[string]struct{})
 	var totalSeen int64
+	var totalBytes int64
 	var uploadedTotal, bytesUploadedTotal int64
 	var totalPlannedFiles, totalPlannedBytes int64
 	var totalPlannedGroups int64
@@ -493,6 +506,7 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 					Type: EventScanProgress, RunID: runID, At: e.opts.Now(),
 					Data: map[string]any{
 						"seen":    p.Seen,
+						"bytes":   p.Bytes,
 						"new":     p.New,
 						"changed": p.Changed,
 					},
@@ -512,7 +526,8 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 		}
 
 		totalSeen += scanStats.Seen
-		if err := e.opts.DB.UpdateRunStats(ctx, runID, totalSeen, uploadedTotal, bytesUploadedTotal); err != nil {
+		totalBytes += scanStats.Bytes
+		if err := e.opts.DB.UpdateRunStats(ctx, runID, totalSeen, totalBytes, uploadedTotal, bytesUploadedTotal); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return db.RunCancelled, cerr
 			}
@@ -526,6 +541,7 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{
 				"seen":      scanStats.Seen,
+				"bytes":     scanStats.Bytes,
 				"new":       scanStats.New,
 				"changed":   scanStats.Changed,
 				"unchanged": scanStats.Unchanged,
@@ -534,8 +550,8 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			},
 		})
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
-			"scan batch: seen=%d new=%d changed=%d missing=%d paused=%t",
-			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing, batch.Paused,
+			"scan batch: seen=%d bytes=%d new=%d changed=%d missing=%d paused=%t",
+			scanStats.Seen, scanStats.Bytes, scanStats.New, scanStats.Changed, scanStats.Missing, batch.Paused,
 		))
 
 		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, true)

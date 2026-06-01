@@ -61,6 +61,10 @@
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
   let activeRun = $derived(status?.current ?? pendingRun);
+  let scanBytes = $state(0);
+  let liveScannedBytes = $derived(Math.max(scanBytes, status?.current?.bytes_scanned ?? activeRun?.bytes_scanned ?? 0));
+  let liveUploadedFiles = $derived(status?.current?.files_uploaded ?? activeRun?.files_uploaded ?? 0);
+  let liveUploadedBytes = $derived(status?.current?.bytes_uploaded ?? activeRun?.bytes_uploaded ?? 0);
   let scanLineActive = $derived(
     scanActive || !!(status?.current && !status.current.scan_complete && status.current.files_scanned > 0),
   );
@@ -83,6 +87,7 @@
       started_at: new Date().toISOString(),
       status: 'running',
       files_scanned: 0,
+      bytes_scanned: 0,
       files_uploaded: 0,
       bytes_uploaded: 0,
       scan_paused: false,
@@ -187,6 +192,8 @@
       // upward — the SSE path may have a fresher value already.
       const live = status?.current?.files_scanned ?? 0;
       if (live > scanSeen) scanSeen = live;
+      const liveBytes = status?.current?.bytes_scanned ?? 0;
+      if (liveBytes > scanBytes) scanBytes = liveBytes;
       scanPaused = status?.current?.scan_paused ?? false;
       // Seed completed-uploads from the run row so a reload mid-run
       // recovers the progress count instead of starting at 0.
@@ -205,6 +212,7 @@
           itemProgress = {};
           uploadsTotal = 0;
           scanSeen = status?.current?.files_scanned ?? scanSeen;
+          scanBytes = status?.current?.bytes_scanned ?? 0;
           scanNew = 0;
           scanChanged = 0;
           scanActive = false;
@@ -272,6 +280,7 @@
           break;
         case 'scan_progress':
           scanSeen = event.data.seen;
+          scanBytes = event.data.bytes;
           scanNew = event.data.new;
           scanChanged = event.data.changed;
           scanActive = true;
@@ -279,6 +288,7 @@
           break;
         case 'scan_complete':
           scanSeen = event.data.seen;
+          scanBytes = event.data.bytes;
           scanActive = false;
           scanPaused = !!event.data.paused;
           break;
@@ -348,6 +358,7 @@
           // files_scanned from the DB so a mid-run reconnect doesn't show
           // 0 until the next scan_progress tick).
           scanSeen = event.data.files_scanned;
+          scanBytes = event.data.bytes_scanned ?? 0;
           scanNew = 0;
           scanChanged = 0;
           scanPaused = false;
@@ -665,6 +676,9 @@
         {#if pendingRun && !status?.current}
           · starting
         {/if}
+      </div>
+      <div class="muted small">
+        {scanLineSeen.toLocaleString()} scanned · {bytes(liveScannedBytes)} scanned data · {liveUploadedFiles.toLocaleString()} uploaded · {bytes(liveUploadedBytes)}
       </div>
       {#if scanPaused}
         <div class="muted small">scan paused, uploading current batch</div>

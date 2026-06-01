@@ -58,6 +58,7 @@ CREATE TABLE runs (
     finished_at     DATETIME,
     status          TEXT NOT NULL DEFAULT 'running',         -- running | completed | failed | cancelled | stopped
     files_scanned   INTEGER DEFAULT 0,
+    bytes_scanned   INTEGER DEFAULT 0,
     files_uploaded  INTEGER DEFAULT 0,
     bytes_uploaded  INTEGER DEFAULT 0,
     files_planned   INTEGER DEFAULT 0,         -- planned upload count, written once at upload_plan time

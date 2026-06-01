@@ -523,6 +523,7 @@ func (s *Server) sseReplay(ctx context.Context) ([]engine.Event, time.Time) {
 			At:    run.StartedAt,
 			Data: map[string]any{
 				"files_scanned":  run.FilesScanned,
+				"bytes_scanned":  run.BytesScanned,
 				"files_uploaded": run.FilesUploaded,
 				"bytes_uploaded": run.BytesUploaded,
 			},

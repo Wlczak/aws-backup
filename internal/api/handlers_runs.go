@@ -30,6 +30,7 @@ type runSummary struct {
 	FinishedAt    time.Time `json:"finished_at,omitempty"`
 	Status        string    `json:"status"`
 	FilesScanned  int64     `json:"files_scanned"`
+	BytesScanned  int64     `json:"bytes_scanned"`
 	FilesUploaded int64     `json:"files_uploaded"`
 	BytesUploaded int64     `json:"bytes_uploaded"`
 	FilesPlanned  int64     `json:"files_planned"`
@@ -46,6 +47,7 @@ func toSummary(r db.Run) runSummary {
 		FinishedAt:    r.FinishedAt,
 		Status:        r.Status,
 		FilesScanned:  r.FilesScanned,
+		BytesScanned:  r.BytesScanned,
 		FilesUploaded: r.FilesUploaded,
 		BytesUploaded: r.BytesUploaded,
 		FilesPlanned:  r.FilesPlanned,

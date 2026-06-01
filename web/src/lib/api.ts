@@ -10,12 +10,14 @@ type EmptyPayload = Record<string, never>;
 
 export interface ScanProgressPayload {
   seen: number;
+  bytes: number;
   new: number;
   changed: number;
 }
 
 export interface ScanCompletePayload {
   seen: number;
+  bytes: number;
   new: number;
   changed: number;
   unchanged: number;
@@ -65,6 +67,7 @@ export interface UploadFailedPayload {
 
 export interface RunStartPayload {
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
 }
@@ -77,6 +80,7 @@ export interface RunLogPayload {
 export interface RunCompletePayload {
   status: string;
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
   error_message?: string;
@@ -333,6 +337,7 @@ export interface Run {
   finished_at?: string;
   status: RunStatus;
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
   files_planned?: number;
@@ -976,19 +981,21 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
       return { type, data: {} };
     case 'scan_progress': {
       const seen = readNumber(data.seen);
+      const bytes = readNumber(data.bytes);
       const next = readNumber(data.new);
       const changed = readNumber(data.changed);
-      if (seen === null || next === null || changed === null) return null;
-      return { type, data: { seen, new: next, changed } };
+      if (seen === null || bytes === null || next === null || changed === null) return null;
+      return { type, data: { seen, bytes, new: next, changed } };
     }
     case 'scan_complete': {
       const seen = readNumber(data.seen);
+      const bytes = readNumber(data.bytes);
       const next = readNumber(data.new);
       const changed = readNumber(data.changed);
       const unchanged = readNumber(data.unchanged);
       const missing = readNumber(data.missing);
-      if (seen === null || next === null || changed === null || unchanged === null || missing === null) return null;
-      return { type, data: { seen, new: next, changed, unchanged, missing, paused: readOptionalBoolean(data.paused) } };
+      if (seen === null || bytes === null || next === null || changed === null || unchanged === null || missing === null) return null;
+      return { type, data: { seen, bytes, new: next, changed, unchanged, missing, paused: readOptionalBoolean(data.paused) } };
     }
     case 'upload_plan': {
       const total_files = readNumber(data.total_files);
@@ -1043,10 +1050,11 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
     }
     case 'run_start': {
       const files_scanned = readNumber(data.files_scanned);
+      const bytes_scanned = readNumber(data.bytes_scanned);
       const files_uploaded = readNumber(data.files_uploaded);
       const bytes_uploaded = readNumber(data.bytes_uploaded);
-      if (files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
-      return { type, data: { files_scanned, files_uploaded, bytes_uploaded } };
+      if (files_scanned === null || bytes_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      return { type, data: { files_scanned, bytes_scanned, files_uploaded, bytes_uploaded } };
     }
     case 'run_log': {
       const message = readString(data.message);
@@ -1056,14 +1064,16 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
     case 'run_complete': {
       const status = readString(data.status);
       const files_scanned = readNumber(data.files_scanned);
+      const bytes_scanned = readNumber(data.bytes_scanned);
       const files_uploaded = readNumber(data.files_uploaded);
       const bytes_uploaded = readNumber(data.bytes_uploaded);
-      if (status === null || files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      if (status === null || files_scanned === null || bytes_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
       return {
         type,
         data: {
           status,
           files_scanned,
+          bytes_scanned,
           files_uploaded,
           bytes_uploaded,
           error_message: readOptionalString(data.error_message),

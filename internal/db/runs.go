@@ -36,6 +36,7 @@ type Run struct {
 	FinishedAt    time.Time `gorm:"column:finished_at"`
 	Status        string    `gorm:"column:status;not null;default:'running';index"`
 	FilesScanned  int64     `gorm:"column:files_scanned;not null;default:0"`
+	BytesScanned  int64     `gorm:"column:bytes_scanned;not null;default:0"`
 	FilesUploaded int64     `gorm:"column:files_uploaded;not null;default:0"`
 	BytesUploaded int64     `gorm:"column:bytes_uploaded;not null;default:0"`
 	FilesPlanned  int64     `gorm:"column:files_planned;not null;default:0"`
@@ -72,11 +73,12 @@ func (db *DB) CreateRun(ctx context.Context, startedAt time.Time) (int64, error)
 }
 
 // UpdateRunStats bumps counters without touching status or finished_at.
-func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, uploaded, bytes int64) error {
+func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, scannedBytes, uploaded, uploadedBytes int64) error {
 	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
 		"files_scanned":  scanned,
+		"bytes_scanned":  scannedBytes,
 		"files_uploaded": uploaded,
-		"bytes_uploaded": bytes,
+		"bytes_uploaded": uploadedBytes,
 	}).Error
 }
 
