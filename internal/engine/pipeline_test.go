@@ -326,9 +326,9 @@ func TestPipeline_ContextCancel(t *testing.T) {
 		ScanChunkSize:  10,
 		ZipThresh:      50,
 		EnableZipIndex: true,
-		CopyThreads:    2,
-		UploadThreads:  2,
-		PipelineQueue:  2,
+		CopyThreads:    1,
+		UploadThreads:  1,
+		PipelineQueue:  1,
 		Emit:           col.emit,
 	})
 
@@ -359,9 +359,9 @@ func TestPipeline_ContextCancel(t *testing.T) {
 	}
 }
 
-// TestPipeline_PerGroupErrorIsolation verifies that one group failing does not
-// abort the remaining groups.
-func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
+// TestPipeline_PerGroupFailureAbortsRun verifies that a group upload failure
+// ends the run instead of letting later groups continue.
+func TestPipeline_PerGroupFailureAbortsRun(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()
 	src, err := source.NewLocalDir(root)
@@ -385,9 +385,9 @@ func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
 		ScanChunkSize:  10,
 		ZipThresh:      50,
 		EnableZipIndex: true,
-		CopyThreads:    2,
-		UploadThreads:  2,
-		PipelineQueue:  2,
+		CopyThreads:    1,
+		UploadThreads:  1,
+		PipelineQueue:  1,
 		Emit:           col.emit,
 	})
 
@@ -399,18 +399,18 @@ func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
 	writeFile(t, root, "bad/broken.txt", "broken")
 
 	_, runErr := eng.Run(ctx)
-	// Not all groups failed -> completed, not failed.
-	if runErr != nil {
-		t.Fatalf("Run returned unexpected error: %v", runErr)
+	if runErr == nil {
+		t.Fatal("expected run error, got nil")
 	}
 
 	run, _ := d.GetRun(ctx, 1)
-	if run.Status != db.RunCompleted {
-		t.Errorf("status=%q want completed", run.Status)
+	if run.Status != db.RunFailed {
+		t.Errorf("status=%q want failed", run.Status)
 	}
-	// 5 good files uploaded.
-	if run.FilesUploaded != 5 {
-		t.Errorf("uploaded=%d want 5", run.FilesUploaded)
+	// Fail-fast should prevent the run from reaching a clean all-success
+	// state, even though already in-flight good work may still finish.
+	if run.FilesUploaded == 6 {
+		t.Errorf("uploaded=%d want < 6", run.FilesUploaded)
 	}
 }
 

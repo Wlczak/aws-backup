@@ -306,6 +306,60 @@ func TestEngineBatchedFullRunContinuesAfterPausedBatch(t *testing.T) {
 	}
 }
 
+// TestEngineBatchedFullRunStopsOnUploadError verifies that a real upload
+// failure ends the run before the next scan batch starts.
+func TestEngineBatchedFullRunStopsOnUploadError(t *testing.T) {
+	eng, d, _, _, root, _ := newTestEngine(t, 99)
+	eng.opts.ScanBatchBytes = 15
+	eng.opts.Storage = &failingStorage{
+		Storage:  storage.NewMemStorage(),
+		putErr:   errors.New("boom"),
+		failKeys: map[string]bool{"backups/keep/a.txt": true},
+	}
+	ctx := context.Background()
+
+	writeFile(t, root, "keep/a.txt", strings.Repeat("a", 10))
+	writeFile(t, root, "keep/b.txt", strings.Repeat("b", 10))
+	writeFile(t, root, "rest/c.txt", strings.Repeat("c", 10))
+
+	runID, err := eng.Run(ctx)
+	if err == nil {
+		t.Fatal("Run should fail on first upload error")
+	}
+
+	run, _ := d.GetRun(ctx, runID)
+	if run.Status != db.RunFailed {
+		t.Fatalf("status=%q want failed", run.Status)
+	}
+	if run.FilesScanned != 2 {
+		t.Fatalf("files_scanned=%d want 2", run.FilesScanned)
+	}
+	if run.BytesScanned != 20 {
+		t.Fatalf("bytes_scanned=%d want 20", run.BytesScanned)
+	}
+	if run.FilesUploaded != 0 {
+		t.Fatalf("files_uploaded=%d want 0", run.FilesUploaded)
+	}
+	if !run.ScanPaused || run.ScanComplete {
+		t.Fatalf("scan state = paused=%v complete=%v", run.ScanPaused, run.ScanComplete)
+	}
+
+	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
+	got := map[string]string{}
+	for _, f := range files {
+		got[f.Path] = f.Status
+	}
+	if got["keep/a.txt"] != db.StatusFailed {
+		t.Fatalf("keep/a.txt status=%q want failed", got["keep/a.txt"])
+	}
+	if got["keep/b.txt"] != db.StatusPending {
+		t.Fatalf("keep/b.txt status=%q want pending", got["keep/b.txt"])
+	}
+	if got["rest/c.txt"] != "" {
+		t.Fatalf("rest/c.txt status=%q want absent", got["rest/c.txt"])
+	}
+}
+
 // TestEngineGracefulStop ensures StopRequested fired between groups
 // terminates the run cleanly with RunStopped status: the in-flight
 // upload completes (no torn files), no further uploads start, and the
@@ -404,20 +458,19 @@ func TestEngineUploadFailure(t *testing.T) {
 	writeFile(t, root, "a.txt", "hi")
 	writeFile(t, root, "b.txt", "ok")
 
-	// Fail only on a.txt; b.txt should still upload successfully so we can
-	// verify a per-file failure doesn't abort the rest of the run.
+	// Fail only on a.txt; the run should stop before b.txt uploads.
 	mem := storage.NewMemStorage()
 	failing := &failingStorage{Storage: mem, putErr: errors.New("boom"), failKeys: map[string]bool{"backups/a.txt": true}}
 	eng.opts.Storage = failing
 
 	ctx := context.Background()
 	runID, err := eng.Run(ctx)
-	if err != nil {
-		t.Fatalf("run should succeed despite per-file failure, got %v", err)
+	if err == nil {
+		t.Fatal("run should fail on the first upload error, got nil")
 	}
 	run, _ := d.GetRun(ctx, runID)
-	if run.Status != db.RunCompleted {
-		t.Errorf("status=%q want completed", run.Status)
+	if run.Status != db.RunFailed {
+		t.Errorf("status=%q want failed", run.Status)
 	}
 
 	files, _, _ := d.ListFiles(ctx, db.FilesFilter{})
@@ -428,8 +481,8 @@ func TestEngineUploadFailure(t *testing.T) {
 	if got["a.txt"] != db.StatusFailed {
 		t.Errorf("a.txt status=%q want failed", got["a.txt"])
 	}
-	if got["b.txt"] != db.StatusUploaded {
-		t.Errorf("b.txt status=%q want uploaded", got["b.txt"])
+	if got["b.txt"] != db.StatusPending {
+		t.Errorf("b.txt status=%q want pending", got["b.txt"])
 	}
 
 	if len(col.byType(EventUploadFailed)) != 1 {
@@ -768,8 +821,8 @@ func TestEngineKeepsTmpOnUploadFailure(t *testing.T) {
 	eng.opts.Storage = failing
 
 	ctx := context.Background()
-	if _, err := eng.Run(ctx); err != nil {
-		t.Fatalf("run: %v", err)
+	if _, err := eng.Run(ctx); err == nil {
+		t.Fatal("run 1 should fail on upload error")
 	}
 
 	tmp := indTmpPath(t, d, eng.opts.TmpDir, "big.bin")
@@ -797,8 +850,8 @@ func TestEngineReusesTmpOnSecondRun(t *testing.T) {
 	eng.opts.Storage = failing
 
 	ctx := context.Background()
-	if _, err := eng.Run(ctx); err != nil {
-		t.Fatalf("run 1: %v", err)
+	if _, err := eng.Run(ctx); err == nil {
+		t.Fatal("run 1 should fail on upload error")
 	}
 
 	// Run 2 with normal storage → upload should succeed and reuse tmp.
@@ -842,8 +895,8 @@ func TestEngineRecopiesWhenSourceChangedAfterTmp(t *testing.T) {
 	eng.opts.Storage = failing
 
 	ctx := context.Background()
-	if _, err := eng.Run(ctx); err != nil {
-		t.Fatalf("run 1: %v", err)
+	if _, err := eng.Run(ctx); err == nil {
+		t.Fatal("run 1 should fail on upload error")
 	}
 
 	// Modify source: new content + advanced mtime.

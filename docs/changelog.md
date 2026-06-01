@@ -4,6 +4,8 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Added a separate browser-log pipeline: public same-origin `/api/client-logs` ingest, authenticated list/clear endpoints, frontend error/toast/request capture, and a debug toggle in the app header |
+| — | — | Batched full runs now fail fast on the first real upload error instead of cycling into the next scan batch with the same bad row still pending |
 | — | — | Documented that `/api/status` is the authoritative dashboard source of truth and `/api/events` is optional live detail, not a required control plane for scan-only runs |
 | — | — | Dashboard now shows a pending current-run card from the returned run ID immediately after start, then reconciles with `/api/status` and SSE once the engine catches up |
 | — | — | Fixed the dashboard SSE client to unwrap the event payload correctly, so upload and scan progress events are no longer dropped on parse |

@@ -903,7 +903,11 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 			rg := res.retryGroup
 			dir := commonDirPath(rg.group.Files)
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("zip key collision for dir %q, re-queuing (attempt %d)", dir, rg.attempts+1))
-			if !stopping {
+			if terminal == db.RunFailed || terminal == db.RunCancelled {
+				// Fail-fast mode abandons retries once the run has already
+				// been marked terminal by a real upload error or cancellation.
+				// The group is counted as consumed below so inflight can drain.
+			} else if !stopping {
 				inflight++ // re-counts the group
 				workCh <- *rg
 			} else {
@@ -943,8 +947,13 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 				terminal = db.RunCancelled
 				terminalErr = res.err
 			} else {
-				groupErrCount++
-				e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", res.err))
+				if terminal == db.RunCompleted {
+					terminal = db.RunFailed
+					terminalErr = res.err
+					stopping = true
+					haltSubmission()
+					e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", res.err))
+				}
 			}
 		}
 
@@ -958,6 +967,9 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 		// Poll stop/cancel between results.
 		if !stopping {
 			if terminal == db.RunCancelled || terminal == db.RunStopped {
+				stopping = true
+				haltSubmission()
+			} else if terminal == db.RunFailed {
 				stopping = true
 				haltSubmission()
 			} else if e.opts.StopRequested != nil && e.opts.StopRequested() {
@@ -1400,8 +1412,7 @@ func (e *Engine) uploadStagedIndividuals(ctx context.Context, runID int64, item 
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return uploaded, bytes, err
 			}
-			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after upload error: %v", ind.pf.RelPath, err))
-			continue
+			return uploaded, bytes, err
 		}
 		uploaded++
 		bytes += n

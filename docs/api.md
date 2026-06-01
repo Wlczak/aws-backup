@@ -19,6 +19,9 @@ POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
 DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
+POST   /api/client-logs               public browser-log ingest; body {entries:[...]} from the same-origin SPA
+GET    /api/client-logs               paginated browser-log list (auth required)
+DELETE /api/client-logs               truncate browser logs (auth required)
 POST   /api/download/full             full mirror download using backup.download_dir; the live job summary includes object count + estimated GET/egress cost for the missing set
 POST   /api/download/rescan           refresh the cached mirror snapshot for backup.download_dir without downloading files
 POST   /api/download/cancel           cancel the active mirror download or rescan job if one is running
@@ -74,6 +77,8 @@ dashboard dependencies on high-frequency `scan_progress` / `upload_progress`
 frames unless they provide a visible improvement that `/api/status` cannot.
 
 Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
+
+`POST /api/client-logs` is intentionally public so the browser can queue uncaught runtime errors, request failures, console warnings, and toast events before the session is authenticated. The ingest handler still only accepts same-origin requests because the `/api` tree is protected by `originGuard`.
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 

@@ -1,5 +1,6 @@
 // Typed wrappers around the aws-backup HTTP API. Kept free of UI concerns
 // so pages + components can import without pulling in Svelte.
+import { recordClientLog } from './client-logs';
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_only' | 'missing';
@@ -409,6 +410,27 @@ export interface RunDetail {
   logs: LogEntry[];
 }
 
+export interface ClientLog {
+  id: number;
+  timestamp: string;
+  received_at: string;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  route?: string;
+  url?: string;
+  stack?: string;
+  session_id?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface ClientLogsPage {
+  logs: ClientLog[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 export interface FileStats {
   by_status: Record<string, number>;
   by_restore_status: Record<string, number>;
@@ -709,7 +731,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (e instanceof DOMException && e.name === 'AbortError') {
       throw new ApiError('abort', 'aborted');
     }
-    throw new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
+    const err = new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
+    recordClientLog('error', 'request', err.message, { path });
+    throw err;
   }
   if (!resp.ok) {
     if (resp.status === 401) {
@@ -725,13 +749,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         if (parsed?.error) msg = parsed.error;
       } catch { /* not JSON — keep statusText, surface body */ }
     } catch { /* couldn't read body */ }
-    throw new ApiError('http', `${resp.status}: ${msg}`, { status: resp.status, body });
+    const err = new ApiError('http', `${resp.status}: ${msg}`, { status: resp.status, body });
+    recordClientLog('error', 'request', err.message, {
+      path,
+      status: resp.status,
+      body,
+    });
+    throw err;
   }
   if (resp.status === 204) return undefined as T;
   try {
     return (await resp.json()) as T;
   } catch (e) {
-    throw new ApiError('parse', `invalid JSON response: ${e instanceof Error ? e.message : String(e)}`);
+    const err = new ApiError('parse', `invalid JSON response: ${e instanceof Error ? e.message : String(e)}`);
+    recordClientLog('error', 'request', err.message, { path });
+    throw err;
   }
 }
 
@@ -757,6 +789,17 @@ export const api = {
   continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
   deleteRunLogs: () =>
     request<{ affected: number }>('/api/run-logs', {
+      method: 'DELETE',
+    }),
+  clientLogs: (page = 1, limit = 100, signal?: AbortSignal) =>
+    request<ClientLogsPage>(`/api/client-logs?page=${page}&limit=${limit}`, { signal }),
+  postClientLogs: (entries: Array<Omit<ClientLog, 'id' | 'received_at'>>) =>
+    request<{ affected: number }>('/api/client-logs', {
+      method: 'POST',
+      body: JSON.stringify({ entries }),
+    }),
+  deleteClientLogs: () =>
+    request<{ affected: number }>('/api/client-logs', {
       method: 'DELETE',
     }),
 
