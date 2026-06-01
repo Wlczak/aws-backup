@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,6 +110,9 @@ func Scan(
 	var skipPartialDirs, skipPartialFiles atomic.Int64
 	var walkNonRegular atomic.Int64
 	var walkInvalid atomic.Int64
+	var firstDir, lastDir string
+	var firstFile, lastFile string
+	topLevelFiles := map[string]int64{}
 	var (
 		lastEmitMu  sync.Mutex
 		lastEmitAt  time.Time
@@ -263,6 +267,16 @@ func Scan(
 		}
 		return dirStack[len(dirStack)-1].path
 	}
+	topLevel := func(rel string) string {
+		if rel == "" {
+			return ""
+		}
+		head, _, ok := strings.Cut(rel, "/")
+		if ok {
+			return head
+		}
+		return rel
+	}
 	popFinished := func(next string) {
 		for len(dirStack) > 0 {
 			top := dirStack[len(dirStack)-1].path
@@ -280,6 +294,13 @@ func Scan(
 	walkErr := src.Walk(scanCtx, func(e Entry) error {
 		if err := scanCtx.Err(); err != nil {
 			return err
+		}
+		if !isValidRelPath(e.RelPath) {
+			walkInvalid.Add(1)
+			if log != nil {
+				log("scan skip invalid path: " + e.RelPath)
+			}
+			return nil
 		}
 		if !e.IsDir && len(paths) > 0 && !matchesPartial(e.RelPath, paths) {
 			skipPartialFiles.Add(1)
@@ -304,6 +325,10 @@ func Scan(
 				return ErrSkipDir
 			}
 			walkDirs.Add(1)
+			if firstDir == "" {
+				firstDir = e.RelPath
+			}
+			lastDir = e.RelPath
 			dirStack = append(dirStack, dirFrame{path: e.RelPath})
 			return nil
 		}
@@ -315,6 +340,11 @@ func Scan(
 			return nil
 		}
 		walkFiles.Add(1)
+		if firstFile == "" {
+			firstFile = e.RelPath
+		}
+		lastFile = e.RelPath
+		topLevelFiles[topLevel(e.RelPath)]++
 
 		mu.Lock()
 		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
@@ -388,9 +418,21 @@ func Scan(
 	}
 
 	if log != nil {
+		var topSummary []string
+		for k, v := range topLevelFiles {
+			if k == "" {
+				k = "."
+			}
+			topSummary = append(topSummary, k+"="+strconv.FormatInt(v, 10))
+		}
+		sort.Strings(topSummary)
 		log("scan batch done: paused=" + strconv.FormatBool(paused && errors.Is(walkErr, stopWalkErr)) +
 			" completed=" + strconv.Itoa(len(completedFolders)) +
 			" pause_path=" + stopAfter +
+			" first_dir=" + firstDir +
+			" last_dir=" + lastDir +
+			" first_file=" + firstFile +
+			" last_file=" + lastFile +
 			" visited_dirs=" + strconv.FormatInt(walkDirs.Load(), 10) +
 			" visited_files=" + strconv.FormatInt(walkFiles.Load(), 10) +
 			" resume_skipped_dirs=" + strconv.FormatInt(skipResumeDirs.Load(), 10) +
@@ -398,7 +440,8 @@ func Scan(
 			" partial_skipped_dirs=" + strconv.FormatInt(skipPartialDirs.Load(), 10) +
 			" partial_skipped_files=" + strconv.FormatInt(skipPartialFiles.Load(), 10) +
 			" non_regular=" + strconv.FormatInt(walkNonRegular.Load(), 10) +
-			" invalid_paths=" + strconv.FormatInt(walkInvalid.Load(), 10))
+			" invalid_paths=" + strconv.FormatInt(walkInvalid.Load(), 10) +
+			" top_level_files=[" + strings.Join(topSummary, ",") + "]")
 	}
 	return stats, ScanBatchResult{
 		CompletedFolders: completedFolders,
