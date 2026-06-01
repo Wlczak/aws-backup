@@ -236,7 +236,7 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	}
 }
 
-func TestEngineBatchedFullRunPausesAndResumesScanning(t *testing.T) {
+func TestEngineBatchedFullRunStopsAfterFirstPausedBatch(t *testing.T) {
 	eng, d, _, store, root, col := newTestEngine(t, 99)
 	eng.opts.ScanBatchBytes = 15
 	ctx := context.Background()
@@ -251,60 +251,55 @@ func TestEngineBatchedFullRunPausesAndResumesScanning(t *testing.T) {
 	}
 
 	run, _ := d.GetRun(ctx, runID)
-	if run.Status != db.RunCompleted {
-		t.Fatalf("status=%q want completed", run.Status)
+	if run.Status != db.RunStopped {
+		t.Fatalf("status=%q want stopped", run.Status)
 	}
-	if run.FilesScanned != 3 {
-		t.Fatalf("files_scanned=%d want 3", run.FilesScanned)
+	if run.FilesScanned != 2 {
+		t.Fatalf("files_scanned=%d want 2", run.FilesScanned)
 	}
-	if run.FilesUploaded != 3 {
-		t.Fatalf("files_uploaded=%d want 3", run.FilesUploaded)
+	if run.FilesUploaded != 2 {
+		t.Fatalf("files_uploaded=%d want 2", run.FilesUploaded)
 	}
-	if run.ScanPaused || !run.ScanComplete {
+	if !run.ScanPaused || run.ScanComplete {
 		t.Fatalf("scan state = paused=%v complete=%v", run.ScanPaused, run.ScanComplete)
 	}
-	if got := len(store.Keys()); got != 3 {
-		t.Fatalf("stored keys=%d want 3", got)
+	if got := len(store.Keys()); got != 2 {
+		t.Fatalf("stored keys=%d want 2", got)
 	}
 
 	scans := col.byType(EventScanComplete)
-	if len(scans) < 2 {
-		t.Fatalf("scan complete events=%d want at least 2", len(scans))
+	if len(scans) != 1 {
+		t.Fatalf("scan complete events=%d want 1", len(scans))
 	}
 	if paused, ok := scans[0].Data["paused"].(bool); !ok || !paused {
-		t.Fatalf("first scan_complete paused=%v want true", scans[0].Data["paused"])
-	}
-	if paused, ok := scans[len(scans)-1].Data["paused"].(bool); !ok || paused {
-		t.Fatalf("last scan_complete paused=%v want false", scans[len(scans)-1].Data["paused"])
+		t.Fatalf("scan_complete paused=%v want true", scans[0].Data["paused"])
 	}
 
 	plans := col.byType(EventUploadPlan)
-	if len(plans) < 2 {
-		t.Fatalf("upload plan events=%d want at least 2", len(plans))
+	if len(plans) != 2 {
+		t.Fatalf("upload plan events=%d want 2", len(plans))
 	}
-	if got := plans[len(plans)-1].Data["total_files"]; got != int64(3) {
-		t.Fatalf("last upload_plan.total_files = %v, want 3", got)
-	}
-
-	firstPlan := -1
-	firstUploadStart := -1
-	for i, ev := range col.events {
-		switch ev.Type {
-		case EventUploadPlan:
-			if firstPlan == -1 {
-				firstPlan = i
-			}
-		case EventUploadStart:
-			if firstUploadStart == -1 {
-				firstUploadStart = i
-			}
+	toInt64 := func(v any) (int64, bool) {
+		switch n := v.(type) {
+		case int:
+			return int64(n), true
+		case int64:
+			return n, true
+		case float64:
+			return int64(n), true
+		default:
+			return 0, false
 		}
 	}
-	if firstPlan == -1 || firstUploadStart == -1 {
-		t.Fatalf("missing upload plan/start events: plan=%d start=%d", firstPlan, firstUploadStart)
+	if got, ok := toInt64(plans[0].Data["total_files"]); !ok || got != 2 {
+		t.Fatalf("first upload_plan.total_files = %v, want 2", plans[0].Data["total_files"])
 	}
-	if firstPlan > firstUploadStart {
-		t.Fatalf("first upload_plan arrived after first upload_start: plan=%d start=%d", firstPlan, firstUploadStart)
+	if got, ok := toInt64(plans[len(plans)-1].Data["total_files"]); !ok || got != 2 {
+		t.Fatalf("last upload_plan.total_files = %v, want 2", plans[len(plans)-1].Data["total_files"])
+	}
+
+	if len(col.byType(EventScanStart)) != 1 {
+		t.Fatalf("scan start events=%d want 1", len(col.byType(EventScanStart)))
 	}
 }
 

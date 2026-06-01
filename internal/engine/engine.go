@@ -585,6 +585,11 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			}
 			return db.RunCompleted, nil
 		}
+
+		// A paused full run stops after the current folder batch instead of
+		// immediately resuming the rest of the tree. Operators can trigger a
+		// fresh run later if they want to continue with the remaining files.
+		return db.RunStopped, nil
 	}
 }
 

@@ -57,7 +57,7 @@ The auth hash stays in the central config, not the per-profile config, so switch
   },
   "backup": {
     "chunk_size": 100,                   // batch size for source.Scan upserts
-    "scan_batch_bytes": 4294967296,      // soft byte budget for batched full runs; 0/negative rejected, default 4 GiB
+    "scan_batch_bytes": 4294967296,      // soft byte budget for batched full runs; when hit, the run stops after the current folder; 0/negative rejected, default 4 GiB
     "tmp_dir": "",                       // empty = OS temp
     "download_dir": "",                  // local mirror target used by the full-download mirror job
     "schedule": "",                      // empty = manual only; otherwise standard cron

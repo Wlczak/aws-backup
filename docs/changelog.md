@@ -10,6 +10,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | — | — | Dashboard cancel now shows a local cancelling state, and the scan status line falls back to the run row's scanned count when SSE lags so it stays in sync with the index gadget |
 | — | — | Dashboard now batches live SSE run updates every 100 ms so scan-only runs stay responsive when the event stream is chatty |
 | — | — | Throttled live copy/upload progress to a 500 ms cadence so the dashboard gets fewer state mutations and the SSE stream carries less chatter |
+| — | — | Batched full scans now stop after the first paused folder batch instead of resuming the rest of the tree automatically |
 | #141 | — | Full backup runs now alternate scan batches and uploads on a soft `backup.scan_batch_bytes` budget, persist run-scoped completed folders, and skip already-completed folders on subsequent scan batches |
 | — | — | Added cookie auth with a central-config bcrypt hash, public `/api/auth/*` endpoints, and `./aws-backup passwd` bootstrap for first-time setup |
 | #195 / #196 | — | Restore-trigger and inventory-sync now run as background jobs with `restore_job_id` / `/api/status` recovery, plus `restore_manifest_*` SSE for inventory manifest fetch/parse |
