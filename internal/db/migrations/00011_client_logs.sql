@@ -1,4 +1,4 @@
-1-- +goose Up
+-- +goose Up
 -- Frontend/browser logs are stored separately from run_logs so the
 -- dashboard can capture runtime errors, request failures, and console
 -- warnings without mixing them into the per-run engine history.
