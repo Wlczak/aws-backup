@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Cancelled runs now classify interrupted scan-state writes as `cancelled` instead of `failed`, so a mid-run cancel no longer gets misreported when SQLite aborts the status update |
 | — | — | Fixed paused scan batches from promoting open ancestor folders into the completed-folder cache, which could make later batches skip unscanned subtrees |
 | — | — | Dashboard now has an "Invalidate scan cache" action that clears the persistent completed-folder cache for the active profile via `DELETE /api/scan-cache` |
 | — | — | Persistent scan-folder cache now survives run completion in `run_scan_folders`, seeds later full runs from the active profile DB, and is bypassed by scan-only / explicit `ScanPaths` rescans |

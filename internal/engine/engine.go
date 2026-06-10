@@ -103,6 +103,22 @@ type Options struct {
 // fires mid-group; the outer loop converts it to db.RunStopped.
 var ErrStopRequested = errors.New("engine: stop requested")
 
+func cancelErr(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return cerr
+	}
+	if strings.Contains(err.Error(), "interrupted (9)") {
+		return context.Canceled
+	}
+	return nil
+}
+
 // Engine owns a run's lifecycle.
 type Engine struct {
 	opts Options
@@ -284,6 +300,9 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			Type: EventScanStart, RunID: runID, At: e.opts.Now(),
 		})
 		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, false); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
 		}
 		scanStats, _, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths, nil,
@@ -326,6 +345,9 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			return db.RunFailed, err
 		}
 		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, true); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
 		}
 		e.emit(Event{
@@ -513,6 +535,9 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 		))
 		e.emit(Event{Type: EventScanStart, RunID: runID, At: e.opts.Now()})
 		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, false); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
 		}
 		scanStats, batch, err := source.Scan(
@@ -559,6 +584,9 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			return db.RunFailed, err
 		}
 		if err := e.opts.DB.UpdateRunScanState(ctx, runID, batch.Paused, !batch.Paused); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
 			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
 		}
 
@@ -646,6 +674,9 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 
 		if !batch.Paused {
 			if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, true); err != nil {
+				if cerr := cancelErr(ctx, err); cerr != nil {
+					return db.RunCancelled, cerr
+				}
 				return db.RunFailed, fmt.Errorf("finalise scan state: %w", err)
 			}
 			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(

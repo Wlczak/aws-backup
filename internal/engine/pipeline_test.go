@@ -180,6 +180,45 @@ func (c *collidingStorage) PutIfAbsent(ctx context.Context, key string, body io.
 	return c.MemStorage.PutIfAbsent(ctx, key, body, size)
 }
 
+// cancelOnPutStorage blocks the first write until the caller cancels the
+// context, so cancellation tests don't depend on a sleep-based race.
+type cancelOnPutStorage struct {
+	*storage.MemStorage
+	started chan struct{}
+	once    atomic.Bool
+}
+
+func newCancelOnPutStorage(inner *storage.MemStorage) *cancelOnPutStorage {
+	return &cancelOnPutStorage{
+		MemStorage: inner,
+		started:    make(chan struct{}),
+	}
+}
+
+func (s *cancelOnPutStorage) signalStarted() {
+	if s.once.CompareAndSwap(false, true) {
+		close(s.started)
+	}
+}
+
+func (s *cancelOnPutStorage) Put(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
+func (s *cancelOnPutStorage) PutStandard(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
+func (s *cancelOnPutStorage) PutIfAbsent(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
 // TestPipeline_ZipKeyCollisionExhausted verifies that after exhausting all
 // retries (>4 collisions) the group is counted as an error.
 func TestPipeline_ZipKeyCollisionExhausted(t *testing.T) {
@@ -314,7 +353,7 @@ func TestPipeline_ContextCancel(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close(); src.Close() })
 
-	store := storage.NewMemStorage()
+	store := newCancelOnPutStorage(storage.NewMemStorage())
 	col := &collector{}
 
 	eng := New(Options{
@@ -339,7 +378,7 @@ func TestPipeline_ContextCancel(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		<-store.started
 		cancel()
 	}()
 
@@ -354,8 +393,8 @@ func TestPipeline_ContextCancel(t *testing.T) {
 		return
 	}
 	run, _ := d.GetRun(ctx, runID)
-	if run.Status != db.RunCancelled && run.Status != db.RunCompleted {
-		t.Errorf("status=%q want cancelled or completed", run.Status)
+	if run.Status != db.RunCancelled {
+		t.Errorf("status=%q want cancelled", run.Status)
 	}
 }
 
