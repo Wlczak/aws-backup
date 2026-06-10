@@ -361,6 +361,59 @@ func TestScanPausesOnBatchBytesAndSkipsCompletedFolders(t *testing.T) {
 	}
 }
 
+func TestScanPauseDoesNotPromoteAncestorFolderComplete(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "aaa", "top", "child1", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "aaa", "top", "child2", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "zzz", "other", "c.txt"), strings.Repeat("c", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	firstStats, firstBatch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstBatch.Paused {
+		t.Fatalf("first batch unexpectedly completed tree: %+v", firstBatch)
+	}
+	if firstStats.Seen != 1 {
+		t.Fatalf("first batch seen=%d want 1", firstStats.Seen)
+	}
+	for _, p := range firstBatch.CompletedFolders {
+		if p == "aaa/top" {
+			t.Fatalf("paused batch incorrectly promoted ancestor folder: %+v", firstBatch.CompletedFolders)
+		}
+	}
+	if len(firstBatch.CompletedFolders) == 0 || firstBatch.CompletedFolders[0] != "aaa/top/child1" {
+		t.Fatalf("first batch completed folders=%v want aaa/top/child1", firstBatch.CompletedFolders)
+	}
+
+	resumeSkip := map[string]struct{}{}
+	for _, p := range firstBatch.CompletedFolders {
+		resumeSkip[p] = struct{}{}
+	}
+	secondStats, secondBatch, err := Scan(ctx, src, d, nil, resumeSkip, nil, nil, 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondStats.Seen < 1 {
+		t.Fatalf("resume scan saw no new files; expected remaining subtree to advance")
+	}
+	if secondBatch.Paused && secondBatch.PausePath == "aaa/top" {
+		t.Fatalf("resume scan paused again at top-level ancestor: %+v", secondBatch)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "aaa/top/child2/b.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload child2 file: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("aaa/top/child2/b.txt rows=%d want 1", len(files))
+	}
+}
+
 func TestScanPausesOnBatchBytesAcrossFlushes(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

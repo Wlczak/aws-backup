@@ -379,10 +379,19 @@ func Scan(
 	flushErr := <-flushErrCh
 
 	// Close out any directories that were fully traversed before the walk
-	// ended or before the pause sentinel fired.
-	popFinished("")
-	if paused && stopAfter != "" {
-		completedFolders = uniqueAppend(completedFolders, stopAfter)
+	// ended. When the pause sentinel fires, the walk stopped mid-tree, so
+	// any still-open ancestors above stopAfter are incomplete and must not
+	// be promoted into the completed skip-set. The stopAfter subtree itself
+	// is still safe to record, because the walk only stops once it leaves it.
+	if paused && errors.Is(walkErr, stopWalkErr) {
+		if stopAfter != "" {
+			completedFolders = uniqueAppend(completedFolders, stopAfter)
+		}
+	} else {
+		popFinished("")
+		if paused && stopAfter != "" {
+			completedFolders = uniqueAppend(completedFolders, stopAfter)
+		}
 	}
 
 	// Hydrate the return aggregate from the atomic counters now that

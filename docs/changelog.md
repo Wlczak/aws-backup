@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| — | — | Fixed paused scan batches from promoting open ancestor folders into the completed-folder cache, which could make later batches skip unscanned subtrees |
 | — | — | Dashboard now has an "Invalidate scan cache" action that clears the persistent completed-folder cache for the active profile via `DELETE /api/scan-cache` |
 | — | — | Persistent scan-folder cache now survives run completion in `run_scan_folders`, seeds later full runs from the active profile DB, and is bypassed by scan-only / explicit `ScanPaths` rescans |
 | — | — | Logs page now has a "Copy run log" button that copies the selected run's header and full log text to the clipboard |

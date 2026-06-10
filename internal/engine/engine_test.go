@@ -421,6 +421,35 @@ func TestEnginePartialRescanBypassesPersistentFolderCache(t *testing.T) {
 	}
 }
 
+func TestEngineBatchedFullRunDoesNotPromotePausedAncestor(t *testing.T) {
+	eng, d, _, store, root, _ := newTestEngine(t, 99)
+	eng.opts.ScanBatchBytes = 15
+	ctx := context.Background()
+
+	writeFile(t, root, "aaa/top/child1/a.txt", strings.Repeat("a", 10))
+	writeFile(t, root, "aaa/top/child2/b.txt", strings.Repeat("b", 10))
+	writeFile(t, root, "zzz/other/c.txt", strings.Repeat("c", 10))
+
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	run, err := d.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != db.RunCompleted {
+		t.Fatalf("status=%q want completed", run.Status)
+	}
+	if run.FilesUploaded != 3 {
+		t.Fatalf("files_uploaded=%d want 3", run.FilesUploaded)
+	}
+	if got := len(store.Keys()); got != 3 {
+		t.Fatalf("stored keys=%d want 3", got)
+	}
+}
+
 // TestEngineBatchedFullRunStopsOnUploadError verifies that a real upload
 // failure ends the run before the next scan batch starts.
 func TestEngineBatchedFullRunStopsOnUploadError(t *testing.T) {
