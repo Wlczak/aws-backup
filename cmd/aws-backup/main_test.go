@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wlczak/aws-backup/internal/config"
 	"github.com/Wlczak/aws-backup/internal/db"
+	"github.com/Wlczak/aws-backup/internal/restore"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
 	"golang.org/x/crypto/bcrypt"
@@ -330,6 +332,38 @@ func TestCreateProfileCloneClearsBucketAndQueueURL(t *testing.T) {
 	}
 	if prof.S3.Region != active.S3.Region {
 		t.Fatalf("region = %q, want cloned %q", prof.S3.Region, active.S3.Region)
+	}
+}
+
+func TestAppCloseDoesNotWaitForSQSDone(t *testing.T) {
+	var cancelled atomic.Bool
+	a := &appState{
+		sqsConsumer: &restore.Consumer{},
+		sqsCancel: func() {
+			cancelled.Store(true)
+		},
+		sqsDone: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		a.close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("app.close blocked waiting for sqsDone")
+	}
+
+	if !cancelled.Load() {
+		t.Fatal("expected sqs cancel to be called")
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.sqsConsumer != nil || a.sqsCancel != nil || a.sqsDone != nil {
+		t.Fatalf("sqs state not cleared: consumer=%v cancel=%v done=%v", a.sqsConsumer, a.sqsCancel, a.sqsDone)
 	}
 }
 

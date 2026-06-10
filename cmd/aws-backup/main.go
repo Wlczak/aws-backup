@@ -647,11 +647,15 @@ func (a *appState) saveSettings(next config.Config) error {
 }
 
 func (a *appState) close() {
-	if a.sqsCancel != nil {
-		a.sqsCancel()
-	}
-	if a.sqsDone != nil {
-		<-a.sqsDone
+	a.mu.Lock()
+	sqsCancel := a.sqsCancel
+	a.sqsConsumer = nil
+	a.sqsCancel = nil
+	a.sqsDone = nil
+	a.mu.Unlock()
+
+	if sqsCancel != nil {
+		sqsCancel()
 	}
 	if a.store != nil {
 		a.store.Close()
@@ -1306,19 +1310,9 @@ func runServe(cfgPath, profileOverride string) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("engine shutdown", "error", err)
 	}
-	// Wait for the SQS consumer to exit before app.close() runs. Run()
-	// returns once ctx is done and any in-flight handleMessage has
-	// completed; without this wait MarkRestore* could race db.Close. (#258)
-	if app.sqsCancel != nil {
-		app.sqsCancel()
-	}
-	if app.sqsDone != nil {
-		select {
-		case <-app.sqsDone:
-		case <-shutdownCtx.Done():
-			logger.Warn("sqs consumer did not exit before shutdown deadline")
-		}
-	}
+	// app.close() cancels the SQS consumer and tears down the remaining
+	// app resources immediately. We intentionally do not wait for the
+	// consumer to drain before closing the app.
 }
 
 // discardResponse is a minimal http.ResponseWriter for programmatic calls.

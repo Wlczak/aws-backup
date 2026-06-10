@@ -103,10 +103,13 @@ Runs execute against the currently active profile. The active profile determines
 - `runWg` waits on the engine goroutine during `Server.Shutdown` so DB/storage tear-down sees no live writers (#85)
 - `downloadWg` waits on the full-download goroutine during `Server.Shutdown`
 - `cfgMu` (RWMutex) shared with `appState.mu` via `Deps.ConfigMu` so cmd-side and api-side cfg writes serialise on a single lock (#153)
+- `app.close()` cancels the restore SQS consumer during shutdown, clears the cached consumer handles, and closes the app resources immediately instead of waiting for the consumer to drain
 
 ## Restore Subsystem
 
 `internal/restore.Consumer` long-polls AWS SQS for S3 Event Notifications about Glacier restore lifecycle (`s3:ObjectRestore:Post` and `s3:ObjectRestore:Completed`). Started in `appState` when `sqs.queue_url` is non-empty; kept as `appState.sqsConsumer` so `POST /api/restore/sync-status` can call `DrainAll` alongside the background poll.
+
+On normal profile switch / rename, the old consumer is still given a short grace period to exit before the previous profile's DB and storage handles are closed. On process shutdown, `app.close()` cancels the consumer and tears down the app immediately without waiting for `sqsDone`.
 
 - `Post` event → `db.MarkRestoreInProgress(s3_key)`
 - `Completed` event → `db.MarkRestored(s3_key, expiresAt)` — sets `restore_expires_at` so the UI can warn before the temporary copy expires
