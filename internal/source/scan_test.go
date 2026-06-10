@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,12 +33,18 @@ func TestScanNewChangedMissing(t *testing.T) {
 	d := openDB(t)
 
 	// First scan: 2 new files.
-	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if batch.Paused {
+		t.Fatalf("first scan batch unexpectedly paused: %+v", batch)
+	}
 	if s.Seen != 2 || s.New != 2 || s.Changed != 0 || s.Missing != 0 {
 		t.Errorf("first scan: %+v", s)
+	}
+	if s.Bytes != 6 {
+		t.Errorf("first scan bytes=%d want 6", s.Bytes)
 	}
 
 	// Mark both as uploaded so we can see the disappearance reclassification.
@@ -61,12 +68,18 @@ func TestScanNewChangedMissing(t *testing.T) {
 	// Sleep so scanStart is strictly after the last upload's last_seen_at.
 	time.Sleep(10 * time.Millisecond)
 
-	s, err = Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err = Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if batch.Paused {
+		t.Fatalf("rescan batch unexpectedly paused: %+v", batch)
+	}
 	if s.Seen != 2 {
 		t.Errorf("seen=%d want 2", s.Seen)
+	}
+	if s.Bytes != 5 {
+		t.Errorf("bytes=%d want 5", s.Bytes)
 	}
 	if s.New != 1 {
 		t.Errorf("new=%d want 1", s.New)
@@ -103,16 +116,19 @@ func TestScanRevivesMissingRowToPending(t *testing.T) {
 	defer src.Close()
 	d := openDB(t)
 
-	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err != nil {
+	if _, _, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.MarkMissingByPaths(ctx, []string{"return.txt"}); err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
 
-	s, err := Scan(ctx, src, d, nil, nil, nil, 10)
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("rescan batch unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 1 || s.Missing != 0 {
 		t.Fatalf("rescan stats: %+v", s)
@@ -141,14 +157,20 @@ func TestScanProgressCallback(t *testing.T) {
 	d := openDB(t)
 
 	var samples []ScanProgress
-	s, err := Scan(ctx, src, d, nil, nil, func(p ScanProgress) {
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, func(p ScanProgress) {
 		samples = append(samples, p)
-	}, 10)
+	}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if batch.Paused {
+		t.Fatalf("progress scan unexpectedly paused: %+v", batch)
+	}
 	if s.Seen != n {
 		t.Fatalf("seen=%d want %d", s.Seen, n)
+	}
+	if s.Bytes != n {
+		t.Fatalf("bytes=%d want %d", s.Bytes, n)
 	}
 	if len(samples) == 0 {
 		t.Fatal("expected at least one progress callback")
@@ -173,8 +195,52 @@ func TestScanContextCancel(t *testing.T) {
 	d := openDB(t)
 
 	cancel() // cancel before scan runs
-	if _, err := Scan(ctx, src, d, nil, nil, nil, 10); err == nil {
+	if _, _, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 0); err == nil {
 		t.Fatal("expected cancel error")
+	}
+}
+
+func TestScanPauseSkipsExactRootFileOnResume(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "root.bin"), strings.Repeat("a", 16))
+	writeFile(t, filepath.Join(root, "sub", "child.txt"), "b")
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	firstStats, firstBatch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstBatch.Paused {
+		t.Fatalf("first batch not paused: %+v", firstBatch)
+	}
+	if len(firstBatch.CompletedFolders) == 0 {
+		t.Fatalf("first batch completed set empty: %+v", firstBatch)
+	}
+	if firstStats.Seen != 1 {
+		t.Fatalf("first batch seen=%d want 1", firstStats.Seen)
+	}
+	if firstBatch.PausePath != "root.bin" {
+		t.Fatalf("pause path=%q want root.bin", firstBatch.PausePath)
+	}
+
+	resumeSkip := map[string]struct{}{}
+	for _, p := range firstBatch.CompletedFolders {
+		resumeSkip[p] = struct{}{}
+	}
+
+	secondStats, secondBatch, err := Scan(ctx, src, d, nil, resumeSkip, nil, nil, 10, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondStats.Seen == 0 {
+		t.Fatalf("resume scan saw no files; expected child.txt to advance the batch")
+	}
+	if secondBatch.Paused && secondBatch.PausePath == "root.bin" {
+		t.Fatalf("resume scan paused again on the same root file: %+v", secondBatch)
 	}
 }
 
@@ -212,9 +278,12 @@ func TestScanFlushesByBatchSize(t *testing.T) {
 	defer src.Close()
 	spy := &scanSpy{}
 
-	s, err := Scan(ctx, src, spy, nil, nil, nil, 2)
+	s, batch, err := Scan(ctx, src, spy, nil, nil, nil, nil, 2, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if batch.Paused {
+		t.Fatalf("batch-size test unexpectedly paused: %+v", batch)
 	}
 	if s.Seen != 5 || s.New != 5 {
 		t.Fatalf("scan stats: %+v", s)
@@ -233,5 +302,141 @@ func TestScanFlushesByBatchSize(t *testing.T) {
 	}
 	if got := len(spy.batches[2]); got != 1 {
 		t.Fatalf("third batch size=%d want 1", got)
+	}
+}
+
+func TestScanPausesOnBatchBytesAndSkipsCompletedFolders(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "keep", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "rest", "c.txt"), strings.Repeat("c", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Paused {
+		t.Fatalf("expected first batch to pause, got %+v", batch)
+	}
+	if len(batch.CompletedFolders) == 0 {
+		t.Fatal("expected at least one completed folder in first batch")
+	}
+	if s.Seen != 2 {
+		t.Fatalf("seen=%d want 2", s.Seen)
+	}
+	if s.Bytes != 20 {
+		t.Fatalf("bytes=%d want 20", s.Bytes)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files=%d want 2", len(files))
+	}
+
+	// The second scan should skip the completed folder and only visit the
+	// remaining subtree.
+	skip := make(map[string]struct{}, len(batch.CompletedFolders))
+	for _, p := range batch.CompletedFolders {
+		skip[p] = struct{}{}
+	}
+	s2, batch2, err := Scan(ctx, src, d, nil, skip, nil, nil, 10, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch2.Paused {
+		t.Fatalf("second batch unexpectedly paused: %+v", batch2)
+	}
+	if s2.Seen != 1 {
+		t.Fatalf("second batch seen=%d want 1", s2.Seen)
+	}
+	if s2.Bytes != 10 {
+		t.Fatalf("second batch bytes=%d want 10", s2.Bytes)
+	}
+}
+
+func TestScanPauseDoesNotPromoteAncestorFolderComplete(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "aaa", "top", "child1", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "aaa", "top", "child2", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "zzz", "other", "c.txt"), strings.Repeat("c", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	firstStats, firstBatch, err := Scan(ctx, src, d, nil, nil, nil, nil, 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstBatch.Paused {
+		t.Fatalf("first batch unexpectedly completed tree: %+v", firstBatch)
+	}
+	if firstStats.Seen != 1 {
+		t.Fatalf("first batch seen=%d want 1", firstStats.Seen)
+	}
+	for _, p := range firstBatch.CompletedFolders {
+		if p == "aaa/top" {
+			t.Fatalf("paused batch incorrectly promoted ancestor folder: %+v", firstBatch.CompletedFolders)
+		}
+	}
+	if len(firstBatch.CompletedFolders) == 0 || firstBatch.CompletedFolders[0] != "aaa/top/child1" {
+		t.Fatalf("first batch completed folders=%v want aaa/top/child1", firstBatch.CompletedFolders)
+	}
+
+	resumeSkip := map[string]struct{}{}
+	for _, p := range firstBatch.CompletedFolders {
+		resumeSkip[p] = struct{}{}
+	}
+	secondStats, secondBatch, err := Scan(ctx, src, d, nil, resumeSkip, nil, nil, 10, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondStats.Seen < 1 {
+		t.Fatalf("resume scan saw no new files; expected remaining subtree to advance")
+	}
+	if secondBatch.Paused && secondBatch.PausePath == "aaa/top" {
+		t.Fatalf("resume scan paused again at top-level ancestor: %+v", secondBatch)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "aaa/top/child2/b.txt", All: true})
+	if err != nil {
+		t.Fatalf("reload child2 file: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("aaa/top/child2/b.txt rows=%d want 1", len(files))
+	}
+}
+
+func TestScanPausesOnBatchBytesAcrossFlushes(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "folder", "a.txt"), strings.Repeat("a", 10))
+	writeFile(t, filepath.Join(root, "folder", "b.txt"), strings.Repeat("b", 10))
+	writeFile(t, filepath.Join(root, "folder", "c.txt"), strings.Repeat("c", 10))
+	writeFile(t, filepath.Join(root, "rest", "d.txt"), strings.Repeat("d", 10))
+
+	src, _ := NewLocalDir(root)
+	defer src.Close()
+	d := openDB(t)
+
+	s, batch, err := Scan(ctx, src, d, nil, nil, nil, nil, 1, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Paused {
+		t.Fatalf("expected batch to pause across flushes, got %+v", batch)
+	}
+	if s.Seen != 3 {
+		t.Fatalf("seen=%d want 3", s.Seen)
+	}
+	if s.Bytes != 30 {
+		t.Fatalf("bytes=%d want 30", s.Bytes)
 	}
 }

@@ -11,7 +11,7 @@ POST   /api/auth/login              {password: "..."} → sets the auth cookie o
 POST   /api/auth/logout             clears the auth cookie
 
 # Run lifecycle
-GET    /api/status                    current + last run, download mirror snapshot, restore-download current + last, stop_requested flag
+GET    /api/status                    current + last run (includes scan_paused / scan_complete / bytes_scanned), download mirror snapshot, restore-download current + last, stop_requested flag
 GET    /api/runs                      paginated list
 GET    /api/runs/{id}                 detail + logs
 POST   /api/runs                      trigger run; body {mode: full|scan|upload, paths: []}
@@ -19,6 +19,10 @@ POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
 DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
+DELETE /api/scan-cache               clear the persistent completed-folder cache for the active profile
+POST   /api/client-logs               public browser-log ingest; body {entries:[...]} from the same-origin SPA
+GET    /api/client-logs               paginated browser-log list (auth required)
+DELETE /api/client-logs               truncate browser logs (auth required)
 POST   /api/download/full             full mirror download using backup.download_dir; the live job summary includes object count + estimated GET/egress cost for the missing set
 POST   /api/download/rescan           refresh the cached mirror snapshot for backup.download_dir without downloading files
 POST   /api/download/cancel           cancel the active mirror download or rescan job if one is running
@@ -66,7 +70,16 @@ GET    /api/events                    SSE stream
 GET    /*                             embedded Svelte SPA (hash router fallback to index.html)
 ```
 
+The dashboard does not treat `/api/events` as the source of truth for run
+state. `GET /api/status` is authoritative for the current/last run, scan
+flags, and persisted counters; SSE is a best-effort live-detail channel for
+things like restore/download jobs and the active run log. Avoid adding new
+dashboard dependencies on high-frequency `scan_progress` / `upload_progress`
+frames unless they provide a visible improvement that `/api/status` cannot.
+
 Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
+
+`POST /api/client-logs` is intentionally public so the browser can queue uncaught runtime errors, request failures, console warnings, and toast events before the session is authenticated. The ingest handler still only accepts same-origin requests because the `/api` tree is protected by `originGuard`.
 
 `PUT /api/settings` no longer 409s during a run — it persists to disk and stashes the merged config; the post-run goroutine applies it once the run finishes (`pending_apply: true` in the response). See `internal/api/handlers_settings.go`.
 
@@ -94,11 +107,11 @@ Defined in `internal/engine/events.go`; subscribers attach via `internal/events/
 
 | Type | Payload (Data fields) |
 | --- | --- |
-| `run_start` | files_scanned, files_uploaded, bytes_uploaded |
+| `run_start` | files_scanned, bytes_scanned, files_uploaded, bytes_uploaded |
 | `run_log` | level, message — replayed as a burst on SSE reconnect (#130) |
-| `run_complete` | status, files_scanned, files_uploaded, bytes_uploaded, error_message |
-| `scan_progress` | seen, new, changed (#137) |
-| `scan_complete` | seen, new, changed, unchanged, missing |
+| `run_complete` | status, files_scanned, bytes_scanned, files_uploaded, bytes_uploaded, error_message |
+| `scan_progress` | seen, bytes, new, changed (#137) |
+| `scan_complete` | seen, bytes, new, changed, unchanged, missing |
 | `upload_plan` | total_files, total_groups, total_bytes (#126) |
 | `copy_progress` | file_id, name, bytes_copied, size, percent |
 | `upload_start` | group_id |

@@ -283,24 +283,6 @@ type restoreTriggerRequest struct {
 	Days int `json:"days"`
 }
 
-type restoreTriggerResponse struct {
-	KeysRequested         int   `json:"keys_requested"`
-	KeysAlreadyInProgress int   `json:"keys_already_in_progress"`
-	KeysAlreadyAvailable  int   `json:"keys_already_available"`
-	FilesAffected         int64 `json:"files_affected"`
-	BytesAffected         int64 `json:"bytes_affected"`
-	// Files*Skipped* fields count rows the trigger filtered out because
-	// AWS already has (or is producing) a thawed copy. Surfaces in the
-	// UI so the operator understands why fewer keys were requested than
-	// they may have selected.
-	FilesSkippedInProgress int64    `json:"files_skipped_in_progress"`
-	BytesSkippedInProgress int64    `json:"bytes_skipped_in_progress"`
-	FilesSkippedRestored   int64    `json:"files_skipped_restored"`
-	BytesSkippedRestored   int64    `json:"bytes_skipped_restored"`
-	UnknownPaths           []string `json:"unknown_paths,omitempty"`
-	Errors                 []string `json:"errors,omitempty"`
-}
-
 type restoreJobStartResponse struct {
 	RestoreJobID int64  `json:"restore_job_id"`
 	Status       string `json:"status"`

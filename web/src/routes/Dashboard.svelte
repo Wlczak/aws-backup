@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, subscribeEvents, type Status, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
+  import { api, subscribeEvents, type SseEvent, type Status, type Run, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
   import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
@@ -13,6 +13,7 @@
   let scanNew = $state(0);
   let scanChanged = $state(0);
   let scanActive = $state(false);
+  let scanPaused = $state(false);
   // `total` is authoritative from the `upload_plan` SSE event; the other
   // counters are derived from `itemProgress` so an SSE replay or
   // reconnect can't double-count them. (#199)
@@ -28,6 +29,10 @@
   let triggering = $state(false);
   let rescanningMirror = $state(false);
   let cancellingMirror = $state(false);
+  let cancellingRun = $state(false);
+  let invalidatingScanCache = $state(false);
+  let pendingRun = $state<Run | null>(null);
+  let observedRunId = $state<number | null>(null);
 
   type ItemProgress = {
     key: string;
@@ -56,6 +61,15 @@
   };
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
+  let activeRun = $derived(status?.current ?? pendingRun);
+  let scanBytes = $state(0);
+  let liveScannedBytes = $derived(Math.max(scanBytes, status?.current?.bytes_scanned ?? activeRun?.bytes_scanned ?? 0));
+  let liveUploadedFiles = $derived(status?.current?.files_uploaded ?? activeRun?.files_uploaded ?? 0);
+  let liveUploadedBytes = $derived(status?.current?.bytes_uploaded ?? activeRun?.bytes_uploaded ?? 0);
+  let scanLineActive = $derived(
+    scanActive || !!(status?.current && !status.current.scan_complete && status.current.files_scanned > 0),
+  );
+  let scanLineSeen = $derived(Math.max(scanSeen, status?.current?.files_scanned ?? 0));
   const usd = new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -67,6 +81,20 @@
   // keep every row in $state for the tab lifetime — itemList re-sorts the
   // whole map on every event. Active items are never evicted. (#200)
   const TERMINAL_ITEM_CAP = 200;
+
+  function makePendingRun(runId: number): Run {
+    return {
+      id: runId,
+      started_at: new Date().toISOString(),
+      status: 'running',
+      files_scanned: 0,
+      bytes_scanned: 0,
+      files_uploaded: 0,
+      bytes_uploaded: 0,
+      scan_paused: false,
+      scan_complete: false,
+    };
+  }
 
   function upsertItem(key: string, patch: Partial<ItemProgress>) {
     const prev = itemProgress[key];
@@ -111,7 +139,8 @@
     // backward as the other one races ahead.
     completed = Math.max(completed, seededFilesUploaded);
     started = Math.max(started, completed);
-    return { completed, failed, started, total: uploadsTotal };
+    const total = Math.max(uploadsTotal, status?.current?.files_planned ?? 0, started);
+    return { completed, failed, started, total };
   });
 
   let itemList = $derived(
@@ -132,6 +161,8 @@
   let es: { close: () => void } | null = null;
   let pollTimer: number | undefined;
   let pollDestroyed = false;
+  let runEventTimer: number | undefined;
+  let pendingRunEvents: SseEvent[] = [];
 
   // SSE drives most updates; polling is a backstop for missed events and
   // to surface server-side state changes the bus doesn't emit. Use 1s
@@ -141,7 +172,7 @@
   // calls/hour for no value. (#70)
   function scheduleNextPoll() {
     if (pollDestroyed) return;
-    const delay = status?.current || status?.download_current ? 1000 : 30000;
+    const delay = activeRun || status?.download_current ? 1000 : 30000;
     pollTimer = window.setTimeout(async () => {
       await refresh();
       scheduleNextPoll();
@@ -162,17 +193,44 @@
       // upward — the SSE path may have a fresher value already.
       const live = status?.current?.files_scanned ?? 0;
       if (live > scanSeen) scanSeen = live;
+      const liveBytes = status?.current?.bytes_scanned ?? 0;
+      if (liveBytes > scanBytes) scanBytes = liveBytes;
+      scanPaused = status?.current?.scan_paused ?? false;
       // Seed completed-uploads from the run row so a reload mid-run
       // recovers the progress count instead of starting at 0.
       const liveUp = status?.current?.files_uploaded ?? 0;
       if (liveUp > seededFilesUploaded) seededFilesUploaded = liveUp;
+      const currentRunId = status?.current?.id ?? null;
+      if (currentRunId !== observedRunId) {
+        if (currentRunId === null) {
+          itemProgress = {};
+          uploadsTotal = 0;
+          scanActive = false;
+          scanPaused = false;
+          pendingRun = null;
+          cancellingRun = false;
+        } else {
+          itemProgress = {};
+          uploadsTotal = 0;
+          scanSeen = status?.current?.files_scanned ?? scanSeen;
+          scanBytes = status?.current?.bytes_scanned ?? 0;
+          scanNew = 0;
+          scanChanged = 0;
+          scanActive = false;
+          scanPaused = !!status?.current?.scan_paused;
+        }
+        observedRunId = currentRunId;
+      }
+      if (pendingRun && (status?.current?.id === pendingRun.id || status?.last?.id === pendingRun.id)) {
+        pendingRun = null;
+      }
     } catch (e) {
       toast.error(String(e));
     }
   }
 
   async function rescanDownloadMirror() {
-    if (rescanningMirror || status?.current || status?.download_current) return;
+    if (rescanningMirror || activeRun || status?.download_current) return;
     rescanningMirror = true;
     try {
       await api.downloadRescan();
@@ -198,10 +256,32 @@
     }
   }
 
+  async function invalidateScanCache() {
+    if (invalidatingScanCache || activeRun) return;
+    invalidatingScanCache = true;
+    try {
+      const res = await api.invalidateScanCache();
+      toast.success(`Cleared ${res.affected.toLocaleString()} cached folder(s).`);
+      await refresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      invalidatingScanCache = false;
+    }
+  }
+
   onMount(() => {
     refresh().then(() => scheduleNextPoll());
-    es = subscribeEvents((event) => {
-      switch (event.type) {
+    const flushRunEvents = () => {
+      if (runEventTimer) {
+        clearTimeout(runEventTimer);
+        runEventTimer = undefined;
+      }
+      if (pendingRunEvents.length === 0) return;
+      const events = pendingRunEvents;
+      pendingRunEvents = [];
+      for (const event of events) {
+        switch (event.type) {
         case 'scan_start':
           // Flip the indicator on. Don't reset scanSeen here — run_start
           // already reset it for a fresh run (live: undefined → 0; replay:
@@ -211,16 +291,21 @@
           scanNew = 0;
           scanChanged = 0;
           scanActive = true;
+          scanPaused = false;
           break;
         case 'scan_progress':
           scanSeen = event.data.seen;
+          scanBytes = event.data.bytes;
           scanNew = event.data.new;
           scanChanged = event.data.changed;
           scanActive = true;
+          scanPaused = false;
           break;
         case 'scan_complete':
           scanSeen = event.data.seen;
+          scanBytes = event.data.bytes;
           scanActive = false;
+          scanPaused = !!event.data.paused;
           break;
         case 'upload_plan':
           uploadsTotal = event.data.total_files;
@@ -273,11 +358,11 @@
           });
           break;
         case 'run_start':
-          itemProgress = {};
-          uploadsTotal = 0;
-          // run_start also fires on SSE reconnect with files_uploaded
-          // populated from the DB, so a mid-run reconnect keeps the
-          // count; a brand-new run sends 0 and resets the bar.
+          pendingRun = null;
+          cancellingRun = false;
+          // run_start can replay after reconnect, so keep the upload map
+          // and let the next /api/status snapshot decide whether the run
+          // id actually changed. The run row still seeds persisted counts.
           seededFilesUploaded = event.data.files_uploaded;
           // Don't toggle scanActive here — run_start fires both for live
           // run starts AND on every SSE reconnect (replay), and a
@@ -288,8 +373,10 @@
           // files_scanned from the DB so a mid-run reconnect doesn't show
           // 0 until the next scan_progress tick).
           scanSeen = event.data.files_scanned;
+          scanBytes = event.data.bytes_scanned ?? 0;
           scanNew = 0;
           scanChanged = 0;
+          scanPaused = false;
           logLines = [];
           // Clear any leftover DB-sync card from the previous run so it
           // doesn't linger across a new triggerRun.
@@ -359,6 +446,10 @@
           {
             if (event.type === 'run_complete') {
               scanActive = false;
+              scanPaused = false;
+              pendingRun = null;
+              cancellingRun = false;
+              observedRunId = status?.current?.id ?? observedRunId;
             }
             const line = event.type === 'run_log'
               ? `[${event.data.level ?? 'log'}] ${event.data.message ?? ''}`
@@ -366,7 +457,16 @@
             logLines = [...logLines.slice(-49), line];
           }
           break;
+        }
       }
+    };
+    const scheduleRunFlush = () => {
+      if (runEventTimer) return;
+      runEventTimer = window.setTimeout(flushRunEvents, 100);
+    };
+    es = subscribeEvents((event) => {
+      pendingRunEvents.push(event);
+      scheduleRunFlush();
     });
   });
 
@@ -375,6 +475,7 @@
     es?.close();
     if (pollTimer) clearTimeout(pollTimer);
     if (dbSyncHideTimer) clearTimeout(dbSyncHideTimer);
+    if (runEventTimer) clearTimeout(runEventTimer);
   });
 
   function dbSyncLabel(reason: string): string {
@@ -386,11 +487,11 @@
   async function triggerRun(mode: 'full' | 'scan' | 'upload' = 'full') {
     triggering = true;
     try {
-      await api.triggerRun({ mode });
-      // Don't reset state here — the `run_start` SSE handler is the source
-      // of truth and clears uploads/scan/itemProgress/logLines as soon as
-      // the engine actually starts. Resetting after the await races with
-      // events that may already have arrived. (#198)
+      const started = await api.triggerRun({ mode });
+      pendingRun = makePendingRun(started.run_id);
+      // Pull the authoritative run row immediately so the dashboard shows
+      // the new run even if the SSE start frame is delayed or dropped.
+      await refresh();
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -399,20 +500,23 @@
   }
 
   async function cancel() {
-    if (!status?.current) return;
+    if (!activeRun) return;
+    cancellingRun = true;
     try {
-      await api.cancelRun(status.current.id);
+      await api.cancelRun(activeRun.id);
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      cancellingRun = false;
     }
   }
 
   let stopping = $state(false);
   async function stop() {
-    if (!status?.current || stopping) return;
+    if (!activeRun || stopping) return;
     stopping = true;
     try {
-      await api.stopRun(status.current.id);
+      await api.stopRun(activeRun.id);
       // Reflect the new state immediately instead of waiting for the
       // next 3s status poll, so the button label flips on click.
       if (status) status.stop_requested = true;
@@ -424,10 +528,10 @@
   }
 
   async function continueRun() {
-    if (!status?.current || stopping) return;
+    if (!activeRun || stopping) return;
     stopping = true;
     try {
-      await api.continueRun(status.current.id);
+      await api.continueRun(activeRun.id);
       if (status) status.stop_requested = false;
     } catch (e) {
       toast.error(String(e));
@@ -499,7 +603,8 @@
       // status — files may be marked uploaded/zipped even though they're
       // absent from the cloud index (e.g. zip exists but has no .index.txt).
       await api.retryByPaths(fullSyncResult.local_missing_from_cloud);
-      await api.triggerRun({ mode: 'upload' });
+      const started = await api.triggerRun({ mode: 'upload' });
+      pendingRun = makePendingRun(started.run_id);
       backupStarted = true;
       await refresh();
     } catch (e) {
@@ -573,14 +678,28 @@
 <div class="grid">
   <div class="card">
     <div class="label">Current run</div>
-    {#if status?.current}
+    {#if activeRun}
       <div class="big">
-        run #{status.current.id}
-        <StatusBadge status={status.stop_requested ? 'stopping' : status.current.status} />
+        run #{activeRun.id}
+        <StatusBadge status={status?.stop_requested ? 'stopping' : activeRun.status} />
+        {#if status?.cancel_requested || cancellingRun}
+          <span class="muted small">cancelling</span>
+        {/if}
       </div>
-      <div class="muted">started {relativeTime(status.current.started_at)}</div>
+      <div class="muted">
+        started {relativeTime(activeRun.started_at)}
+        {#if pendingRun && !status?.current}
+          · starting
+        {/if}
+      </div>
+      <div class="muted small">
+        {scanLineSeen.toLocaleString()} scanned · {bytes(liveScannedBytes)} scanned data · {liveUploadedFiles.toLocaleString()} uploaded · {bytes(liveUploadedBytes)}
+      </div>
+      {#if scanPaused}
+        <div class="muted small">scan paused, uploading current batch</div>
+      {/if}
       <div class="run-actions" style="margin-top: 0.5rem">
-        {#if status.stop_requested}
+        {#if status?.stop_requested}
           <button class="primary" onclick={continueRun} type="button" disabled={stopping} title="Cancel the pending stop and keep uploading">
             {stopping ? 'Continuing…' : 'Continue'}
           </button>
@@ -589,8 +708,22 @@
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         {/if}
-        <button class="danger" onclick={cancel} type="button" title="Kill the in-flight upload immediately">
-          Force cancel
+        <button
+          class="danger"
+          onclick={cancel}
+          type="button"
+          disabled={cancellingRun || !!status?.cancel_requested}
+          title="Kill the in-flight upload immediately"
+        >
+          {(cancellingRun || status?.cancel_requested) ? 'Cancelling…' : 'Force cancel'}
+        </button>
+        <button
+          onclick={invalidateScanCache}
+          type="button"
+          disabled={invalidatingScanCache || !!activeRun}
+          title="Clear the persistent completed-folder cache so the next full run walks the tree from scratch"
+        >
+          {invalidatingScanCache ? 'Clearing…' : 'Invalidate scan cache'}
         </button>
       </div>
     {:else}
@@ -604,6 +737,14 @@
         </button>
         <button onclick={() => triggerRun('upload')} type="button" disabled={triggering} title="Upload all pending files without scanning">
           Upload only
+        </button>
+        <button
+          onclick={invalidateScanCache}
+          type="button"
+          disabled={invalidatingScanCache}
+          title="Clear the persistent completed-folder cache so the next full run walks the tree from scratch"
+        >
+          {invalidatingScanCache ? 'Clearing…' : 'Invalidate scan cache'}
         </button>
       </div>
     {/if}
@@ -721,7 +862,7 @@
         <button
           onclick={rescanDownloadMirror}
           type="button"
-          disabled={rescanningMirror || !!status?.current || !!status?.download_current}
+          disabled={rescanningMirror || !!activeRun || !!status?.download_current}
           title="Refresh the cached mirror snapshot so reruns skip files already on disk"
         >
           {rescanningMirror ? 'Rescanning…' : 'Rescan download folder'}
@@ -738,7 +879,7 @@
     </div>
     {#if syncInfo}<div class="sync-info">{syncInfo}</div>{/if}
     <div class="run-actions">
-      <button onclick={syncWithS3} type="button" disabled={syncing || !!status?.current}>
+      <button onclick={syncWithS3} type="button" disabled={syncing || !!activeRun}>
         {syncing ? 'Syncing…' : 'Sync with S3'}
       </button>
     </div>
@@ -809,12 +950,12 @@
                 class="primary fix-btn"
                 onclick={backUpMissing}
                 type="button"
-                disabled={backingUp || !!status?.current}
-                title={status?.current ? 'A run is already in progress' : ''}
+                disabled={backingUp || !!activeRun}
+                title={activeRun ? 'A run is already in progress' : ''}
               >
                 {backingUp ? 'Starting…' : `Back up ${fullSyncResult.local_missing_count} missing file(s)`}
               </button>
-              {#if status?.current}<span class="muted small">run in progress</span>{/if}
+              {#if activeRun}<span class="muted small">run in progress</span>{/if}
             {/if}
           </div>
         {/if}
@@ -920,19 +1061,19 @@
   </div>
 {/if}
 
-{#if status?.current || logLines.length}
+{#if activeRun || logLines.length}
   <div class="card">
     <div class="label">Live progress</div>
-    {#if scanActive}
+    {#if scanLineActive}
       <div class="scan-row">
         <div class="bar bar-indeterminate"><div class="fill"></div></div>
         <div class="scan-foot mono">
-          Scanning… {scanSeen.toLocaleString()} seen{#if scanNew > 0} · {scanNew.toLocaleString()} new{/if}{#if scanChanged > 0} · {scanChanged.toLocaleString()} changed{/if}
+          Scanning… {scanLineSeen.toLocaleString()} seen{#if scanNew > 0} · {scanNew.toLocaleString()} new{/if}{#if scanChanged > 0} · {scanChanged.toLocaleString()} changed{/if}
         </div>
       </div>
     {/if}
     <div class="live-stats">
-      <span>scanned: <strong>{scanSeen.toLocaleString()}</strong></span>
+      <span>scanned: <strong>{scanLineSeen.toLocaleString()}</strong></span>
       <span>started: <strong>{uploads.started}</strong></span>
       <span>completed: <strong>{uploads.completed}</strong></span>
       <span>failed: <strong>{uploads.failed}</strong></span>
