@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #318 | — | `serve` now keeps waiting for engine shutdown after the 10s `Server.Shutdown` deadline expires, so `app.close()` does not tear down DB/storage while a run or post-run DB sync is still draining |
 | #305 | — | Shutdown now cancels the restore SQS consumer and closes the app immediately instead of waiting for the consumer to drain, removing the occasional 30s exit stall |
 | #313 | — | Dashboard live copy/upload rows now show a frontend-derived speed meter from recent status updates, so active file cards surface throughput without any backend API changes |
 | — | — | Cancelled runs now classify interrupted scan-state writes as `cancelled` instead of `failed`, so a mid-run cancel no longer gets misreported when SQLite aborts the status update |
