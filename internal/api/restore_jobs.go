@@ -56,16 +56,22 @@ func (s *Server) snapshotRestoreJob() (current *restoreJobSummary, last *restore
 	return current, last
 }
 
+func cloneRestoreJob(job *restoreJobSummary) *restoreJobSummary {
+	if job == nil {
+		return nil
+	}
+	copy := *job
+	return &copy
+}
+
 func (s *Server) lookupRestoreJob(id int64) *restoreJobSummary {
 	s.restoreJobMu.Lock()
 	defer s.restoreJobMu.Unlock()
 	if s.currentRestoreJob != nil && s.currentRestoreJob.ID == id {
-		cur := *s.currentRestoreJob
-		return &cur
+		return cloneRestoreJob(s.currentRestoreJob)
 	}
 	if s.lastRestoreJob != nil && s.lastRestoreJob.ID == id {
-		prev := *s.lastRestoreJob
-		return &prev
+		return cloneRestoreJob(s.lastRestoreJob)
 	}
 	return nil
 }
@@ -74,8 +80,7 @@ func (s *Server) startRestoreJob(kind string) (*restoreJobSummary, *restoreJobSu
 	s.restoreJobMu.Lock()
 	defer s.restoreJobMu.Unlock()
 	if s.currentRestoreJob != nil {
-		cur := *s.currentRestoreJob
-		return nil, &cur
+		return nil, cloneRestoreJob(s.currentRestoreJob)
 	}
 	job := &restoreJobSummary{
 		ID:        s.restoreJobSeq.Add(1),
@@ -85,7 +90,7 @@ func (s *Server) startRestoreJob(kind string) (*restoreJobSummary, *restoreJobSu
 		Phase:     "starting",
 	}
 	s.currentRestoreJob = job
-	return job, nil
+	return cloneRestoreJob(job), nil
 }
 
 func (s *Server) updateRestoreJob(jobID int64, fn func(*restoreJobSummary)) {
