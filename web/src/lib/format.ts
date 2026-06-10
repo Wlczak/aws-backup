@@ -11,6 +11,10 @@ export function bytes(n: number): string {
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+export function bytesPerSecond(n: number): string {
+  return `${bytes(n)}/s`;
+}
+
 export function relativeTime(iso?: string): string {
   if (!iso) return '—';
   const t = new Date(iso).getTime();
