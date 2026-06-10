@@ -597,6 +597,69 @@ func (f *failingStorage) Put(ctx context.Context, key string, body io.Reader, si
 	return storage.PutResult{Key: key, ETag: "\"x\"", Size: size}, nil
 }
 
+type failingCommitter struct {
+	markErr error
+	logErr  error
+}
+
+func (f *failingCommitter) MarkUploadedMany(context.Context, []db.UploadedRow) error {
+	return f.markErr
+}
+
+func (f *failingCommitter) AppendLogMany(context.Context, []db.LogEntry) error {
+	return f.logErr
+}
+
+func TestEngineAbortsWhenFinalFlushFails(t *testing.T) {
+	eng, d, _, store, root, _ := newTestEngine(t, 100)
+	writeFile(t, root, "a.txt", "payload")
+
+	prevNewWriteBuffer := newWriteBuffer
+	t.Cleanup(func() { newWriteBuffer = prevNewWriteBuffer })
+	newWriteBuffer = func(writeCommitter) *writeBuffer {
+		return &writeBuffer{
+			d:             &failingCommitter{markErr: errors.New("flush boom")},
+			flushInterval: time.Hour,
+			flushSize:     500,
+			stop:          make(chan struct{}),
+			done:          make(chan struct{}),
+		}
+	}
+
+	runID, err := eng.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run should fail when the final write buffer flush fails")
+	}
+	if !strings.Contains(err.Error(), "final write buffer flush") {
+		t.Fatalf("Run error %q should mention the final flush", err)
+	}
+
+	run, err := d.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != db.RunRunning {
+		t.Fatalf("status=%q want running", run.Status)
+	}
+	if !run.FinishedAt.IsZero() {
+		t.Fatalf("FinishedAt=%v want zero time", run.FinishedAt)
+	}
+
+	files, _, err := d.ListFiles(context.Background(), db.FilesFilter{All: true})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files=%d want 1", len(files))
+	}
+	if files[0].Status != db.StatusPending {
+		t.Fatalf("file status=%q want pending", files[0].Status)
+	}
+	if got := len(store.Keys()); got != 1 {
+		t.Fatalf("store keys=%d want 1", got)
+	}
+}
+
 func TestEngineUploadFailure(t *testing.T) {
 	eng, d, _, _, root, col := newTestEngine(t, 10) // high threshold -> individual
 	writeFile(t, root, "a.txt", "hi")
