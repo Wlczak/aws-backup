@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { recordClientLog } from './client-logs';
 
 export type ToastKind = 'success' | 'error' | 'info';
 export interface Toast {
@@ -28,6 +29,7 @@ export function dismiss(id: number) {
 }
 
 function push(kind: ToastKind, message: string) {
+  recordClientLog(kind === 'error' ? 'error' : 'info', 'toast', message, { kind });
   const id = nextId++;
   toasts.update((list) => [...list, { id, kind, message }]);
   timers.set(id, setTimeout(() => dismiss(id), DURATIONS[kind]));

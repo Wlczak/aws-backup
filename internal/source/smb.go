@@ -143,6 +143,30 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
+		rel := p
+		if root != "" {
+			rel = strings.TrimPrefix(rel, root)
+			rel = strings.TrimPrefix(rel, "/")
+		}
+		if rel == "." {
+			rel = ""
+		}
+		if !isValidRelPath(rel) {
+			slog.Warn("smb walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
+			return nil
+		}
+		if d.IsDir() {
+			if rel == "" {
+				return nil
+			}
+			if err := fn(Entry{RelPath: rel, IsDir: true}); err != nil {
+				if errors.Is(err, ErrSkipDir) {
+					return fs.SkipDir
+				}
+				return err
+			}
+			return nil
+		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
@@ -151,20 +175,12 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 			slog.Warn("smb walk: stat failed, skipping", "path", p, "err", ierr)
 			return nil
 		}
-		rel := p
-		if root != "" {
-			rel = strings.TrimPrefix(rel, root)
-			rel = strings.TrimPrefix(rel, "/")
-		}
 		if rel == "" {
-			return nil
-		}
-		if !isValidRelPath(rel) {
-			slog.Warn("smb walk: rejecting path with NUL/CR/LF", "path_bytes", []byte(rel))
 			return nil
 		}
 		return fn(Entry{
 			RelPath: rel,
+			IsDir:   false,
 			Size:    info.Size(),
 			ModTime: info.ModTime().UTC(),
 		})

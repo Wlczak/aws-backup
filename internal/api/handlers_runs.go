@@ -30,8 +30,13 @@ type runSummary struct {
 	FinishedAt    time.Time `json:"finished_at,omitempty"`
 	Status        string    `json:"status"`
 	FilesScanned  int64     `json:"files_scanned"`
+	BytesScanned  int64     `json:"bytes_scanned"`
 	FilesUploaded int64     `json:"files_uploaded"`
 	BytesUploaded int64     `json:"bytes_uploaded"`
+	FilesPlanned  int64     `json:"files_planned"`
+	BytesPlanned  int64     `json:"bytes_planned"`
+	ScanPaused    bool      `json:"scan_paused"`
+	ScanComplete  bool      `json:"scan_complete"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
 }
 
@@ -42,8 +47,13 @@ func toSummary(r db.Run) runSummary {
 		FinishedAt:    r.FinishedAt,
 		Status:        r.Status,
 		FilesScanned:  r.FilesScanned,
+		BytesScanned:  r.BytesScanned,
 		FilesUploaded: r.FilesUploaded,
 		BytesUploaded: r.BytesUploaded,
+		FilesPlanned:  r.FilesPlanned,
+		BytesPlanned:  r.BytesPlanned,
+		ScanPaused:    r.ScanPaused,
+		ScanComplete:  r.ScanComplete,
 		ErrorMessage:  r.ErrorMessage,
 	}
 }
@@ -112,6 +122,28 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 // action.
 func (s *Server) handleDeleteRunLogs(w http.ResponseWriter, r *http.Request) {
 	n, err := s.deps.DB.DeleteRunLogs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
+// handleDeleteScanCache clears the persistent scan-folder cache for the
+// active profile. It refuses to run while a backup is active so the engine
+// doesn't lose the skip-set mid-run.
+func (s *Server) handleDeleteScanCache(w http.ResponseWriter, r *http.Request) {
+	s.runMu.Lock()
+	currentRun := s.currentRun
+	s.runMu.Unlock()
+	if currentRun != 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":          "a backup run is already in progress",
+			"current_run_id": currentRun,
+		})
+		return
+	}
+	n, err := s.deps.DB.ClearCompletedScanFolderPaths(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -400,6 +432,10 @@ type statusResponse struct {
 	// Stop button to a Continue affordance and render a "stopping" badge.
 	// (#124 follow-up)
 	StopRequested bool `json:"stop_requested"`
+	// CancelRequested is true after a user /cancel until the current run
+	// exits. Lets the dashboard show "cancelling" from the server's view
+	// rather than a purely local transient flag.
+	CancelRequested bool `json:"cancel_requested"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +463,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			sum := toSummary(run)
 			resp.Current = &sum
 			resp.StopRequested = s.currentRunStopReq.Load()
+			resp.CancelRequested = s.currentRunCancelReq.Load()
 		}
 	}
 
@@ -465,16 +502,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.RestoreDownloadLast = &last
 	}
 	s.restoreDownloadMu.Unlock()
-	s.restoreJobMu.Lock()
-	if s.currentRestoreJob != nil {
-		cur := *s.currentRestoreJob
-		resp.RestoreJobCurrent = &cur
-	}
-	if s.lastRestoreJob != nil {
-		last := *s.lastRestoreJob
-		resp.RestoreJobLast = &last
-	}
-	s.restoreJobMu.Unlock()
+	resp.RestoreJobCurrent, resp.RestoreJobLast = s.snapshotRestoreJob()
 	writeJSON(w, http.StatusOK, resp)
 }
 

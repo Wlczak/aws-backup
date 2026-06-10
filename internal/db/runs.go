@@ -2,7 +2,11 @@ package db
 
 import (
 	"context"
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Run lifecycle statuses.
@@ -32,10 +36,13 @@ type Run struct {
 	FinishedAt    time.Time `gorm:"column:finished_at"`
 	Status        string    `gorm:"column:status;not null;default:'running';index"`
 	FilesScanned  int64     `gorm:"column:files_scanned;not null;default:0"`
+	BytesScanned  int64     `gorm:"column:bytes_scanned;not null;default:0"`
 	FilesUploaded int64     `gorm:"column:files_uploaded;not null;default:0"`
 	BytesUploaded int64     `gorm:"column:bytes_uploaded;not null;default:0"`
 	FilesPlanned  int64     `gorm:"column:files_planned;not null;default:0"`
 	BytesPlanned  int64     `gorm:"column:bytes_planned;not null;default:0"`
+	ScanPaused    bool      `gorm:"column:scan_paused;not null;default:false"`
+	ScanComplete  bool      `gorm:"column:scan_complete;not null;default:false"`
 	ErrorMessage  string    `gorm:"column:error_message"`
 }
 
@@ -48,6 +55,17 @@ type RunLog struct {
 	Message   string    `gorm:"column:message;not null"`
 }
 
+// RunScanFolder tracks one directory subtree that was fully scanned during a
+// run. The table doubles as a persistent per-profile cache for later full
+// runs: completed rows are retained after finalize and seed the next batch
+// walk unless the caller explicitly bypasses the cache.
+type RunScanFolder struct {
+	RunID         int64      `gorm:"column:run_id;primaryKey"`
+	Path          string     `gorm:"column:path;primaryKey"`
+	LastScannedAt time.Time  `gorm:"column:last_scanned_at;not null"`
+	CompletedAt   *time.Time `gorm:"column:completed_at"`
+}
+
 // CreateRun inserts a new run row in 'running' state. FinishedAt is omitted
 // so the column stays NULL until FinishRun is called.
 func (db *DB) CreateRun(ctx context.Context, startedAt time.Time) (int64, error) {
@@ -57,11 +75,22 @@ func (db *DB) CreateRun(ctx context.Context, startedAt time.Time) (int64, error)
 }
 
 // UpdateRunStats bumps counters without touching status or finished_at.
-func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, uploaded, bytes int64) error {
+func (db *DB) UpdateRunStats(ctx context.Context, runID, scanned, scannedBytes, uploaded, uploadedBytes int64) error {
 	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
 		"files_scanned":  scanned,
+		"bytes_scanned":  scannedBytes,
 		"files_uploaded": uploaded,
-		"bytes_uploaded": bytes,
+		"bytes_uploaded": uploadedBytes,
+	}).Error
+}
+
+// UpdateRunScanState updates the scan-paused / scan-complete markers for a
+// run so /api/status can reflect whether the current run is between scan
+// batches or done scanning entirely.
+func (db *DB) UpdateRunScanState(ctx context.Context, runID int64, paused, complete bool) error {
+	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{
+		"scan_paused":   paused,
+		"scan_complete": complete,
 	}).Error
 }
 
@@ -83,6 +112,91 @@ func (db *DB) SetRunPlan(ctx context.Context, runID, files, bytes int64) error {
 		"files_planned": files,
 		"bytes_planned": bytes,
 	}).Error
+}
+
+// MarkRunScanFoldersComplete upserts the directory subtrees that finished in
+// the current scan batch, along with the time they were completed.
+func (db *DB) MarkRunScanFoldersComplete(ctx context.Context, runID int64, paths []string, at time.Time) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	rows := make([]RunScanFolder, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		completed := at
+		rows = append(rows, RunScanFolder{
+			RunID:         runID,
+			Path:          p,
+			LastScannedAt: at,
+			CompletedAt:   &completed,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return db.g.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, row := range rows {
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "run_id"}, {Name: "path"}},
+				DoUpdates: clause.AssignmentColumns([]string{"last_scanned_at", "completed_at"}),
+			}).Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListRunScanFolderPaths returns every completed subtree path recorded for a
+// run. The engine uses this as the skip-set for the next scan batch.
+func (db *DB) ListRunScanFolderPaths(ctx context.Context, runID int64) ([]string, error) {
+	var rows []RunScanFolder
+	if err := db.g.WithContext(ctx).
+		Where("run_id = ? AND completed_at IS NOT NULL", runID).
+		Order("path ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Path)
+	}
+	return out, nil
+}
+
+// ListCompletedScanFolderPaths returns every completed subtree path recorded
+// in the current profile DB, deduplicated across runs. Batched full runs seed
+// their initial skip-set from this durable cache.
+func (db *DB) ListCompletedScanFolderPaths(ctx context.Context) ([]string, error) {
+	var rows []RunScanFolder
+	if err := db.g.WithContext(ctx).
+		Where("completed_at IS NOT NULL").
+		Order("path ASC, completed_at DESC, run_id DESC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(rows))
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := seen[row.Path]; ok {
+			continue
+		}
+		seen[row.Path] = struct{}{}
+		out = append(out, row.Path)
+	}
+	return out, nil
+}
+
+// ClearCompletedScanFolderPaths removes the persistent completed-folder cache
+// across the active profile DB. The engine repopulates it on future full runs.
+func (db *DB) ClearCompletedScanFolderPaths(ctx context.Context) (int64, error) {
+	res := db.g.WithContext(ctx).
+		Where("completed_at IS NOT NULL").
+		Delete(&RunScanFolder{})
+	return res.RowsAffected, res.Error
 }
 
 // FinishRun stamps finished_at and sets terminal status + optional error.

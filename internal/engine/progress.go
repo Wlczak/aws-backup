@@ -8,8 +8,8 @@ import (
 // defaultProgressInterval is how often a single upload may emit an
 // EventUploadProgress event. Throttling here keeps the SSE bus from
 // being flooded by per-Read callbacks (transfermanager reads in small
-// part-sized chunks).
-const defaultProgressInterval = 250 * time.Millisecond
+// part-sized chunks) while still feeling live in the dashboard.
+const defaultProgressInterval = 500 * time.Millisecond
 
 // DefaultProgressInterval is the public alias of defaultProgressInterval
 // for callers outside the engine package (e.g. the DB-to-S3 sync) so
