@@ -156,6 +156,8 @@ Zip-backed rows keep their human-readable `zip_name`, but the actual link to the
 
 `download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above. The last completed scan for each mirror directory is cached separately in `download_mirror_snapshots(download_dir, scanned_at, total_count, present_count, missing_count)` so reruns can reuse the snapshot until an operator triggers a rescan.
 
+`run_scan_folders` stores scan-batch completion markers per run and doubles as a persistent per-profile cache for later full runs. The engine keeps those rows after finalize, seeds the next `RunModeFull` batched run from all completed paths in the active profile DB, and bypasses the cache for scan-only runs and explicit `ScanPaths` rescans so operators can force a fresh walk of a subtree.
+
 ## Zip naming + sidecar
 
 `{topdir}/{topdir}_{subdir}_{N}.zip` where N is the per-directory counter, seeded from `MAX(DB, S3 listing)`. Sidecar `{zipKey}.index.txt` is uploaded **before** the zip (#95) so partial uploads never leave a zip without an index. Sidecars are uploaded with `Storage.PutStandard` (#125) so they remain instantly listable even when the zip is in Deep Archive.

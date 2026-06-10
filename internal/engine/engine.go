@@ -231,9 +231,6 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 			return runID, fmt.Errorf("finalize run: %w", ferr)
 		}
 	}
-	if err := e.opts.DB.ClearRunScanFolders(cleanupCtx, runID); err != nil {
-		slog.Warn("clear run scan folders failed", "err", err, "run_id", runID)
-	}
 
 	// Trim run_logs so a chatty run + long retention history doesn't
 	// grow the DB unboundedly. Log-only failures here are non-fatal —
@@ -490,6 +487,24 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 	var totalPlannedGroups int64
 	var batchNum int
 
+	// Full runs reuse previously completed subtrees from the same profile DB,
+	// but explicit ScanPaths rescans must bypass that cache so operators can
+	// force a fresh walk of a subtree.
+	if len(e.opts.ScanPaths) == 0 {
+		cachedFolders, err := e.opts.DB.ListCompletedScanFolderPaths(ctx)
+		if err != nil {
+			e.log(ctx, runID, db.LogError, "batched run could not load persistent scan cache: "+err.Error())
+			return db.RunFailed, fmt.Errorf("list completed scan folders: %w", err)
+		}
+		for _, p := range cachedFolders {
+			completedFolders[p] = struct{}{}
+		}
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"seeded %d completed folders from persistent cache",
+			len(completedFolders),
+		))
+	}
+
 	for {
 		batchNum++
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
@@ -522,6 +537,10 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			e.opts.ScanBatchBytes,
 		)
 		if err != nil {
+			e.log(ctx, runID, db.LogError, fmt.Sprintf(
+				"batched run batch %d scan failed: err=%v completed_folders=%d uploaded=%d bytes=%d",
+				batchNum, err, len(completedFolders), uploadedTotal, bytesUploadedTotal,
+			))
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return db.RunCancelled, err
 			}
@@ -592,6 +611,10 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 		})
 		run, err := e.opts.DB.GetRun(ctx, runID)
 		if err != nil {
+			e.log(ctx, runID, db.LogError, fmt.Sprintf(
+				"batched run batch %d could not reload run totals before deciding next scan: %v",
+				batchNum, err,
+			))
 			if cerr := ctx.Err(); cerr != nil {
 				return db.RunCancelled, cerr
 			}
@@ -600,6 +623,10 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 		uploadedTotal = run.FilesUploaded
 		bytesUploadedTotal = run.BytesUploaded
 		if terminal != db.RunCompleted {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+				"batched run batch %d ended early after upload phase: terminal=%s paused=%t completed_folders=%d",
+				batchNum, terminal, batch.Paused, len(completedFolders),
+			))
 			return terminal, nil
 		}
 
@@ -631,6 +658,10 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 		// the current batch's pending rows. The resumable skip-set carries the
 		// completed folders forward so the next loop iteration only walks the
 		// remaining tree.
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"batched run batch %d will continue to next scan batch: paused=%t completed_folders=%d",
+			batchNum, batch.Paused, len(completedFolders),
+		))
 	}
 }
 

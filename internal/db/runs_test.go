@@ -38,6 +38,17 @@ func TestRunScanFolderLifecycle(t *testing.T) {
 		t.Fatalf("paths=%v", got)
 	}
 
+	if err := d.FinishRun(ctx, runID, RunCompleted, "", now.Add(time.Minute)); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+	got, err = d.ListRunScanFolderPaths(ctx, runID)
+	if err != nil {
+		t.Fatalf("ListRunScanFolderPaths after finish: %v", err)
+	}
+	if len(got) != 2 || got[0] != "docs/sub" || got[1] != "photos" {
+		t.Fatalf("paths after finish=%v", got)
+	}
+
 	if err := d.UpdateRunScanState(ctx, runID, true, false); err != nil {
 		t.Fatalf("UpdateRunScanState: %v", err)
 	}
@@ -49,14 +60,26 @@ func TestRunScanFolderLifecycle(t *testing.T) {
 		t.Fatalf("scan state = paused=%v complete=%v", run.ScanPaused, run.ScanComplete)
 	}
 
-	if err := d.ClearRunScanFolders(ctx, runID); err != nil {
-		t.Fatalf("ClearRunScanFolders: %v", err)
-	}
-	got, err = d.ListRunScanFolderPaths(ctx, runID)
+	runID2, err := d.CreateRun(ctx, now.Add(2*time.Minute))
 	if err != nil {
-		t.Fatalf("ListRunScanFolderPaths after clear: %v", err)
+		t.Fatalf("CreateRun #2: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("paths after clear=%v", got)
+	if err := d.MarkRunScanFoldersComplete(ctx, runID2, []string{"keep"}, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("MarkRunScanFoldersComplete #2: %v", err)
+	}
+	got, err = d.ListRunScanFolderPaths(ctx, runID2)
+	if err != nil {
+		t.Fatalf("ListRunScanFolderPaths run2: %v", err)
+	}
+	if len(got) != 1 || got[0] != "keep" {
+		t.Fatalf("run2 paths=%v", got)
+	}
+
+	cached, err := d.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths: %v", err)
+	}
+	if len(cached) != 3 || cached[0] != "docs/sub" || cached[1] != "keep" || cached[2] != "photos" {
+		t.Fatalf("cached paths=%v", cached)
 	}
 }

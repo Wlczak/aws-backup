@@ -36,14 +36,17 @@ Runs execute against the currently active profile. The active profile determines
 
     Batched full runs continue after each paused scan batch until the tree is
     fully covered, unless a real upload error occurs. Each scan batch records
-    completed folders in the run-scoped `run_scan_folders` table and exposes
-    `runs.scan_paused` / `runs.scan_complete` so `/api/status` can tell the UI
-    whether the engine is between scan batches or has finished scanning
-    entirely. The upload phase filters out any pending rows that belong to
-    folders already completed in the current run. It emits `upload_plan`
-    before the batch uploads begin so the dashboard has a live denominator
-    instead of waiting for the first batch to finish, then refreshes the
-    cumulative plan again after the batch completes so `/api/status` and SSE
+    completed folders in the `run_scan_folders` table; those rows are retained
+    after finalize and seed the next full run in the same profile DB. The
+    cache is only used for `RunModeFull` batched runs: scan-only runs and
+    explicit `ScanPaths` rescans bypass it so operators can force a fresh walk
+    of a subtree. The run still exposes `runs.scan_paused` / `runs.scan_complete`
+    so `/api/status` can tell the UI whether the engine is between scan batches
+    or has finished scanning entirely. The upload phase filters out any pending
+    rows that belong to folders already completed in the current run. It emits
+    `upload_plan` before the batch uploads begin so the dashboard has a live
+    denominator instead of waiting for the first batch to finish, then refreshes
+    the cumulative plan again after the batch completes so `/api/status` and SSE
     replay converge on the run's current totals. A non-cancel upload failure
     fails the run immediately rather than letting the loop continue into the
     next scan batch with the same bad row still pending.

@@ -306,6 +306,121 @@ func TestEngineBatchedFullRunContinuesAfterPausedBatch(t *testing.T) {
 	}
 }
 
+func TestEngineBatchedFullRunSeedsPersistentCompletedFolders(t *testing.T) {
+	eng, d, _, _, root, _ := newTestEngine(t, 99)
+	eng.opts.ScanBatchBytes = 15
+	ctx := context.Background()
+
+	writeFile(t, root, "keep/a.txt", strings.Repeat("a", 10))
+	writeFile(t, root, "rest/b.txt", strings.Repeat("b", 10))
+
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	cached, err := d.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths: %v", err)
+	}
+	if len(cached) != 2 {
+		t.Fatalf("cached folders=%v want 2 entries", cached)
+	}
+
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	logs, _, err := d.ListLogs(ctx, runID, 1, 100)
+	if err != nil {
+		t.Fatalf("ListLogs: %v", err)
+	}
+	foundSeed := false
+	foundStart := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "seeded 2 completed folders from persistent cache") {
+			foundSeed = true
+		}
+		if strings.Contains(log.Message, "batched run batch 1 start: completed_folders=2") {
+			foundStart = true
+		}
+	}
+	if !foundSeed {
+		t.Fatalf("run 2 logs did not record persistent cache seeding: %+v", logs)
+	}
+	if !foundStart {
+		t.Fatalf("run 2 logs did not start with the seeded skip-set: %+v", logs)
+	}
+}
+
+func TestEnginePartialRescanBypassesPersistentFolderCache(t *testing.T) {
+	eng, d, _, _, root, _ := newTestEngine(t, 99)
+	eng.opts.ScanBatchBytes = 15
+	ctx := context.Background()
+
+	writeFile(t, root, "keep/a.txt", strings.Repeat("a", 10))
+	writeFile(t, root, "rest/b.txt", strings.Repeat("b", 10))
+
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+
+	cached, err := d.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths: %v", err)
+	}
+	if len(cached) == 0 {
+		t.Fatal("expected persistent cache to contain completed folders after full run")
+	}
+	overlap := false
+	for _, p := range cached {
+		if p == "keep" {
+			overlap = true
+			break
+		}
+	}
+	if !overlap {
+		t.Fatalf("persistent cache=%v want keep subtree", cached)
+	}
+
+	writeFile(t, root, "keep/a.txt", strings.Repeat("z", 10))
+	newTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(root, "keep", "a.txt"), newTime, newTime); err != nil {
+		t.Fatalf("chtimes keep/a.txt: %v", err)
+	}
+
+	eng.opts.Mode = RunModeScan
+	eng.opts.ScanPaths = []string{"keep"}
+	runID, err := eng.Run(ctx)
+	if err != nil {
+		t.Fatalf("partial rescan: %v", err)
+	}
+
+	run, err := d.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != db.RunCompleted {
+		t.Fatalf("status=%q want completed", run.Status)
+	}
+	if run.FilesScanned != 1 {
+		t.Fatalf("files_scanned=%d want 1", run.FilesScanned)
+	}
+	if run.BytesScanned != 10 {
+		t.Fatalf("bytes_scanned=%d want 10", run.BytesScanned)
+	}
+	files, _, err := d.ListFiles(ctx, db.FilesFilter{Search: "keep/a.txt", All: true})
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("keep/a.txt rows=%d want 1", len(files))
+	}
+	if files[0].Status != db.StatusPending {
+		t.Fatalf("keep/a.txt status=%q want pending", files[0].Status)
+	}
+}
+
 // TestEngineBatchedFullRunStopsOnUploadError verifies that a real upload
 // failure ends the run before the next scan batch starts.
 func TestEngineBatchedFullRunStopsOnUploadError(t *testing.T) {
@@ -532,8 +647,8 @@ func TestEngineCancellation(t *testing.T) {
 	}
 }
 
-// TestZipCounterContinuesSequence verifies that a second run adding new files
-// to a previously-zipped directory creates photos_2.zip rather than
+// TestZipCounterContinuesSequence verifies that an explicit subtree rescan
+// still advances the per-directory zip counter to photos_2.zip rather than
 // overwriting photos_1.zip.
 func TestZipCounterContinuesSequence(t *testing.T) {
 	eng, d, _, store, root, _ := newTestEngine(t, 3)
@@ -563,6 +678,8 @@ func TestZipCounterContinuesSequence(t *testing.T) {
 	writeFile(t, root, "photos/d.jpg", "delta")
 	writeFile(t, root, "photos/e.jpg", "echo")
 	writeFile(t, root, "photos/f.jpg", "foxtrot")
+	eng.opts.Mode = RunModeFull
+	eng.opts.ScanPaths = []string{"photos"}
 	if _, err := eng.Run(ctx); err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
