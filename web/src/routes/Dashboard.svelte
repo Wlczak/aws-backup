@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { api, subscribeEvents, type SseEvent, type Status, type Run, type FileStats, type FullSyncResponse, type RestoreJobStartResponse } from '../lib/api';
-  import { bytes, formatDate, relativeTime, expiresIn } from '../lib/format';
+  import { bytes, bytesPerSecond, formatDate, relativeTime, expiresIn } from '../lib/format';
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
@@ -46,9 +46,11 @@
     // emits this on `upload_start` / `upload_complete` for zips so the
     // dashboard counters reflect file count, not group count. (#count-zips)
     files: number;
+    samples: Array<{ bytes: number; at: number }>;
     error?: string;
     updatedAt: number;
   };
+  type RunEventEntry = { event: SseEvent; receivedAt: number };
   let itemProgress = $state<Record<string, ItemProgress>>({});
 
   type DBSync = {
@@ -76,6 +78,7 @@
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+  const speedSampleWindow = 3;
 
   // Cap retained terminal (done/failed) items so a 50k-file run doesn't
   // keep every row in $state for the tab lifetime — itemList re-sorts the
@@ -96,8 +99,38 @@
     };
   }
 
-  function upsertItem(key: string, patch: Partial<ItemProgress>) {
+  function nowMs() {
+    return typeof performance !== 'undefined' ? performance.now() : Date.now();
+  }
+
+  function speedFromSamples(samples: Array<{ bytes: number; at: number }>): number | null {
+    if (samples.length < 2) return null;
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const elapsed = last.at - first.at;
+    if (elapsed <= 0) return null;
+    const delta = last.bytes - first.bytes;
+    if (!Number.isFinite(delta) || delta < 0) return 0;
+    return (delta * 1000) / elapsed;
+  }
+
+  function itemSpeed(item: ItemProgress): number | null {
+    if (item.status !== 'active') return null;
+    return speedFromSamples(item.samples);
+  }
+
+  function upsertItem(
+    key: string,
+    patch: Partial<ItemProgress>,
+    sample: { bytes: number; at: number } | null = null,
+    resetSamples = false,
+  ) {
     const prev = itemProgress[key];
+    const samples = resetSamples ? [] : [...(prev?.samples ?? [])];
+    if (sample) {
+      samples.push(sample);
+      if (samples.length > speedSampleWindow) samples.splice(0, samples.length - speedSampleWindow);
+    }
     itemProgress[key] = {
       key,
       bytesUploaded: prev?.bytesUploaded ?? 0,
@@ -106,8 +139,9 @@
       status: prev?.status ?? 'active',
       phase: prev?.phase ?? 'copy',
       files: prev?.files ?? 1,
+      samples,
       error: prev?.error,
-      updatedAt: Date.now(),
+      updatedAt: sample?.at ?? nowMs(),
       ...patch,
     };
     const next = itemProgress[key];
@@ -162,7 +196,7 @@
   let pollTimer: number | undefined;
   let pollDestroyed = false;
   let runEventTimer: number | undefined;
-  let pendingRunEvents: SseEvent[] = [];
+  let pendingRunEvents: RunEventEntry[] = [];
 
   // SSE drives most updates; polling is a backstop for missed events and
   // to surface server-side state changes the bus doesn't emit. Use 1s
@@ -280,7 +314,7 @@
       if (pendingRunEvents.length === 0) return;
       const events = pendingRunEvents;
       pendingRunEvents = [];
-      for (const event of events) {
+      for (const { event, receivedAt } of events) {
         switch (event.type) {
         case 'scan_start':
           // Flip the indicator on. Don't reset scanSeen here — run_start
@@ -317,7 +351,7 @@
             percent: event.data.percent,
             status: 'active',
             phase: 'copy',
-          });
+          }, { bytes: event.data.bytes_copied, at: receivedAt });
           break;
         case 'upload_start':
           // Reset bar to 0 on phase switch — the upload size differs from
@@ -330,7 +364,7 @@
             phase: 'upload',
             files: event.data.files ?? 1,
             error: undefined,
-          });
+          }, { bytes: 0, at: receivedAt }, true);
           break;
         case 'upload_progress':
           upsertItem(event.data.key, {
@@ -339,7 +373,7 @@
             percent: event.data.percent,
             status: 'active',
             phase: 'upload',
-          });
+          }, { bytes: event.data.bytes_uploaded, at: receivedAt });
           break;
         case 'upload_complete':
           upsertItem(event.data.key, {
@@ -465,7 +499,7 @@
       runEventTimer = window.setTimeout(flushRunEvents, 100);
     };
     es = subscribeEvents((event) => {
-      pendingRunEvents.push(event);
+      pendingRunEvents.push({ event, receivedAt: nowMs() });
       scheduleRunFlush();
     });
   });
@@ -1084,6 +1118,7 @@
     {#if itemList.length > 0}
       <div class="items">
         {#each itemList as item (item.key)}
+          {@const speed = itemSpeed(item)}
           <div class="item item-{item.status}">
             <div class="item-head">
               <span class="item-key mono" title={item.key}>{item.key}</span>
@@ -1103,6 +1138,9 @@
             <div class="bar"><div class="fill" style="width: {Math.min(100, item.percent)}%"></div></div>
             <div class="item-foot mono">
               {bytes(item.bytesUploaded)} / {bytes(item.size)}
+              {#if speed !== null}
+                · {bytesPerSecond(speed)}
+              {/if}
               {#if item.error}<span class="err"> · {item.error}</span>{/if}
             </div>
           </div>
