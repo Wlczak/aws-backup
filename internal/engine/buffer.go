@@ -25,7 +25,7 @@ const (
 // leaves the file marked 'pending' in the DB. The next run re-uploads it
 // — same behavior as an interrupted run today, so no data loss.
 type writeBuffer struct {
-	d *db.DB
+	d writeCommitter
 
 	mu      sync.Mutex
 	uploads []db.UploadedRow
@@ -38,7 +38,14 @@ type writeBuffer struct {
 	done chan struct{}
 }
 
-func newWriteBuffer(d *db.DB) *writeBuffer {
+type writeCommitter interface {
+	MarkUploadedMany(ctx context.Context, rows []db.UploadedRow) error
+	AppendLogMany(ctx context.Context, entries []db.LogEntry) error
+}
+
+var newWriteBuffer = newWriteBufferImpl
+
+func newWriteBufferImpl(d writeCommitter) *writeBuffer {
 	return &writeBuffer{
 		d:             d,
 		flushInterval: bufferFlushInterval,
@@ -144,17 +151,13 @@ func (b *writeBuffer) requeue(uploads []db.UploadedRow, logs []db.LogEntry) {
 
 // close stops the flusher and drains. Uses a detached context with a
 // short timeout for the final flush so a cancelled run still persists
-// what it managed to upload. Retries once on transient errors before
-// giving up so a flaky DB write doesn't lose already-uploaded rows.
+// what it managed to upload. The caller must treat any error as fatal
+// for run finalization: the run is not safe to finish until the buffer
+// has fully committed its queued DB writes.
 func (b *writeBuffer) close() error {
 	close(b.stop)
 	<-b.done
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := b.flush(ctx)
-	if err != nil {
-		slog.Warn("write buffer final flush failed, retrying", "err", err)
-		err = b.flush(ctx)
-	}
-	return err
+	return b.flush(ctx)
 }

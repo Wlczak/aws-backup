@@ -70,8 +70,10 @@ Runs execute against the currently active profile. The active profile determines
     detail, not as a required control plane for scan-only runs.
 
 8.  Finalize
-    Drain writeBuffer (batched MarkUploaded). FinishRun with terminal status
-    (completed | failed | cancelled | stopped). Emit run_complete.
+    Drain writeBuffer (batched MarkUploaded). If that final drain fails, abort
+    without calling FinishRun so the run never ends in a terminal state while
+    buffered DB commits are still missing. On success, FinishRun with terminal
+    status (completed | failed | cancelled | stopped). Emit run_complete.
 
 9.  Post-run (in api goroutine after currentRun cleared)
     Apply any pendingConfig queued via PUT /api/settings during the run.
@@ -104,6 +106,7 @@ Runs execute against the currently active profile. The active profile determines
 - `downloadWg` waits on the full-download goroutine during `Server.Shutdown`
 - `cfgMu` (RWMutex) shared with `appState.mu` via `Deps.ConfigMu` so cmd-side and api-side cfg writes serialise on a single lock (#153)
 - `app.close()` cancels the restore SQS consumer during shutdown, clears the cached consumer handles, and closes the app resources immediately instead of waiting for the consumer to drain
+- the CLI's `serve` shutdown path retries `Server.Shutdown` without its 10s deadline if the bounded wait times out, so `app.close()` does not tear down DB/storage while an engine run or post-run DB sync is still draining
 
 ## Restore Subsystem
 

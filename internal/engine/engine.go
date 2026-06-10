@@ -216,14 +216,16 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 
 	// Drain the write buffer BEFORE finalising the run row so the
 	// per-file MarkUploaded rows and per-group AppendLog entries land
-	// in the DB ahead of FinishRun / EventRunComplete. If we deferred
-	// buf.close() (LIFO), runs would briefly observe a 'completed' row
-	// with files_uploaded=N while the files table still showed M < N
-	// rows uploaded — those (N-M) files would be re-uploaded next run.
-	// (#118)
+	// in the DB ahead of FinishRun / EventRunComplete. If the final
+	// drain fails, abort without finishing the run: a terminal run row
+	// is only valid once all buffered DB commits have landed.
 	e.buf = nil
 	if err := buf.close(); err != nil {
 		slog.Warn("engine write buffer final flush failed", "err", err)
+		if runErr != nil {
+			return runID, errors.Join(runErr, fmt.Errorf("final write buffer flush: %w", err))
+		}
+		return runID, fmt.Errorf("final write buffer flush: %w", err)
 	}
 
 	finished := e.opts.Now()

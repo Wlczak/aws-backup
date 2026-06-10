@@ -367,6 +367,69 @@ func TestAppCloseDoesNotWaitForSQSDone(t *testing.T) {
 	}
 }
 
+type fakeShutdowner struct {
+	calls   atomic.Int32
+	first   context.Context
+	second  context.Context
+	release chan struct{}
+	started chan struct{}
+}
+
+func (f *fakeShutdowner) Shutdown(ctx context.Context) error {
+	switch f.calls.Add(1) {
+	case 1:
+		f.first = ctx
+		return context.DeadlineExceeded
+	case 2:
+		f.second = ctx
+		if f.started != nil {
+			close(f.started)
+		}
+		<-f.release
+		return nil
+	default:
+		return nil
+	}
+}
+
+func TestWaitForShutdownRetriesWithoutDeadline(t *testing.T) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+
+	fake := &fakeShutdowner{release: make(chan struct{}), started: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		waitForShutdown(fake, shutdownCtx, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+
+	select {
+	case <-fake.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback shutdown was not attempted after the timeout")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("waitForShutdown returned before the fallback shutdown completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if _, ok := fake.first.Deadline(); !ok {
+		t.Fatal("expected the initial shutdown to receive the bounded context")
+	}
+	if _, ok := fake.second.Deadline(); ok {
+		t.Fatal("fallback shutdown should run without the deadline")
+	}
+
+	close(fake.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForShutdown did not return after the fallback shutdown completed")
+	}
+}
+
 func TestSwitchProfileAllowsUnconfiguredS3(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

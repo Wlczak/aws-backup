@@ -1306,13 +1306,31 @@ func runServe(cfgPath, profileOverride string) {
 	}
 	// httpSrv.Shutdown only waits for HTTP handlers; the engine goroutine
 	// spawned by POST /api/runs is detached. Cancel any in-flight run and
-	// wait for it before app.close() tears down DB and storage.
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("engine shutdown", "error", err)
-	}
+	// wait for it before app.close() tears down DB and storage. If the
+	// bounded wait times out while the run is still active, keep waiting
+	// without the deadline so teardown cannot race the engine or the
+	// post-run DB sync.
+	waitForShutdown(srv, shutdownCtx, logger)
 	// app.close() cancels the SQS consumer and tears down the remaining
 	// app resources immediately. We intentionally do not wait for the
 	// consumer to drain before closing the app.
+}
+
+type shutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func waitForShutdown(s shutdowner, shutdownCtx context.Context, logger *slog.Logger) {
+	if err := s.Shutdown(shutdownCtx); err != nil {
+		if logger != nil {
+			logger.Warn("engine shutdown", "error", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			if err := s.Shutdown(context.Background()); err != nil && logger != nil {
+				logger.Warn("engine shutdown wait", "error", err)
+			}
+		}
+	}
 }
 
 // discardResponse is a minimal http.ResponseWriter for programmatic calls.
