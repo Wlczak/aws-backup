@@ -15,6 +15,8 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      GO_VERSION: "1.25.11"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -44,7 +46,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.11"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Cache Go modules and build cache
@@ -53,7 +55,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: go-cache-${{ runner.os }}-go${{ env.GO_VERSION }}-${{ hashFiles('go.sum') }}
 
       - name: Build release binaries
         run: |
