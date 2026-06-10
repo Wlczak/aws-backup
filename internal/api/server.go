@@ -360,6 +360,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/auth/status", s.handleAuthStatus)
 		r.Post("/auth/login", s.handleAuthLogin)
 		r.Post("/auth/logout", s.handleAuthLogout)
+		r.Post("/client-logs", s.handlePostClientLogs)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.authRequired)
@@ -372,6 +373,9 @@ func (s *Server) Router() http.Handler {
 			r.Post("/runs/{id}/stop", s.handleStopRun)
 			r.Post("/runs/{id}/continue", s.handleContinueRun)
 			r.Delete("/run-logs", s.handleDeleteRunLogs)
+			r.Delete("/scan-cache", s.handleDeleteScanCache)
+			r.Get("/client-logs", s.handleListClientLogs)
+			r.Delete("/client-logs", s.handleDeleteClientLogs)
 
 			r.Get("/files", s.handleListFiles)
 			r.Get("/files/tree", s.handleListTree)
@@ -523,6 +527,7 @@ func (s *Server) sseReplay(ctx context.Context) ([]engine.Event, time.Time) {
 			At:    run.StartedAt,
 			Data: map[string]any{
 				"files_scanned":  run.FilesScanned,
+				"bytes_scanned":  run.BytesScanned,
 				"files_uploaded": run.FilesUploaded,
 				"bytes_uploaded": run.BytesUploaded,
 			},

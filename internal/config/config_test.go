@@ -68,6 +68,7 @@ func TestValidateErrors(t *testing.T) {
 		}, "smb.port"},
 		{"missing region with bucket", func(c *Config) { c.S3.Region = "" }, "s3.region is required"},
 		{"bad chunk size", func(c *Config) { c.Backup.ChunkSize = 0 }, "chunk_size"},
+		{"bad scan batch bytes", func(c *Config) { c.Backup.ScanBatchBytes = 0 }, "scan_batch_bytes"},
 		{"bad cron", func(c *Config) { c.Backup.Schedule = "definitely not cron" }, "schedule invalid"},
 		{"bad port", func(c *Config) { c.Server.Port = 70000 }, "server.port"},
 		{"negative multipart threshold", func(c *Config) { c.S3.MultipartThreshold = -1 }, "multipart_threshold"},

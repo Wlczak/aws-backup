@@ -180,6 +180,45 @@ func (c *collidingStorage) PutIfAbsent(ctx context.Context, key string, body io.
 	return c.MemStorage.PutIfAbsent(ctx, key, body, size)
 }
 
+// cancelOnPutStorage blocks the first write until the caller cancels the
+// context, so cancellation tests don't depend on a sleep-based race.
+type cancelOnPutStorage struct {
+	*storage.MemStorage
+	started chan struct{}
+	once    atomic.Bool
+}
+
+func newCancelOnPutStorage(inner *storage.MemStorage) *cancelOnPutStorage {
+	return &cancelOnPutStorage{
+		MemStorage: inner,
+		started:    make(chan struct{}),
+	}
+}
+
+func (s *cancelOnPutStorage) signalStarted() {
+	if s.once.CompareAndSwap(false, true) {
+		close(s.started)
+	}
+}
+
+func (s *cancelOnPutStorage) Put(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
+func (s *cancelOnPutStorage) PutStandard(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
+func (s *cancelOnPutStorage) PutIfAbsent(ctx context.Context, key string, body io.Reader, size int64) (storage.PutResult, error) {
+	s.signalStarted()
+	<-ctx.Done()
+	return storage.PutResult{}, ctx.Err()
+}
+
 // TestPipeline_ZipKeyCollisionExhausted verifies that after exhausting all
 // retries (>4 collisions) the group is counted as an error.
 func TestPipeline_ZipKeyCollisionExhausted(t *testing.T) {
@@ -314,7 +353,7 @@ func TestPipeline_ContextCancel(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close(); src.Close() })
 
-	store := storage.NewMemStorage()
+	store := newCancelOnPutStorage(storage.NewMemStorage())
 	col := &collector{}
 
 	eng := New(Options{
@@ -326,9 +365,9 @@ func TestPipeline_ContextCancel(t *testing.T) {
 		ScanChunkSize:  10,
 		ZipThresh:      50,
 		EnableZipIndex: true,
-		CopyThreads:    2,
-		UploadThreads:  2,
-		PipelineQueue:  2,
+		CopyThreads:    1,
+		UploadThreads:  1,
+		PipelineQueue:  1,
 		Emit:           col.emit,
 	})
 
@@ -339,7 +378,7 @@ func TestPipeline_ContextCancel(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		<-store.started
 		cancel()
 	}()
 
@@ -354,14 +393,14 @@ func TestPipeline_ContextCancel(t *testing.T) {
 		return
 	}
 	run, _ := d.GetRun(ctx, runID)
-	if run.Status != db.RunCancelled && run.Status != db.RunCompleted {
-		t.Errorf("status=%q want cancelled or completed", run.Status)
+	if run.Status != db.RunCancelled {
+		t.Errorf("status=%q want cancelled", run.Status)
 	}
 }
 
-// TestPipeline_PerGroupErrorIsolation verifies that one group failing does not
-// abort the remaining groups.
-func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
+// TestPipeline_PerGroupFailureAbortsRun verifies that a group upload failure
+// ends the run instead of letting later groups continue.
+func TestPipeline_PerGroupFailureAbortsRun(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()
 	src, err := source.NewLocalDir(root)
@@ -385,9 +424,9 @@ func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
 		ScanChunkSize:  10,
 		ZipThresh:      50,
 		EnableZipIndex: true,
-		CopyThreads:    2,
-		UploadThreads:  2,
-		PipelineQueue:  2,
+		CopyThreads:    1,
+		UploadThreads:  1,
+		PipelineQueue:  1,
 		Emit:           col.emit,
 	})
 
@@ -399,18 +438,18 @@ func TestPipeline_PerGroupErrorIsolation(t *testing.T) {
 	writeFile(t, root, "bad/broken.txt", "broken")
 
 	_, runErr := eng.Run(ctx)
-	// Not all groups failed -> completed, not failed.
-	if runErr != nil {
-		t.Fatalf("Run returned unexpected error: %v", runErr)
+	if runErr == nil {
+		t.Fatal("expected run error, got nil")
 	}
 
 	run, _ := d.GetRun(ctx, 1)
-	if run.Status != db.RunCompleted {
-		t.Errorf("status=%q want completed", run.Status)
+	if run.Status != db.RunFailed {
+		t.Errorf("status=%q want failed", run.Status)
 	}
-	// 5 good files uploaded.
-	if run.FilesUploaded != 5 {
-		t.Errorf("uploaded=%d want 5", run.FilesUploaded)
+	// Fail-fast should prevent the run from reaching a clean all-success
+	// state, even though already in-flight good work may still finish.
+	if run.FilesUploaded == 6 {
+		t.Errorf("uploaded=%d want < 6", run.FilesUploaded)
 	}
 }
 

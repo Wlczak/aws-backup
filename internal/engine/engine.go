@@ -46,13 +46,14 @@ const (
 
 // Options wires the engine to the outside world.
 type Options struct {
-	DB            *db.DB
-	Source        source.Source
-	Storage       storage.Storage
-	TmpDir        string
-	KeyPrefix     string // e.g. "backups/"
-	ScanChunkSize int    // batch size for source.Scan upserts
-	ZipThresh     int    // files in a top-dir group >= this -> zip
+	DB             *db.DB
+	Source         source.Source
+	Storage        storage.Storage
+	TmpDir         string
+	KeyPrefix      string // e.g. "backups/"
+	ScanChunkSize  int    // batch size for source.Scan upserts
+	ScanBatchBytes int64  // soft source-scan byte budget before pausing for upload
+	ZipThresh      int    // files in a top-dir group >= this -> zip
 	// ZipMaxBytes caps the uncompressed byte total of a single zip
 	// group. Subtrees larger than this are split along subdirectory
 	// boundaries; only loose files at one directory level that still
@@ -102,6 +103,22 @@ type Options struct {
 // fires mid-group; the outer loop converts it to db.RunStopped.
 var ErrStopRequested = errors.New("engine: stop requested")
 
+func cancelErr(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return cerr
+	}
+	if strings.Contains(err.Error(), "interrupted (9)") {
+		return context.Canceled
+	}
+	return nil
+}
+
 // Engine owns a run's lifecycle.
 type Engine struct {
 	opts Options
@@ -124,6 +141,9 @@ func New(opts Options) *Engine {
 	}
 	if opts.ScanChunkSize <= 0 {
 		opts.ScanChunkSize = 10
+	}
+	if opts.ScanBatchBytes <= 0 {
+		opts.ScanBatchBytes = 4 << 30
 	}
 	if opts.ZipThresh <= 0 {
 		opts.ZipThresh = 50
@@ -179,7 +199,17 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 	buf.start(ctx)
 	e.buf = buf
 
-	e.emit(Event{Type: EventRunStart, RunID: runID, At: start})
+	e.emit(Event{
+		Type:  EventRunStart,
+		RunID: runID,
+		At:    start,
+		Data: map[string]any{
+			"files_scanned":  0,
+			"bytes_scanned":  0,
+			"files_uploaded": 0,
+			"bytes_uploaded": 0,
+		},
+	})
 	e.log(ctx, runID, db.LogInfo, "run started")
 
 	finalStatus, runErr := e.runInner(ctx, runID)
@@ -241,6 +271,7 @@ func (e *Engine) runWithID(ctx context.Context, runID int64, start time.Time) (i
 		Data: map[string]any{
 			"status":         finalStatus,
 			"files_scanned":  stats.FilesScanned,
+			"bytes_scanned":  stats.BytesScanned,
 			"files_uploaded": stats.FilesUploaded,
 			"bytes_uploaded": stats.BytesUploaded,
 			"error_message":  errMsg,
@@ -255,6 +286,10 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		mode = RunModeFull
 	}
 
+	if mode == RunModeFull {
+		return e.runBatchedFull(ctx, runID)
+	}
+
 	// Phase 1: scan (skipped for upload-only runs).
 	if mode == RunModeFull || mode == RunModeScan {
 		// Emit scan_start so a UI that reconnects mid-run can drive its
@@ -264,23 +299,30 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		e.emit(Event{
 			Type: EventScanStart, RunID: runID, At: e.opts.Now(),
 		})
-		scanStats, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths,
+		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, false); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
+		}
+		scanStats, _, err := source.Scan(ctx, e.opts.Source, e.opts.DB, e.opts.ScanPaths, nil,
 			func(msg string) { e.log(ctx, runID, db.LogInfo, msg) },
 			func(p source.ScanProgress) {
 				e.emit(Event{
 					Type: EventScanProgress, RunID: runID, At: e.opts.Now(),
 					Data: map[string]any{
 						"seen":    p.Seen,
+						"bytes":   p.Bytes,
 						"new":     p.New,
 						"changed": p.Changed,
 					},
 				})
 				// Mirror the running count to the run row so a poller that
 				// missed an SSE frame (or reconnected mid-scan) still sees
-				// accurate files_scanned via /api/status.
-				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, 0, 0)
+				// accurate files_scanned / bytes_scanned via /api/status.
+				_ = e.opts.DB.UpdateRunStats(ctx, runID, p.Seen, p.Bytes, 0, 0)
 			},
-			e.opts.ScanChunkSize,
+			e.opts.ScanChunkSize, 0,
 		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -296,28 +338,39 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 			}
 			return db.RunFailed, fmt.Errorf("scan: %w", err)
 		}
-		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, 0, 0); err != nil {
+		if err := e.opts.DB.UpdateRunStats(ctx, runID, scanStats.Seen, scanStats.Bytes, 0, 0); err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return db.RunCancelled, cerr
 			}
 			return db.RunFailed, err
 		}
+		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, true); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
+		}
 		e.emit(Event{
 			Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
 			Data: map[string]any{
-				"seen": scanStats.Seen, "new": scanStats.New,
+				"seen": scanStats.Seen, "bytes": scanStats.Bytes, "new": scanStats.New,
 				"changed": scanStats.Changed, "unchanged": scanStats.Unchanged,
 				"missing": scanStats.Missing,
 			},
 		})
 		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
-			"scan: seen=%d new=%d changed=%d missing=%d",
-			scanStats.Seen, scanStats.New, scanStats.Changed, scanStats.Missing,
+			"scan: seen=%d bytes=%d new=%d changed=%d missing=%d",
+			scanStats.Seen, scanStats.Bytes, scanStats.New, scanStats.Changed, scanStats.Missing,
 		))
 		if mode == RunModeScan {
 			e.log(ctx, runID, db.LogInfo, "scan-only mode: skipping upload")
 			return db.RunCompleted, nil
 		}
+	}
+
+	if mode == RunModeUpload {
+		terminal, _, _, _, err := e.runUploadPhase(ctx, runID, nil, -1, -1, true)
+		return terminal, err
 	}
 
 	// upload-phase helper: reclassify ctx cancellation as RunCancelled
@@ -440,7 +493,369 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 		seedDirMaxN(rel)
 	}
 
-	return e.runPipeline(ctx, runID, groups, dirMaxN)
+	run, err := e.opts.DB.GetRun(ctx, runID)
+	if err != nil {
+		return classify("load run totals", err)
+	}
+	return e.runPipeline(ctx, runID, groups, dirMaxN, run.FilesUploaded, run.BytesUploaded)
+}
+
+func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error) {
+	completedFolders := make(map[string]struct{})
+	var totalSeen int64
+	var totalBytes int64
+	var uploadedTotal, bytesUploadedTotal int64
+	var totalPlannedFiles, totalPlannedBytes int64
+	var totalPlannedGroups int64
+	var batchNum int
+
+	// Full runs reuse previously completed subtrees from the same profile DB,
+	// but explicit ScanPaths rescans must bypass that cache so operators can
+	// force a fresh walk of a subtree.
+	if len(e.opts.ScanPaths) == 0 {
+		cachedFolders, err := e.opts.DB.ListCompletedScanFolderPaths(ctx)
+		if err != nil {
+			e.log(ctx, runID, db.LogError, "batched run could not load persistent scan cache: "+err.Error())
+			return db.RunFailed, fmt.Errorf("list completed scan folders: %w", err)
+		}
+		for _, p := range cachedFolders {
+			completedFolders[p] = struct{}{}
+		}
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"seeded %d completed folders from persistent cache",
+			len(completedFolders),
+		))
+	}
+
+	for {
+		batchNum++
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"batched run batch %d start: completed_folders=%d uploaded=%d bytes=%d",
+			batchNum, len(completedFolders), uploadedTotal, bytesUploadedTotal,
+		))
+		e.emit(Event{Type: EventScanStart, RunID: runID, At: e.opts.Now()})
+		if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, false); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
+		}
+		scanStats, batch, err := source.Scan(
+			ctx,
+			e.opts.Source,
+			e.opts.DB,
+			e.opts.ScanPaths,
+			completedFolders,
+			func(msg string) { e.log(ctx, runID, db.LogInfo, msg) },
+			func(p source.ScanProgress) {
+				e.emit(Event{
+					Type: EventScanProgress, RunID: runID, At: e.opts.Now(),
+					Data: map[string]any{
+						"seen":    p.Seen,
+						"bytes":   p.Bytes,
+						"new":     p.New,
+						"changed": p.Changed,
+					},
+				})
+			},
+			e.opts.ScanChunkSize,
+			e.opts.ScanBatchBytes,
+		)
+		if err != nil {
+			e.log(ctx, runID, db.LogError, fmt.Sprintf(
+				"batched run batch %d scan failed: err=%v completed_folders=%d uploaded=%d bytes=%d",
+				batchNum, err, len(completedFolders), uploadedTotal, bytesUploadedTotal,
+			))
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return db.RunCancelled, err
+			}
+			if cerr := ctx.Err(); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("scan: %w", err)
+		}
+
+		totalSeen += scanStats.Seen
+		totalBytes += scanStats.Bytes
+		if err := e.opts.DB.UpdateRunStats(ctx, runID, totalSeen, totalBytes, uploadedTotal, bytesUploadedTotal); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, err
+		}
+		if err := e.opts.DB.UpdateRunScanState(ctx, runID, batch.Paused, !batch.Paused); err != nil {
+			if cerr := cancelErr(ctx, err); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("update scan state: %w", err)
+		}
+
+		e.emit(Event{
+			Type: EventScanComplete, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"seen":      scanStats.Seen,
+				"bytes":     scanStats.Bytes,
+				"new":       scanStats.New,
+				"changed":   scanStats.Changed,
+				"unchanged": scanStats.Unchanged,
+				"missing":   scanStats.Missing,
+				"paused":    batch.Paused,
+			},
+		})
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"scan batch: seen=%d bytes=%d new=%d changed=%d missing=%d paused=%t",
+			scanStats.Seen, scanStats.Bytes, scanStats.New, scanStats.Changed, scanStats.Missing, batch.Paused,
+		))
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"batched run batch %d scan finished: paused=%t completed_folders=%d",
+			batchNum, batch.Paused, len(completedFolders),
+		))
+
+		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, true)
+		if uploadErr != nil {
+			e.log(ctx, runID, db.LogError, fmt.Sprintf(
+				"batched run batch %d upload stopped with %s: %v",
+				batchNum, terminal, uploadErr,
+			))
+			return terminal, uploadErr
+		}
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"batched run batch %d upload finished: terminal=%s batch_files=%d batch_groups=%d batch_bytes=%d",
+			batchNum, terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes,
+		))
+		totalPlannedFiles += batchPlannedFiles
+		totalPlannedGroups += batchPlannedGroups
+		totalPlannedBytes += batchPlannedBytes
+		if err := e.opts.DB.SetRunPlan(ctx, runID, totalPlannedFiles, totalPlannedBytes); err != nil {
+			e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+		}
+		e.emit(Event{
+			Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"total_files":  totalPlannedFiles,
+				"total_groups": totalPlannedGroups,
+				"total_bytes":  totalPlannedBytes,
+			},
+		})
+		run, err := e.opts.DB.GetRun(ctx, runID)
+		if err != nil {
+			e.log(ctx, runID, db.LogError, fmt.Sprintf(
+				"batched run batch %d could not reload run totals before deciding next scan: %v",
+				batchNum, err,
+			))
+			if cerr := ctx.Err(); cerr != nil {
+				return db.RunCancelled, cerr
+			}
+			return db.RunFailed, fmt.Errorf("load run totals: %w", err)
+		}
+		uploadedTotal = run.FilesUploaded
+		bytesUploadedTotal = run.BytesUploaded
+		if terminal != db.RunCompleted {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+				"batched run batch %d ended early after upload phase: terminal=%s paused=%t completed_folders=%d",
+				batchNum, terminal, batch.Paused, len(completedFolders),
+			))
+			return terminal, nil
+		}
+
+		if len(batch.CompletedFolders) > 0 {
+			now := e.opts.Now()
+			if err := e.opts.DB.MarkRunScanFoldersComplete(ctx, runID, batch.CompletedFolders, now); err != nil {
+				return db.RunFailed, fmt.Errorf("mark scan folders complete: %w", err)
+			}
+			for _, p := range batch.CompletedFolders {
+				completedFolders[p] = struct{}{}
+			}
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+				"batched run batch %d marked %d scan folders complete (total completed=%d)",
+				batchNum, len(batch.CompletedFolders), len(completedFolders),
+			))
+		}
+
+		if !batch.Paused {
+			if err := e.opts.DB.UpdateRunScanState(ctx, runID, false, true); err != nil {
+				if cerr := cancelErr(ctx, err); cerr != nil {
+					return db.RunCancelled, cerr
+				}
+				return db.RunFailed, fmt.Errorf("finalise scan state: %w", err)
+			}
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+				"batched run batch %d finished tree scan; run complete", batchNum,
+			))
+			return db.RunCompleted, nil
+		}
+
+		// A paused full run continues with the next scan batch after uploading
+		// the current batch's pending rows. The resumable skip-set carries the
+		// completed folders forward so the next loop iteration only walks the
+		// remaining tree.
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"batched run batch %d will continue to next scan batch: paused=%t completed_folders=%d",
+			batchNum, batch.Paused, len(completedFolders),
+		))
+	}
+}
+
+// runUploadPhase performs the reconcile → list pending → group → pipeline
+// upload phase once. It is shared by upload-only runs and by the
+// scan/upload batching loop for full runs.
+func (e *Engine) runUploadPhase(ctx context.Context, runID int64, skipFolders map[string]struct{}, uploadedStart, bytesStart int64, emitPlan bool) (string, int64, int64, int64, error) {
+	classify := func(stage string, err error) (string, int64, int64, int64, error) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return db.RunCancelled, 0, 0, 0, err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return db.RunCancelled, 0, 0, 0, cerr
+		}
+		return db.RunFailed, 0, 0, 0, fmt.Errorf("%s: %w", stage, err)
+	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+		"upload phase start: skip_folders=%d uploaded_start=%d bytes_start=%d emit_plan=%t",
+		len(skipFolders), uploadedStart, bytesStart, emitPlan,
+	))
+
+	// Phase 2: list S3 once — reused for reconciliation and counter seeding.
+	// Normalize the prefix so List does not match sibling keys (e.g. a
+	// configured prefix "backups" must not capture "backups2/...").
+	s3Keys, err := e.opts.Storage.List(ctx, pathutil.NormalizeS3ListPrefix(e.opts.KeyPrefix))
+	if err != nil {
+		return classify("list s3 keys", err)
+	}
+
+	// Reconcile DB against S3: any zip uploaded in a prior (partially-failed)
+	// run has an index sidecar. Files listed there but still pending or zipped
+	// in the DB are marked uploaded so listPending excludes them.
+	if err := e.reconcileFromS3(ctx, runID, s3Keys); err != nil {
+		return classify("reconcile from S3", err)
+	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("upload phase: reconcile complete (s3_keys=%d)", len(s3Keys)))
+
+	// Phase 3: gather pending files (upload phase).
+	pending, err := e.listPending(ctx)
+	if err != nil {
+		return classify("list pending", err)
+	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("upload phase: pending before filter=%d", len(pending)))
+	if len(skipFolders) > 0 {
+		before := len(pending)
+		filtered := pending[:0]
+		for _, pf := range pending {
+			skip := false
+			for folder := range skipFolders {
+				if folder == "" {
+					continue
+				}
+				if pf.RelPath == folder || strings.HasPrefix(pf.RelPath, folder+"/") {
+					skip = true
+					break
+				}
+			}
+			if !skip {
+				filtered = append(filtered, pf)
+			}
+		}
+		pending = filtered
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+			"upload phase: pending after folder filter=%d (removed=%d skip_folders=%d)",
+			len(pending), before-len(pending), len(skipFolders),
+		))
+	}
+	if len(skipFolders) == 0 {
+		e.log(ctx, runID, db.LogInfo, fmt.Sprintf("upload phase: pending after filter=%d (skip_folders=0)", len(pending)))
+	}
+	if len(pending) == 0 {
+		if stats, statsErr := e.opts.DB.Stats(ctx); statsErr == nil {
+			e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+				"upload phase: db stats before no-op upload status=%v restore=%v download=%v total=%d size=%d",
+				stats.ByStatus, stats.ByRestoreStatus, stats.ByDownloadPresent, stats.TotalCount, stats.TotalSize,
+			))
+		} else {
+			e.log(ctx, runID, db.LogWarn, "upload phase: db stats snapshot failed: "+statsErr.Error())
+		}
+		e.log(ctx, runID, db.LogInfo, "no pending files to upload")
+		return db.RunCompleted, 0, 0, 0, nil
+	}
+
+	groups := GroupFiles(pending, e.opts.ZipThresh, e.opts.MinZipDirFiles, e.opts.ZipMaxBytes)
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("grouped %d files into %d top-level groups", len(pending), len(groups)))
+
+	// Surface the planned upload size up front so the UI can render an
+	// accurate progress denominator instead of "n-1 / n" that only fills
+	// as each upload starts. (#126)
+	var totalBytes int64
+	for _, pf := range pending {
+		totalBytes += pf.Size
+	}
+	groupCount := int64(len(groups))
+	if emitPlan {
+		e.emit(Event{
+			Type: EventUploadPlan, RunID: runID, At: e.opts.Now(),
+			Data: map[string]any{
+				"total_files":  len(pending),
+				"total_groups": groupCount,
+				"total_bytes":  totalBytes,
+			},
+		})
+		if err := e.opts.DB.SetRunPlan(ctx, runID, int64(len(pending)), totalBytes); err != nil {
+			e.log(ctx, runID, db.LogWarn, "set run plan totals: "+err.Error())
+		}
+	}
+
+	if err := os.MkdirAll(e.opts.TmpDir, 0o755); err != nil {
+		return classify("mkdir tmp", err)
+	}
+
+	keepIDs := make(map[int64]struct{}, len(pending))
+	for _, pf := range pending {
+		keepIDs[pf.ID] = struct{}{}
+	}
+	e.sweepOrphanTmps(ctx, runID, e.opts.TmpDir, keepIDs)
+
+	dirMaxN := map[string]int{}
+	seedDirMaxN := func(zipRelPath string) {
+		dir := path.Dir(zipRelPath)
+		if dir == "." {
+			dir = ""
+		}
+		if n := parseZipNumber(zipRelPath); n > dirMaxN[dir] {
+			dirMaxN[dir] = n
+		}
+	}
+
+	existingZips, err := e.opts.DB.ListZipNames(ctx)
+	if err != nil {
+		return classify("list zip names", err)
+	}
+	for _, z := range existingZips {
+		seedDirMaxN(z)
+	}
+
+	prefix := e.opts.KeyPrefix
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	for _, k := range s3Keys {
+		if !strings.HasSuffix(k, ".zip") {
+			continue
+		}
+		rel := strings.TrimPrefix(k, prefix)
+		seedDirMaxN(rel)
+	}
+
+	if uploadedStart < 0 || bytesStart < 0 {
+		run, err := e.opts.DB.GetRun(ctx, runID)
+		if err != nil {
+			return classify("load run totals", err)
+		}
+		uploadedStart = run.FilesUploaded
+		bytesStart = run.BytesUploaded
+	}
+	terminal, err := e.runPipeline(ctx, runID, groups, dirMaxN, uploadedStart, bytesStart)
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+		"upload phase done: terminal=%s pending=%d groups=%d total_bytes=%d",
+		terminal, len(pending), groupCount, totalBytes,
+	))
+	return terminal, int64(len(pending)), groupCount, totalBytes, err
 }
 
 // runPipeline drives the upload phase with a copy-worker pool feeding a
@@ -453,8 +868,9 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 //
 // The orchestrator feeds workCh, collects from resultCh, re-feeds collision
 // retries, and signals stop/cancel to both worker pools via ctx.
-func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, dirMaxN map[string]int) (string, error) {
+func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, dirMaxN map[string]int, uploadedStart, bytesStart int64) (string, error) {
 	if len(groups) == 0 {
+		e.log(ctx, runID, db.LogInfo, "upload pipeline: no groups to process")
 		return db.RunCompleted, nil
 	}
 
@@ -587,12 +1003,12 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 	}()
 
 	// --- orchestrator ---
+	uploaded, bytesUploaded := uploadedStart, bytesStart
 	var (
-		uploaded, bytesUploaded int64
-		groupErrCount           int
-		terminal                = db.RunCompleted
-		terminalErr             error
-		stopping                bool
+		groupErrCount int
+		terminal      = db.RunCompleted
+		terminalErr   error
+		stopping      bool
 	)
 
 	for res := range resultCh {
@@ -601,9 +1017,17 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 			rg := res.retryGroup
 			dir := commonDirPath(rg.group.Files)
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("zip key collision for dir %q, re-queuing (attempt %d)", dir, rg.attempts+1))
-			if !stopping {
+			if terminal == db.RunFailed || terminal == db.RunCancelled {
+				// Fail-fast mode abandons retries once the run has already
+				// been marked terminal by a real upload error or cancellation.
+				// The group is counted as consumed below so inflight can drain.
+			} else if !stopping {
 				inflight++ // re-counts the group
 				workCh <- *rg
+				e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+					"upload pipeline: re-queued zip collision retry dir=%q attempt=%d inflight=%d",
+					dir, rg.attempts+1, inflight,
+				))
 			} else {
 				// Can't re-queue during stop; count as error and log
 				// loudly so operators can see which group was abandoned
@@ -636,13 +1060,20 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 				if terminal == db.RunCompleted {
 					terminal = db.RunStopped
 					terminalErr = nil
+					e.log(ctx, runID, db.LogInfo, "upload pipeline: stop requested by worker")
 				}
 			} else if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
 				terminal = db.RunCancelled
 				terminalErr = res.err
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload pipeline: cancelled: %v", res.err))
 			} else {
-				groupErrCount++
-				e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", res.err))
+				if terminal == db.RunCompleted {
+					terminal = db.RunFailed
+					terminalErr = res.err
+					stopping = true
+					haltSubmission()
+					e.log(ctx, runID, db.LogError, fmt.Sprintf("group failed: %v", res.err))
+				}
 			}
 		}
 
@@ -658,6 +1089,9 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 			if terminal == db.RunCancelled || terminal == db.RunStopped {
 				stopping = true
 				haltSubmission()
+			} else if terminal == db.RunFailed {
+				stopping = true
+				haltSubmission()
 			} else if e.opts.StopRequested != nil && e.opts.StopRequested() {
 				stopping = true
 				terminal = db.RunStopped
@@ -668,16 +1102,22 @@ func (e *Engine) runPipeline(ctx context.Context, runID int64, groups []Group, d
 				terminal = db.RunCancelled
 				terminalErr = err
 				haltSubmission()
+				e.log(ctx, runID, db.LogWarn, fmt.Sprintf("upload pipeline: ctx cancelled while draining: %v", err))
 			}
 		}
 	}
 
 	if terminal == db.RunCompleted && groupErrCount > 0 && groupErrCount == len(groups) {
+		e.log(ctx, runID, db.LogError, fmt.Sprintf("upload pipeline: every group failed (%d/%d)", groupErrCount, len(groups)))
 		return db.RunFailed, fmt.Errorf("all %d groups failed", groupErrCount)
 	}
 	if terminal == db.RunStopped {
 		e.log(ctx, runID, db.LogInfo, "stop requested — exiting after in-flight uploads")
 	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+		"upload pipeline finished: terminal=%s uploaded=%d bytes=%d groups=%d errors=%d",
+		terminal, uploaded, bytesUploaded, len(groups), groupErrCount,
+	))
 	return terminal, terminalErr
 }
 
@@ -891,6 +1331,7 @@ func (e *Engine) stageZipGroup(ctx context.Context, runID int64, g Group, zipN i
 // refuses concurrent runs, so two runs never share a tmp. (#127)
 func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group) (stagedItem, error) {
 	item := stagedItem{group: g, isZip: false}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("staging %d individual files", len(g.Files)))
 	for _, pf := range g.Files {
 		if err := ctx.Err(); err != nil {
 			return stagedItem{}, err
@@ -945,6 +1386,18 @@ func (e *Engine) stageIndividualGroup(ctx context.Context, runID int64, g Group)
 
 // uploadStaged uploads a stagedItem to S3 and commits results to the DB.
 func (e *Engine) uploadStaged(ctx context.Context, runID int64, item stagedItem) (int64, int64, error) {
+	kind := "individual"
+	if item.isZip {
+		kind = "zip"
+	}
+	var groupBytes int64
+	for _, f := range item.group.Files {
+		groupBytes += f.Size
+	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf(
+		"upload group start: kind=%s files=%d bytes=%d",
+		kind, len(item.group.Files), groupBytes,
+	))
 	if item.isZip {
 		return e.uploadStagedZip(ctx, runID, item)
 	}
@@ -1098,12 +1551,13 @@ func (e *Engine) uploadStagedIndividuals(ctx context.Context, runID int64, item 
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return uploaded, bytes, err
 			}
-			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("skip %s after upload error: %v", ind.pf.RelPath, err))
-			continue
+			e.log(ctx, runID, db.LogError, fmt.Sprintf("individual group upload failed after %d files: %v", uploaded, err))
+			return uploaded, bytes, err
 		}
 		uploaded++
 		bytes += n
 	}
+	e.log(ctx, runID, db.LogInfo, fmt.Sprintf("individual group upload finished: files=%d bytes=%d", uploaded, bytes))
 	return uploaded, bytes, nil
 }
 
@@ -1162,6 +1616,7 @@ func (e *Engine) uploadOneIndividual(ctx context.Context, runID int64, ind stage
 		if mErr := e.opts.DB.MarkFailed(ctx, ind.pf.ID); mErr != nil {
 			return 0, fmt.Errorf("upload %s: %w (and mark failed: %v)", ind.key, err, mErr)
 		}
+		e.log(ctx, runID, db.LogError, fmt.Sprintf("upload failed for %s: %v", ind.pf.RelPath, err))
 		return 0, fmt.Errorf("upload %s: %w", ind.key, err)
 	}
 

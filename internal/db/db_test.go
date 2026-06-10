@@ -510,7 +510,7 @@ func TestRunLifecycle(t *testing.T) {
 		t.Errorf("unexpected initial run: %+v", r)
 	}
 
-	if err := d.UpdateRunStats(ctx, id, 10, 5, 1024); err != nil {
+	if err := d.UpdateRunStats(ctx, id, 10, 2048, 5, 1024); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.AppendLog(ctx, id, LogInfo, "hello", started); err != nil {
@@ -535,6 +535,9 @@ func TestRunLifecycle(t *testing.T) {
 	r, _ = d.GetRun(ctx, id)
 	if r.Status != RunFailed || r.ErrorMessage != "kaboom" || r.FinishedAt.IsZero() {
 		t.Errorf("bad finished run: %+v", r)
+	}
+	if r.BytesScanned != 2048 {
+		t.Errorf("bytes_scanned=%d want 2048", r.BytesScanned)
 	}
 
 	runs, total, err := d.ListRuns(ctx, 1, 10)

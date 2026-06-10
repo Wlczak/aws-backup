@@ -1,5 +1,6 @@
 // Typed wrappers around the aws-backup HTTP API. Kept free of UI concerns
 // so pages + components can import without pulling in Svelte.
+import { recordClientLog } from './client-logs';
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_only' | 'missing';
@@ -10,16 +11,19 @@ type EmptyPayload = Record<string, never>;
 
 export interface ScanProgressPayload {
   seen: number;
+  bytes: number;
   new: number;
   changed: number;
 }
 
 export interface ScanCompletePayload {
   seen: number;
+  bytes: number;
   new: number;
   changed: number;
   unchanged: number;
   missing: number;
+  paused?: boolean;
 }
 
 export interface UploadPlanPayload {
@@ -64,6 +68,7 @@ export interface UploadFailedPayload {
 
 export interface RunStartPayload {
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
 }
@@ -76,6 +81,7 @@ export interface RunLogPayload {
 export interface RunCompletePayload {
   status: string;
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
   error_message?: string;
@@ -332,8 +338,13 @@ export interface Run {
   finished_at?: string;
   status: RunStatus;
   files_scanned: number;
+  bytes_scanned: number;
   files_uploaded: number;
   bytes_uploaded: number;
+  files_planned?: number;
+  bytes_planned?: number;
+  scan_paused?: boolean;
+  scan_complete?: boolean;
   error_message?: string;
 }
 
@@ -399,6 +410,27 @@ export interface RunDetail {
   logs: LogEntry[];
 }
 
+export interface ClientLog {
+  id: number;
+  timestamp: string;
+  received_at: string;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  route?: string;
+  url?: string;
+  stack?: string;
+  session_id?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface ClientLogsPage {
+  logs: ClientLog[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 export interface FileStats {
   by_status: Record<string, number>;
   by_restore_status: Record<string, number>;
@@ -419,6 +451,7 @@ export interface Status {
   restore_job_current?: RestoreJobSummary;
   restore_job_last?: RestoreJobSummary;
   stop_requested?: boolean;
+  cancel_requested?: boolean;
 }
 
 export interface RestoreJobSummary {
@@ -622,6 +655,7 @@ export interface S3Config {
 }
 export interface BackupConfig {
   chunk_size: number;
+  scan_batch_bytes: number;
   tmp_dir: string;
   download_dir: string;
   schedule: string;
@@ -697,7 +731,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (e instanceof DOMException && e.name === 'AbortError') {
       throw new ApiError('abort', 'aborted');
     }
-    throw new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
+    const err = new ApiError('network', `network error: ${e instanceof Error ? e.message : String(e)}`);
+    recordClientLog('error', 'request', err.message, { path });
+    throw err;
   }
   if (!resp.ok) {
     if (resp.status === 401) {
@@ -713,13 +749,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         if (parsed?.error) msg = parsed.error;
       } catch { /* not JSON — keep statusText, surface body */ }
     } catch { /* couldn't read body */ }
-    throw new ApiError('http', `${resp.status}: ${msg}`, { status: resp.status, body });
+    const err = new ApiError('http', `${resp.status}: ${msg}`, { status: resp.status, body });
+    recordClientLog('error', 'request', err.message, {
+      path,
+      status: resp.status,
+      body,
+    });
+    throw err;
   }
   if (resp.status === 204) return undefined as T;
   try {
     return (await resp.json()) as T;
   } catch (e) {
-    throw new ApiError('parse', `invalid JSON response: ${e instanceof Error ? e.message : String(e)}`);
+    const err = new ApiError('parse', `invalid JSON response: ${e instanceof Error ? e.message : String(e)}`);
+    recordClientLog('error', 'request', err.message, { path });
+    throw err;
   }
 }
 
@@ -745,6 +789,21 @@ export const api = {
   continueRun: (id: number) => request<{ status: string }>(`/api/runs/${id}/continue`, { method: 'POST' }),
   deleteRunLogs: () =>
     request<{ affected: number }>('/api/run-logs', {
+      method: 'DELETE',
+    }),
+  invalidateScanCache: () =>
+    request<{ affected: number }>('/api/scan-cache', {
+      method: 'DELETE',
+    }),
+  clientLogs: (page = 1, limit = 100, signal?: AbortSignal) =>
+    request<ClientLogsPage>(`/api/client-logs?page=${page}&limit=${limit}`, { signal }),
+  postClientLogs: (entries: Array<Omit<ClientLog, 'id' | 'received_at'>>) =>
+    request<{ affected: number }>('/api/client-logs', {
+      method: 'POST',
+      body: JSON.stringify({ entries }),
+    }),
+  deleteClientLogs: () =>
+    request<{ affected: number }>('/api/client-logs', {
       method: 'DELETE',
     }),
 
@@ -969,19 +1028,21 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
       return { type, data: {} };
     case 'scan_progress': {
       const seen = readNumber(data.seen);
+      const bytes = readNumber(data.bytes);
       const next = readNumber(data.new);
       const changed = readNumber(data.changed);
-      if (seen === null || next === null || changed === null) return null;
-      return { type, data: { seen, new: next, changed } };
+      if (seen === null || bytes === null || next === null || changed === null) return null;
+      return { type, data: { seen, bytes, new: next, changed } };
     }
     case 'scan_complete': {
       const seen = readNumber(data.seen);
+      const bytes = readNumber(data.bytes);
       const next = readNumber(data.new);
       const changed = readNumber(data.changed);
       const unchanged = readNumber(data.unchanged);
       const missing = readNumber(data.missing);
-      if (seen === null || next === null || changed === null || unchanged === null || missing === null) return null;
-      return { type, data: { seen, new: next, changed, unchanged, missing } };
+      if (seen === null || bytes === null || next === null || changed === null || unchanged === null || missing === null) return null;
+      return { type, data: { seen, bytes, new: next, changed, unchanged, missing, paused: readOptionalBoolean(data.paused) } };
     }
     case 'upload_plan': {
       const total_files = readNumber(data.total_files);
@@ -1036,10 +1097,11 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
     }
     case 'run_start': {
       const files_scanned = readNumber(data.files_scanned);
+      const bytes_scanned = readNumber(data.bytes_scanned);
       const files_uploaded = readNumber(data.files_uploaded);
       const bytes_uploaded = readNumber(data.bytes_uploaded);
-      if (files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
-      return { type, data: { files_scanned, files_uploaded, bytes_uploaded } };
+      if (files_scanned === null || bytes_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      return { type, data: { files_scanned, bytes_scanned, files_uploaded, bytes_uploaded } };
     }
     case 'run_log': {
       const message = readString(data.message);
@@ -1049,14 +1111,16 @@ function parseSseEvent(type: string, data: unknown): SseEvent | null {
     case 'run_complete': {
       const status = readString(data.status);
       const files_scanned = readNumber(data.files_scanned);
+      const bytes_scanned = readNumber(data.bytes_scanned);
       const files_uploaded = readNumber(data.files_uploaded);
       const bytes_uploaded = readNumber(data.bytes_uploaded);
-      if (status === null || files_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
+      if (status === null || files_scanned === null || bytes_scanned === null || files_uploaded === null || bytes_uploaded === null) return null;
       return {
         type,
         data: {
           status,
           files_scanned,
+          bytes_scanned,
           files_uploaded,
           bytes_uploaded,
           error_message: readOptionalString(data.error_message),
@@ -1326,7 +1390,10 @@ export function subscribeEvents(
     } catch {
       raw = ev.data;
     }
-    const parsed = parseSseEvent(ev.type, raw);
+    const parsed = parseSseEvent(
+      ev.type,
+      isRecord(raw) && 'data' in raw ? raw.data : raw,
+    );
     if (!parsed) {
       if (import.meta.env.DEV) {
         console.warn('[subscribeEvents] invalid SSE payload — ignoring:', ev.type, raw);
