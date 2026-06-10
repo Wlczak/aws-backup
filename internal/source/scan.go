@@ -2,8 +2,11 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,10 +24,19 @@ type scanDB interface {
 // ScanStats summarises the outcome of a Scan call.
 type ScanStats struct {
 	Seen      int64 // files observed during walk
+	Bytes     int64 // total bytes observed during walk
 	New       int64 // rows inserted into DB
 	Changed   int64 // existing rows whose size/mtime differed
 	Unchanged int64 // existing rows with no size/mtime change
 	Missing   int64 // rows reclassified to missing by a full local scan
+}
+
+// ScanBatchResult reports whether the walk stopped early because the byte
+// budget was hit, plus the directory subtrees that finished in this batch.
+type ScanBatchResult struct {
+	CompletedFolders []string
+	Paused           bool
+	PausePath        string
 }
 
 // Logger is a minimal sink for scan-level messages. nil is fine.
@@ -35,6 +47,7 @@ type Logger func(msg string)
 // moment the latest batch was committed.
 type ScanProgress struct {
 	Seen    int64
+	Bytes   int64
 	New     int64
 	Changed int64
 }
@@ -56,13 +69,24 @@ const (
 )
 
 // Scan walks src, accumulates discovered files in RAM, and flushes them to the
-// DB in batches every few seconds or whenever buf reaches batchSize. This
-// avoids hammering SQLite with one transaction per file during large scans.
+// DB in batches every few seconds or whenever buf reaches batchSize. When
+// batchBytes is positive, the walker yields after it finishes the current
+// directory subtree and the batch's total file size crosses that soft limit.
 //
 // When paths is non-empty, only files whose RelPath matches or is under one
 // of the given paths are processed (partial rescan). Missing-detection is
 // skipped for partial scans because the walker only visited a subset.
-func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger, onProgress ProgressFn, batchSize int) (ScanStats, error) {
+func Scan(
+	ctx context.Context,
+	src Source,
+	d scanDB,
+	paths []string,
+	skipFolders map[string]struct{},
+	log Logger,
+	onProgress ProgressFn,
+	batchSize int,
+	batchBytes int64,
+) (ScanStats, ScanBatchResult, error) {
 	var stats ScanStats
 	scanStart := time.Now().UTC()
 	if batchSize <= 0 {
@@ -78,12 +102,17 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 	// walkSeen / atomicNew / atomicChanged are written by walker and
 	// flusher concurrently and read by emitWalkProgress under no lock.
 	// stats (the function-return aggregate) is hydrated from these at
-	// return time. The user-facing "Scanning… X seen" indicator drives
-	// off walkSeen so a slow UpsertFileBatch can't strand the count at
-	// 0 for minutes during a multi-million-file scan; the flusher's
-	// new/changed counters update on a slower cadence and feed the
-	// secondary "X new · Y changed" sub-line.
-	var walkSeen, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
+	// return time.
+	var walkSeen, walkBytes, atomicNew, atomicChanged, atomicUnchanged atomic.Int64
+	var batchBytesSeen int64
+	var walkDirs, walkFiles atomic.Int64
+	var skipResumeDirs, skipResumeFiles atomic.Int64
+	var skipPartialDirs, skipPartialFiles atomic.Int64
+	var walkNonRegular atomic.Int64
+	var walkInvalid atomic.Int64
+	var firstDir, lastDir string
+	var firstFile, lastFile string
+	topLevelFiles := map[string]int64{}
 	var (
 		lastEmitMu  sync.Mutex
 		lastEmitAt  time.Time
@@ -107,6 +136,7 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 		lastEmitMu.Unlock()
 		onProgress(ScanProgress{
 			Seen:    seen,
+			Bytes:   walkBytes.Load(),
 			New:     atomicNew.Load(),
 			Changed: atomicChanged.Load(),
 		})
@@ -148,8 +178,6 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 				atomicUnchanged.Add(1)
 			}
 		}
-		// Force an emit after the flush so new/changed counts catch up
-		// even when the walker-side throttle would otherwise gate it.
 		emitWalkProgress(true)
 		return nil
 	}
@@ -163,9 +191,6 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 	done := make(chan struct{})
 	flushErrCh := make(chan error, 1)
 	go func() {
-		// A panic inside flush (e.g. a downstream DB driver bug) would
-		// otherwise leave Scan blocked on flushErrCh forever; recover
-		// surfaces it to the walker as a normal error. (#174)
 		defer func() {
 			if r := recover(); r != nil {
 				flushErrCh <- fmt.Errorf("flush panic: %v", r)
@@ -188,21 +213,159 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 		}
 	}()
 
+	type dirFrame struct {
+		path string
+	}
+
+	var (
+		completedFolders []string
+		dirStack         []dirFrame
+		stopAfter        string
+		paused           bool
+	)
+	uniqueAppend := func(dst []string, v string) []string {
+		if v == "" {
+			return dst
+		}
+		if len(dst) == 0 || dst[len(dst)-1] != v {
+			dst = append(dst, v)
+		}
+		return dst
+	}
+	isUnder := func(rel, prefix string) bool {
+		if prefix == "" {
+			return true
+		}
+		if rel == prefix {
+			return true
+		}
+		if len(rel) > len(prefix) && strings.HasPrefix(rel, prefix) && rel[len(prefix)] == '/' {
+			return true
+		}
+		return false
+	}
+	matchesPartial := func(rel string, targets []string) bool {
+		for _, t := range targets {
+			if t == "" || t == "/" {
+				return true
+			}
+			if rel == t {
+				return true
+			}
+			if len(rel) > len(t) && strings.HasPrefix(rel, t) && rel[len(t)] == '/' {
+				return true
+			}
+			if len(t) > len(rel) && strings.HasPrefix(t, rel) && t[len(rel)] == '/' {
+				return true
+			}
+		}
+		return false
+	}
+	currentDir := func() string {
+		if len(dirStack) == 0 {
+			return ""
+		}
+		return dirStack[len(dirStack)-1].path
+	}
+	topLevel := func(rel string) string {
+		if rel == "" {
+			return ""
+		}
+		head, _, ok := strings.Cut(rel, "/")
+		if ok {
+			return head
+		}
+		return rel
+	}
+	popFinished := func(next string) {
+		for len(dirStack) > 0 {
+			top := dirStack[len(dirStack)-1].path
+			if next != "" && isUnder(next, top) {
+				break
+			}
+			dirStack = dirStack[:len(dirStack)-1]
+			completedFolders = uniqueAppend(completedFolders, top)
+		}
+	}
+
+	const stopWalkErrText = "source: scan batch paused"
+	stopWalkErr := errors.New(stopWalkErrText)
+
 	walkErr := src.Walk(scanCtx, func(e Entry) error {
 		if err := scanCtx.Err(); err != nil {
 			return err
 		}
-		if len(paths) > 0 && !matchesAnyPath(e.RelPath, paths) {
+		if !isValidRelPath(e.RelPath) {
+			walkInvalid.Add(1)
+			if log != nil {
+				log("scan skip invalid path: " + e.RelPath)
+			}
 			return nil
 		}
+		if !e.IsDir && len(paths) > 0 && !matchesPartial(e.RelPath, paths) {
+			skipPartialFiles.Add(1)
+			return nil
+		}
+		if e.IsDir && len(paths) > 0 && !matchesPartial(e.RelPath, paths) {
+			skipPartialDirs.Add(1)
+			return ErrSkipDir
+		}
+
+		popFinished(e.RelPath)
+		if paused && stopAfter != "" && !isUnder(e.RelPath, stopAfter) {
+			return stopWalkErr
+		}
+
+		if e.IsDir {
+			if _, ok := skipFolders[e.RelPath]; ok {
+				skipResumeDirs.Add(1)
+				if log != nil {
+					log("scan skip resume dir: " + e.RelPath)
+				}
+				return ErrSkipDir
+			}
+			walkDirs.Add(1)
+			if firstDir == "" {
+				firstDir = e.RelPath
+			}
+			lastDir = e.RelPath
+			dirStack = append(dirStack, dirFrame{path: e.RelPath})
+			return nil
+		}
+		if _, ok := skipFolders[e.RelPath]; ok {
+			skipResumeFiles.Add(1)
+			if log != nil {
+				log("scan skip resume file: " + e.RelPath)
+			}
+			return nil
+		}
+		walkFiles.Add(1)
+		if firstFile == "" {
+			firstFile = e.RelPath
+		}
+		lastFile = e.RelPath
+		topLevelFiles[topLevel(e.RelPath)]++
+
 		mu.Lock()
 		buf = append(buf, db.BatchEntry{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime})
 		bufLen := len(buf)
 		mu.Unlock()
 		walkSeen.Add(1)
-		// Throttled emit so a fast walker over a million-file tree
-		// doesn't fan out a million events to the SSE bus.
+		walkBytes.Add(e.Size)
+		batchBytesSeen += e.Size
 		emitWalkProgress(false)
+		if batchBytes > 0 && !paused {
+			if batchBytesSeen >= batchBytes {
+				paused = true
+				stopAfter = currentDir()
+				if stopAfter == "" {
+					stopAfter = e.RelPath
+				}
+				if log != nil {
+					log("scan batch pause requested at " + stopAfter + " (bytes=" + strconv.FormatInt(batchBytesSeen, 10) + ")")
+				}
+			}
+		}
 		if bufLen >= batchSize {
 			if err := flush(); err != nil {
 				cancelScan(err)
@@ -214,57 +377,84 @@ func Scan(ctx context.Context, src Source, d scanDB, paths []string, log Logger,
 
 	close(done)
 	flushErr := <-flushErrCh
+
+	// Close out any directories that were fully traversed before the walk
+	// ended. When the pause sentinel fires, the walk stopped mid-tree, so
+	// any still-open ancestors above stopAfter are incomplete and must not
+	// be promoted into the completed skip-set. The stopAfter subtree itself
+	// is still safe to record, because the walk only stops once it leaves it.
+	if paused && errors.Is(walkErr, stopWalkErr) {
+		if stopAfter != "" {
+			completedFolders = uniqueAppend(completedFolders, stopAfter)
+		}
+	} else {
+		popFinished("")
+		if paused && stopAfter != "" {
+			completedFolders = uniqueAppend(completedFolders, stopAfter)
+		}
+	}
+
 	// Hydrate the return aggregate from the atomic counters now that
 	// both walker and flusher are done writing them.
 	stats.New = atomicNew.Load()
 	stats.Changed = atomicChanged.Load()
 	stats.Unchanged = atomicUnchanged.Load()
 	stats.Seen = stats.New + stats.Changed + stats.Unchanged
-	// Prefer flushErr over walkErr: when the flusher cancels the walker,
-	// the walker returns scanCtx.Err() (context.Canceled) which masks the
-	// real cause (disk full, busy DB, schema mismatch, …). Surfacing the
-	// underlying flush error gives operators an accurate diagnosis. (#106)
+	stats.Bytes = walkBytes.Load()
+
 	if flushErr != nil {
-		return stats, flushErr
+		return stats, ScanBatchResult{}, flushErr
 	}
-	if walkErr != nil {
-		// Walker may have aborted because flusher cancelled scanCtx; if
-		// so, recover the original cause attached by WithCancelCause.
+	if walkErr != nil && !errors.Is(walkErr, stopWalkErr) {
 		if cause := context.Cause(scanCtx); cause != nil && cause != ctx.Err() && cause != context.Canceled {
-			return stats, cause
+			return stats, ScanBatchResult{}, cause
 		}
-		return stats, walkErr
+		return stats, ScanBatchResult{}, walkErr
 	}
 
-	// Only classify disappearances on a full scan; partial scans only walked a
-	// subset so any unvisited files should not be reclassified.
-	if len(paths) == 0 {
+	// Only classify disappearances on a full scan with no skipped folders;
+	// batch-resume scans intentionally skip already-completed subtrees, so
+	// treating those unseen rows as missing would fight the resumable skip-set.
+	if len(paths) == 0 && !paused && len(skipFolders) == 0 {
 		missing, err := d.MarkMissing(ctx, scanStart)
 		if err != nil {
-			return stats, err
+			return stats, ScanBatchResult{}, err
 		}
 		stats.Missing = missing
 		if missing > 0 && log != nil {
 			log("marked missing: " + strconv.FormatInt(missing, 10))
 		}
 	}
-	return stats, nil
-}
 
-// matchesAnyPath reports whether relPath equals or is under any of the
-// target paths (path-component boundary aware).
-func matchesAnyPath(relPath string, targets []string) bool {
-	for _, t := range targets {
-		if t == "" || t == "/" {
-			return true
+	if log != nil {
+		var topSummary []string
+		for k, v := range topLevelFiles {
+			if k == "" {
+				k = "."
+			}
+			topSummary = append(topSummary, k+"="+strconv.FormatInt(v, 10))
 		}
-		if relPath == t {
-			return true
-		}
-		// check prefix at component boundary: target "foo/bar" matches "foo/bar/baz"
-		if len(relPath) > len(t) && relPath[len(t)] == '/' && relPath[:len(t)] == t {
-			return true
-		}
+		sort.Strings(topSummary)
+		log("scan batch done: paused=" + strconv.FormatBool(paused && errors.Is(walkErr, stopWalkErr)) +
+			" completed=" + strconv.Itoa(len(completedFolders)) +
+			" pause_path=" + stopAfter +
+			" first_dir=" + firstDir +
+			" last_dir=" + lastDir +
+			" first_file=" + firstFile +
+			" last_file=" + lastFile +
+			" visited_dirs=" + strconv.FormatInt(walkDirs.Load(), 10) +
+			" visited_files=" + strconv.FormatInt(walkFiles.Load(), 10) +
+			" resume_skipped_dirs=" + strconv.FormatInt(skipResumeDirs.Load(), 10) +
+			" resume_skipped_files=" + strconv.FormatInt(skipResumeFiles.Load(), 10) +
+			" partial_skipped_dirs=" + strconv.FormatInt(skipPartialDirs.Load(), 10) +
+			" partial_skipped_files=" + strconv.FormatInt(skipPartialFiles.Load(), 10) +
+			" non_regular=" + strconv.FormatInt(walkNonRegular.Load(), 10) +
+			" invalid_paths=" + strconv.FormatInt(walkInvalid.Load(), 10) +
+			" top_level_files=[" + strings.Join(topSummary, ",") + "]")
 	}
-	return false
+	return stats, ScanBatchResult{
+		CompletedFolders: completedFolders,
+		Paused:           paused && errors.Is(walkErr, stopWalkErr),
+		PausePath:        stopAfter,
+	}, nil
 }

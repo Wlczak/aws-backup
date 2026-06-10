@@ -120,16 +120,17 @@ func newTestServer(t *testing.T) (*testServer, Deps) {
 		Storage:    func() storage.Storage { return store },
 		BuildEngine: func(mode engine.RunMode, scanPaths []string) (*engine.Engine, error) {
 			return engine.New(engine.Options{
-				DB:            d,
-				Source:        src,
-				Storage:       store,
-				TmpDir:        filepath.Join(dir, "tmp"),
-				KeyPrefix:     "backups",
-				ScanChunkSize: 2,
-				ZipThresh:     100,
-				Mode:          mode,
-				ScanPaths:     scanPaths,
-				Emit:          bus.Publish,
+				DB:             d,
+				Source:         src,
+				Storage:        store,
+				TmpDir:         filepath.Join(dir, "tmp"),
+				KeyPrefix:      "backups",
+				ScanChunkSize:  2,
+				ScanBatchBytes: 4 << 30,
+				ZipThresh:      100,
+				Mode:           mode,
+				ScanPaths:      scanPaths,
+				Emit:           bus.Publish,
 			}), nil
 		},
 	}
@@ -179,6 +180,37 @@ func TestStatusEmpty(t *testing.T) {
 	}
 	if got.Last != nil {
 		t.Errorf("last=%+v want nil", got.Last)
+	}
+}
+
+func TestStatusCurrentRunIncludesPlanAndCancelFlags(t *testing.T) {
+	_, deps := newTestServer(t)
+	ctx := context.Background()
+	runID, err := deps.DB.CreateRun(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.SetRunPlan(ctx, runID, 42, 1234); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(deps)
+	ts := newInProcServer(srv.Router())
+	t.Cleanup(ts.Close)
+	srv.runMu.Lock()
+	srv.currentRun = runID
+	srv.currentRunCancelReq.Store(true)
+	srv.runMu.Unlock()
+
+	var got statusResponse
+	getJSON(t, ts, "/api/status", &got)
+	if got.Current == nil {
+		t.Fatal("current run missing")
+	}
+	if got.Current.FilesPlanned != 42 || got.Current.BytesPlanned != 1234 {
+		t.Fatalf("plan=%+v want files=42 bytes=1234", got.Current)
+	}
+	if !got.CancelRequested {
+		t.Fatal("cancel_requested=false want true")
 	}
 }
 
@@ -1612,6 +1644,39 @@ func TestDeleteRunLogs(t *testing.T) {
 	}
 	if _, total, err := deps.DB.ListLogs(ctx, r2, 1, 10); err != nil || total != 0 {
 		t.Fatalf("run2 logs=%d err=%v", total, err)
+	}
+}
+
+func TestDeleteScanCache(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	runID, _ := deps.DB.CreateRun(ctx, now)
+	_ = deps.DB.MarkRunScanFoldersComplete(ctx, runID, []string{"photos", "docs/sub"}, now)
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/scan-cache", nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	var res affectedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if res.Affected != 2 {
+		t.Fatalf("affected=%d want 2", res.Affected)
+	}
+	cached, err := deps.DB.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths: %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cached=%v want empty", cached)
 	}
 }
 

@@ -528,9 +528,7 @@ func (f *fakeInventoryAPI) GetObject(_ context.Context, in *s3.GetObjectInput, _
 	key := aws.ToString(in.Key)
 	if key == f.manifestKey {
 		f.startOnce.Do(func() { close(f.started) })
-		select {
-		case <-f.release:
-		}
+		<-f.release
 		return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(f.manifestBody))}, nil
 	}
 	if key == strings.TrimSuffix(f.manifestKey, "manifest.json")+"manifest.checksum" {

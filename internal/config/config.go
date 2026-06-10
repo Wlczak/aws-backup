@@ -157,6 +157,7 @@ type S3Config struct {
 
 type BackupConfig struct {
 	ChunkSize      int    `json:"chunk_size"`
+	ScanBatchBytes int64  `json:"scan_batch_bytes"`
 	TmpDir         string `json:"tmp_dir"`
 	DownloadDir    string `json:"download_dir"`
 	Schedule       string `json:"schedule"`
@@ -224,6 +225,7 @@ func Default() Config {
 		},
 		Backup: BackupConfig{
 			ChunkSize:        10,
+			ScanBatchBytes:   4 << 30,
 			TmpDir:           filepath.Join(os.TempDir(), "aws-backup"),
 			DownloadDir:      filepath.Join(os.TempDir(), "aws-backup-download"),
 			Schedule:         "",
@@ -336,6 +338,7 @@ func applyBackfills(data []byte, cfg *Config) {
 			LogRetentionDays *int    `json:"log_retention_days"`
 			LogMaxPerRun     *int    `json:"log_max_per_run"`
 			DownloadDir      *string `json:"download_dir"`
+			ScanBatchBytes   *int64  `json:"scan_batch_bytes"`
 		} `json:"backup"`
 	}
 	_ = json.Unmarshal(data, &probe)
@@ -356,6 +359,9 @@ func applyBackfills(data []byte, cfg *Config) {
 	}
 	if probe.Backup.DownloadDir == nil {
 		cfg.Backup.DownloadDir = filepath.Join(os.TempDir(), "aws-backup-download")
+	}
+	if probe.Backup.ScanBatchBytes == nil {
+		cfg.Backup.ScanBatchBytes = 4 << 30
 	}
 }
 
@@ -544,6 +550,9 @@ func (c Config) Validate() error {
 
 	if c.Backup.ChunkSize <= 0 {
 		errs = append(errs, fmt.Errorf("backup.chunk_size must be > 0 (got %d)", c.Backup.ChunkSize))
+	}
+	if c.Backup.ScanBatchBytes <= 0 {
+		errs = append(errs, fmt.Errorf("backup.scan_batch_bytes must be > 0 (got %d)", c.Backup.ScanBatchBytes))
 	}
 	if c.Backup.ZipThreshold < 0 {
 		errs = append(errs, fmt.Errorf("backup.zip_threshold must be >= 0 (got %d)", c.Backup.ZipThreshold))

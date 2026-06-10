@@ -6,6 +6,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
@@ -15,6 +16,9 @@ type Entry struct {
 	// RelPath is the path relative to the source root, using forward
 	// slashes regardless of OS. Never empty; never starts with "/".
 	RelPath string
+	// IsDir reports whether the walker is currently visiting a directory
+	// entry. Directory entries can be skipped by returning ErrSkipDir.
+	IsDir   bool
 	Size    int64
 	ModTime time.Time
 }
@@ -22,6 +26,9 @@ type Entry struct {
 // WalkFunc is called for each file entry. Returning an error aborts the
 // walk with that error. ctx cancellation is checked between entries.
 type WalkFunc func(Entry) error
+
+// ErrSkipDir tells a directory-aware walker to skip the current subtree.
+var ErrSkipDir = errors.New("source: skip dir")
 
 // isValidRelPath rejects paths containing characters that break SQLite's
 // UNIQUE index (NUL truncates on bind in some drivers, silently colliding

@@ -58,6 +58,7 @@ CREATE TABLE runs (
     finished_at     DATETIME,
     status          TEXT NOT NULL DEFAULT 'running',         -- running | completed | failed | cancelled | stopped
     files_scanned   INTEGER DEFAULT 0,
+    bytes_scanned   INTEGER DEFAULT 0,
     files_uploaded  INTEGER DEFAULT 0,
     bytes_uploaded  INTEGER DEFAULT 0,
     files_planned   INTEGER DEFAULT 0,         -- planned upload count, written once at upload_plan time
@@ -72,6 +73,22 @@ CREATE TABLE run_logs (
     level      TEXT     NOT NULL,                            -- info | warn | error
     message    TEXT     NOT NULL
 );
+
+CREATE TABLE client_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at   DATETIME NOT NULL,                         -- browser-side timestamp when available
+    received_at   DATETIME NOT NULL,                         -- server ingest time
+    level         TEXT     NOT NULL,                         -- debug | info | warn | error
+    source        TEXT     NOT NULL,                         -- window.error | unhandledrejection | request | console | toast
+    message       TEXT     NOT NULL,
+    route         TEXT     NOT NULL DEFAULT '',
+    url           TEXT     NOT NULL DEFAULT '',
+    stack         TEXT     NOT NULL DEFAULT '',
+    session_id    TEXT     NOT NULL DEFAULT '',
+    context_json  TEXT     NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_client_logs_received_at      ON client_logs(received_at);
+CREATE INDEX idx_client_logs_level            ON client_logs(level);
 
 CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
@@ -109,6 +126,8 @@ Either knob set to `0` disables that pass.
 
 The Logs page also exposes a manual clear-all action that truncates `run_logs` directly (`db.DeleteRunLogs` / `DELETE /api/run-logs`). It removes log rows only; the `runs` history remains.
 
+`client_logs` stores browser-originated logs separately from `run_logs` so frontend failures can be inspected without blending them into engine history. The table is append-only during normal operation and is cleared manually from the Logs page (`db.DeleteClientLogs` / `DELETE /api/client-logs`). Default capture keeps `warn` and `error` entries; `info`/`debug` are only persisted when the frontend debug toggle is enabled.
+
 ## File status transitions
 
 State terms used throughout the codebase:
@@ -136,6 +155,9 @@ The authoritative S3 sync keeps every S3-present row in an explicit bucket-backe
 Zip-backed rows keep their human-readable `zip_name`, but the actual link to the archive lives in `files.zip_id` and the archive metadata lives in `zips`. `files.md5` is always the per-file checksum; `zips.md5` is the archive checksum.
 
 `download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above. The last completed scan for each mirror directory is cached separately in `download_mirror_snapshots(download_dir, scanned_at, total_count, present_count, missing_count)` so reruns can reuse the snapshot until an operator triggers a rescan.
+
+`run_scan_folders` stores scan-batch completion markers per run and doubles as a persistent per-profile cache for later full runs. The engine keeps those rows after finalize, seeds the next `RunModeFull` batched run from all completed paths in the active profile DB, and bypasses the cache for scan-only runs and explicit `ScanPaths` rescans so operators can force a fresh walk of a subtree.
+The dashboard can invalidate that cache via `DELETE /api/scan-cache`, which clears the completed-folder rows for the active profile so the next full run walks the tree from scratch.
 
 ## Zip naming + sidecar
 

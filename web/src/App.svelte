@@ -2,6 +2,7 @@
   import { route, go } from './lib/router';
   import { api, setUnauthorizedHandler, type AuthStatus } from './lib/api';
   import { toast } from './lib/toast';
+  import { clientLogDebug, installClientLogging, setClientLogDebug } from './lib/client-logs';
   import Dashboard from './routes/Dashboard.svelte';
   import Download from './routes/Download.svelte';
   import Files from './routes/Files.svelte';
@@ -82,6 +83,9 @@
   }
 
   onMount(() => {
+    const teardownLogging = installClientLogging({
+      onError: (message) => toast.error(message),
+    });
     setUnauthorizedHandler(() => {
       if (authPhase === 'authenticated') {
         authPhase = 'logged-out';
@@ -89,7 +93,10 @@
       }
     });
     void refreshAuth();
-    return () => setUnauthorizedHandler(null);
+    return () => {
+      teardownLogging();
+      setUnauthorizedHandler(null);
+    };
   });
 </script>
 
@@ -106,6 +113,14 @@
           >{t.label}</button>
         {/each}
       </nav>
+      <label class="debug-toggle" title="Capture info/debug console entries and keep them on the Logs page">
+        <input
+          checked={$clientLogDebug}
+          onchange={(e) => setClientLogDebug((e.currentTarget as HTMLInputElement).checked)}
+          type="checkbox"
+        />
+        <span>Debug logs</span>
+      </label>
       <ProfileSwitcher />
       <button class="logout" onclick={logout} disabled={authBusy} type="button">
         {authBusy ? 'Signing out…' : 'Sign out'}
@@ -202,6 +217,20 @@
     margin-left: auto;
     background: transparent;
     border: 1px solid var(--border);
+  }
+  .debug-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.9rem;
+    user-select: none;
+  }
+  .debug-toggle input {
+    margin: 0;
   }
   .auth-shell {
     min-height: calc(100vh - 6rem);
