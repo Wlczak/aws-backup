@@ -373,6 +373,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/runs/{id}/stop", s.handleStopRun)
 			r.Post("/runs/{id}/continue", s.handleContinueRun)
 			r.Delete("/run-logs", s.handleDeleteRunLogs)
+			r.Delete("/scan-cache", s.handleDeleteScanCache)
 			r.Get("/client-logs", s.handleListClientLogs)
 			r.Delete("/client-logs", s.handleDeleteClientLogs)
 

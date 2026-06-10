@@ -19,6 +19,7 @@ POST   /api/runs/{id}/cancel          force-cancel (mid-upload)
 POST   /api/runs/{id}/stop            graceful stop between files (#124)
 POST   /api/runs/{id}/continue        clear pending stop request
 DELETE /api/run-logs                 truncate the run_logs table; runs stay intact
+DELETE /api/scan-cache               clear the persistent completed-folder cache for the active profile
 POST   /api/client-logs               public browser-log ingest; body {entries:[...]} from the same-origin SPA
 GET    /api/client-logs               paginated browser-log list (auth required)
 DELETE /api/client-logs               truncate browser logs (auth required)

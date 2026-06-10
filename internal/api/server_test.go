@@ -1647,6 +1647,39 @@ func TestDeleteRunLogs(t *testing.T) {
 	}
 }
 
+func TestDeleteScanCache(t *testing.T) {
+	ts, deps := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	runID, _ := deps.DB.CreateRun(ctx, now)
+	_ = deps.DB.MarkRunScanFoldersComplete(ctx, runID, []string{"photos", "docs/sub"}, now)
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/scan-cache", nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, d)
+	}
+	var res affectedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if res.Affected != 2 {
+		t.Fatalf("affected=%d want 2", res.Affected)
+	}
+	cached, err := deps.DB.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths: %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cached=%v want empty", cached)
+	}
+}
+
 func TestRestoreTriggerWithoutStorage(t *testing.T) {
 	ts, deps := newTestServer(t)
 	deps.Storage = nil

@@ -190,6 +190,15 @@ func (db *DB) ListCompletedScanFolderPaths(ctx context.Context) ([]string, error
 	return out, nil
 }
 
+// ClearCompletedScanFolderPaths removes the persistent completed-folder cache
+// across the active profile DB. The engine repopulates it on future full runs.
+func (db *DB) ClearCompletedScanFolderPaths(ctx context.Context) (int64, error) {
+	res := db.g.WithContext(ctx).
+		Where("completed_at IS NOT NULL").
+		Delete(&RunScanFolder{})
+	return res.RowsAffected, res.Error
+}
+
 // FinishRun stamps finished_at and sets terminal status + optional error.
 func (db *DB) FinishRun(ctx context.Context, runID int64, status, errorMsg string, finishedAt time.Time) error {
 	return db.g.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]any{

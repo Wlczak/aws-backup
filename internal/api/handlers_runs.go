@@ -129,6 +129,28 @@ func (s *Server) handleDeleteRunLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
 }
 
+// handleDeleteScanCache clears the persistent scan-folder cache for the
+// active profile. It refuses to run while a backup is active so the engine
+// doesn't lose the skip-set mid-run.
+func (s *Server) handleDeleteScanCache(w http.ResponseWriter, r *http.Request) {
+	s.runMu.Lock()
+	currentRun := s.currentRun
+	s.runMu.Unlock()
+	if currentRun != 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":          "a backup run is already in progress",
+			"current_run_id": currentRun,
+		})
+		return
+	}
+	n, err := s.deps.DB.ClearCompletedScanFolderPaths(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedResponse{Affected: n})
+}
+
 type triggerRunRequest struct {
 	// Mode controls which phases run: "full" (default), "scan", or "upload".
 	Mode string `json:"mode"`

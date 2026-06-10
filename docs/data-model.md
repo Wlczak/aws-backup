@@ -157,6 +157,7 @@ Zip-backed rows keep their human-readable `zip_name`, but the actual link to the
 `download_present` / `download_checked_at` are mirror-metadata columns used by the full-download mirror job. They record whether the configured download directory currently contains the file and when the folder was last scanned. They do not affect the bucket-backed state machine above. The last completed scan for each mirror directory is cached separately in `download_mirror_snapshots(download_dir, scanned_at, total_count, present_count, missing_count)` so reruns can reuse the snapshot until an operator triggers a rescan.
 
 `run_scan_folders` stores scan-batch completion markers per run and doubles as a persistent per-profile cache for later full runs. The engine keeps those rows after finalize, seeds the next `RunModeFull` batched run from all completed paths in the active profile DB, and bypasses the cache for scan-only runs and explicit `ScanPaths` rescans so operators can force a fresh walk of a subtree.
+The dashboard can invalidate that cache via `DELETE /api/scan-cache`, which clears the completed-folder rows for the active profile so the next full run walks the tree from scratch.
 
 ## Zip naming + sidecar
 

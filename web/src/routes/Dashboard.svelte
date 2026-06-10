@@ -30,6 +30,7 @@
   let rescanningMirror = $state(false);
   let cancellingMirror = $state(false);
   let cancellingRun = $state(false);
+  let invalidatingScanCache = $state(false);
   let pendingRun = $state<Run | null>(null);
   let observedRunId = $state<number | null>(null);
 
@@ -252,6 +253,20 @@
     } catch (e) {
       cancellingMirror = false;
       toast.error(String(e));
+    }
+  }
+
+  async function invalidateScanCache() {
+    if (invalidatingScanCache || activeRun) return;
+    invalidatingScanCache = true;
+    try {
+      const res = await api.invalidateScanCache();
+      toast.success(`Cleared ${res.affected.toLocaleString()} cached folder(s).`);
+      await refresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      invalidatingScanCache = false;
     }
   }
 
@@ -702,6 +717,14 @@
         >
           {(cancellingRun || status?.cancel_requested) ? 'Cancelling…' : 'Force cancel'}
         </button>
+        <button
+          onclick={invalidateScanCache}
+          type="button"
+          disabled={invalidatingScanCache || !!activeRun}
+          title="Clear the persistent completed-folder cache so the next full run walks the tree from scratch"
+        >
+          {invalidatingScanCache ? 'Clearing…' : 'Invalidate scan cache'}
+        </button>
       </div>
     {:else}
       <div class="big muted">Idle</div>
@@ -714,6 +737,14 @@
         </button>
         <button onclick={() => triggerRun('upload')} type="button" disabled={triggering} title="Upload all pending files without scanning">
           Upload only
+        </button>
+        <button
+          onclick={invalidateScanCache}
+          type="button"
+          disabled={invalidatingScanCache}
+          title="Clear the persistent completed-folder cache so the next full run walks the tree from scratch"
+        >
+          {invalidatingScanCache ? 'Clearing…' : 'Invalidate scan cache'}
         </button>
       </div>
     {/if}

@@ -82,4 +82,19 @@ func TestRunScanFolderLifecycle(t *testing.T) {
 	if len(cached) != 3 || cached[0] != "docs/sub" || cached[1] != "keep" || cached[2] != "photos" {
 		t.Fatalf("cached paths=%v", cached)
 	}
+
+	deleted, err := d.ClearCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ClearCompletedScanFolderPaths: %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("deleted=%d want 3", deleted)
+	}
+	cached, err = d.ListCompletedScanFolderPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListCompletedScanFolderPaths after clear: %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cached after clear=%v", cached)
+	}
 }

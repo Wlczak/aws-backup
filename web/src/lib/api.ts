@@ -791,6 +791,10 @@ export const api = {
     request<{ affected: number }>('/api/run-logs', {
       method: 'DELETE',
     }),
+  invalidateScanCache: () =>
+    request<{ affected: number }>('/api/scan-cache', {
+      method: 'DELETE',
+    }),
   clientLogs: (page = 1, limit = 100, signal?: AbortSignal) =>
     request<ClientLogsPage>(`/api/client-logs?page=${page}&limit=${limit}`, { signal }),
   postClientLogs: (entries: Array<Omit<ClientLog, 'id' | 'received_at'>>) =>
