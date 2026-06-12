@@ -25,7 +25,7 @@
   let estimating = $state(false);
   let verifyChecksum = $state(true);
   let lastVerifyChecksum = $state(true);
-  type DownloadTone = 'idle' | 'running' | 'ok' | 'warn' | 'err';
+  type DownloadTone = 'idle' | 'running' | 'ok' | 'warn' | 'err' | 'cancelled';
   type DownloadStatus = {
     tone: DownloadTone;
     label: string;
@@ -51,6 +51,11 @@
     label: 'Complete with warnings',
     detail,
   });
+  const cancelledStatus = (detail: string): DownloadStatus => ({
+    tone: 'cancelled',
+    label: 'Cancelled',
+    detail,
+  });
   const errStatus = (detail: string): DownloadStatus => ({
     tone: 'err',
     label: 'Failed',
@@ -65,7 +70,7 @@
     files_written: number;
     bytes_written: number;
     phase: 'download';
-    status: 'active' | 'done' | 'failed';
+    status: 'active' | 'done' | 'failed' | 'cancelled';
     path?: string;
     error?: string;
     errors: number;
@@ -73,7 +78,7 @@
     current_bytes?: number;
     current_total_bytes?: number;
     current_percent?: number;
-    file_status?: 'active' | 'done' | 'failed';
+    file_status?: 'active' | 'done' | 'failed' | 'cancelled';
   };
   let downloadProgress = $state<DownloadProgress | null>(null);
   type DownloadItem = {
@@ -81,7 +86,7 @@
     bytes: number;
     total: number;
     percent: number;
-    status: 'active' | 'done' | 'failed';
+    status: 'active' | 'done' | 'failed' | 'cancelled';
     error?: string;
   };
   let downloadItems = $state<Record<string, DownloadItem>>({});
@@ -113,7 +118,11 @@
         bytes: next.current_bytes ?? 0,
         total: next.current_total_bytes ?? 0,
         percent: next.current_percent ?? 0,
-        status: next.file_status ?? (next.status === 'failed' ? 'failed' : next.status === 'done' ? 'done' : 'active'),
+        status: next.file_status ?? (next.status === 'failed' || next.status === 'cancelled'
+          ? next.status
+          : next.status === 'done'
+            ? 'done'
+            : 'active'),
         error: next.error,
       };
       currentFile = item;
@@ -125,9 +134,7 @@
     } else if (currentFile && next.status !== 'active') {
       currentFile = {
         ...currentFile,
-        status: next.status === 'failed'
-          ? 'failed'
-          : 'done',
+        status: terminalItemStatus(next.status),
         error: next.error,
       };
       upsertDownloadItem(currentFile.path, currentFile);
@@ -157,8 +164,8 @@
     parts.push(`${next.processed.toLocaleString()} checked`);
     if (next.errors > 0) parts.push(`${next.errors.toLocaleString()} error(s)`);
     if (next.error) parts.push(next.error);
-    downloadStatus = next.status === 'failed'
-      ? errStatus(parts.join(' · '))
+    downloadStatus = next.status === 'failed' || next.status === 'cancelled'
+      ? terminalDownloadStatus(next.status, parts.join(' · '))
       : next.errors > 0
         ? warnStatus(parts.join(' · '))
         : okStatus(parts.join(' · '));
@@ -176,7 +183,9 @@
         ? 'active'
         : summary.status === 'failed'
           ? 'failed'
-          : 'done',
+          : summary.status === 'cancelled'
+            ? 'cancelled'
+            : 'done',
       current_path: summary.current_path,
       current_bytes: summary.current_bytes,
       current_total_bytes: summary.current_total_bytes,
@@ -205,6 +214,18 @@
   let downloadItemList = $derived(
     downloadItemOrder.map((path) => downloadItems[path]).filter((item): item is DownloadItem => !!item),
   );
+
+  function terminalDownloadStatus(status: DownloadProgress['status'], detail: string): DownloadStatus {
+    if (status === 'failed') return errStatus(detail);
+    if (status === 'cancelled') return cancelledStatus(detail);
+    return warnStatus(detail);
+  }
+
+  function terminalItemStatus(status: DownloadProgress['status']): DownloadItem['status'] {
+    if (status === 'failed') return 'failed';
+    if (status === 'cancelled') return 'cancelled';
+    return 'done';
+  }
 
   function resultFromProgress(next: DownloadProgress): DownloadResult {
     return {
@@ -455,11 +476,13 @@
               ? 'active'
               : nextSummary.status === 'failed'
                 ? 'failed'
-                : 'done',
+                : nextSummary.status === 'cancelled'
+                  ? 'cancelled'
+                  : 'done',
             error: nextSummary.error_message,
           });
         }
-        if (nextSummary.status === 'completed' || nextSummary.status === 'failed') {
+        if (nextSummary.status === 'completed' || nextSummary.status === 'failed' || nextSummary.status === 'cancelled') {
           downloadResult = resultFromProgress(progressFromSummary(nextSummary));
         }
       } else if (!downloadBusy) {
@@ -745,6 +768,7 @@
   .status-pill.ok { color: var(--ok, #1f7a3f); }
   .status-pill.warn { color: var(--warn); }
   .status-pill.err { color: var(--err); }
+  .status-pill.cancelled { color: var(--warn); }
   .status-detail {
     min-width: 0;
     color: var(--muted);
@@ -828,6 +852,7 @@
   .activity-pill.active { color: var(--accent); }
   .activity-pill.done { color: var(--ok, #1f7a3f); }
   .activity-pill.failed { color: var(--err); }
+  .activity-pill.cancelled { color: var(--warn); }
   .activity-meta {
     margin-top: 0.35rem;
     color: var(--muted);

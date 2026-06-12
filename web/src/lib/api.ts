@@ -210,7 +210,7 @@ export interface RestoreDownloadProgressPayload {
   current_bytes?: number;
   current_total_bytes?: number;
   current_percent?: number;
-  file_status?: 'active' | 'done' | 'failed';
+  file_status?: 'active' | 'done' | 'failed' | 'cancelled';
   error?: string;
 }
 
@@ -519,8 +519,8 @@ export interface RestoreDownloadSummary {
   id: number;
   started_at: string;
   finished_at?: string;
-  status: 'running' | 'completed' | 'failed';
-  phase: 'download' | 'complete' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  phase: 'download' | 'complete' | 'failed' | 'cancelled';
   target_dir: string;
   total: number;
   total_bytes: number;
