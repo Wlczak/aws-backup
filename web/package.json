@@ -19,7 +19,7 @@
     "@typescript-eslint/eslint-plugin": "^8.60.0",
     "@typescript-eslint/parser": "^8.59.4",
     "eslint": "^10.4.0",
-    "eslint-plugin-svelte": "^3.17.1",
+    "eslint-plugin-svelte": "^3.18.0",
     "globals": "^17.6.0",
     "svelte-check": "^4.4.8",
     "svelte-eslint-parser": "^1.6.1",
