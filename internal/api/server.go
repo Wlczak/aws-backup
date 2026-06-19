@@ -352,7 +352,6 @@ func NewServer(d Deps) *Server {
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.RealIP)
 	r.Use(securityHeaders)
 
 	r.Route("/api", func(r chi.Router) {
