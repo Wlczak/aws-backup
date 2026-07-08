@@ -82,3 +82,57 @@ th { color: var(--muted); font-weight: 500; }
 .badge.warn { color: var(--warn); border-color: var(--warn); }
 .badge.err { color: var(--err); border-color: var(--err); }
 .badge.running { color: var(--accent); border-color: var(--accent); }
+
+.skeleton-stack {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  animation: skeleton-shimmer 1.35s ease-in-out infinite;
+}
+
+.skeleton-line {
+  border-radius: 999px;
+}
+
+.skeleton-rect {
+  border-radius: 8px;
+}
+
+.skeleton-pill {
+  border-radius: 999px;
+}
+
+.skeleton-table {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.skeleton-row {
+  background: transparent;
+}
+
+.skeleton-card {
+  display: grid;
+  gap: 0.7rem;
+}
+
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after { animation: none; }
+}

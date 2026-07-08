@@ -3,6 +3,7 @@
   import { bytes, formatDate, restoreLabel, expiresIn } from '../lib/format';
   import StatusBadge from './StatusBadge.svelte';
   import Self from './FileTreeNode.svelte';
+  import Skeleton from './Skeleton.svelte';
 
   // Lazy-loaded children for one folder. Each folder only fetches when
   // the user expands it; the parent owns the cache and passes the
@@ -77,7 +78,9 @@
   </div>
   {#if isOpen}
     {#if kids.state === 'loading'}
-      <div class="row child-status muted" style="padding-left: {(depth + 1) * 18 + 8}px">Loading…</div>
+      <div class="row child-status muted skeleton-child" style="padding-left: {(depth + 1) * 18 + 8}px">
+        <Skeleton lines={1} widths={['42%']} height="0.95rem" />
+      </div>
     {:else if kids.state === 'error'}
       <div class="row child-status err" style="padding-left: {(depth + 1) * 18 + 8}px">{kids.error}</div>
     {:else if kids.state === 'loaded'}
@@ -209,4 +212,7 @@
   .small { font-size: 0.7rem; }
   .child-status { font-style: italic; }
   .child-status.err { color: var(--err); }
+  .skeleton-child {
+    min-height: 32px;
+  }
 </style>

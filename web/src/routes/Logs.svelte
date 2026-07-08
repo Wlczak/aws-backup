@@ -5,6 +5,7 @@
   import { toast } from '../lib/toast';
   import { clientLogDebug } from '../lib/client-logs';
   import StatusBadge from '../components/StatusBadge.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   let runs = $state<Run[]>([]);
   let selectedID = $state<number | null>(null);
@@ -12,6 +13,9 @@
   let clientLogs = $state<ClientLog[]>([]);
   let selectedClientLog = $state<ClientLog | null>(null);
   let clientTotal = $state(0);
+  let runsLoading = $state(true);
+  let clientLoading = $state(true);
+  let detailLoading = $state(false);
 
   // Mirrors the AbortController pattern in Files.svelte (#204): cancel
   // the previous in-flight detail load on rapid row clicks AND on
@@ -25,6 +29,8 @@
   let refreshTimer: number | undefined;
 
   async function loadRuns() {
+    const showLoading = runs.length === 0;
+    if (showLoading) runsLoading = true;
     listCtrl?.abort();
     const ctl = new AbortController();
     listCtrl = ctl;
@@ -35,10 +41,14 @@
     } catch (e) {
       if (e instanceof ApiError && e.kind === 'abort') return;
       if (!aborted) toast.error(String(e));
+    } finally {
+      if (showLoading) runsLoading = false;
     }
   }
 
   async function loadClientLogs() {
+    const showLoading = clientLogs.length === 0;
+    if (showLoading) clientLoading = true;
     clientCtrl?.abort();
     const ctl = new AbortController();
     clientCtrl = ctl;
@@ -54,10 +64,13 @@
     } catch (e) {
       if (e instanceof ApiError && e.kind === 'abort') return;
       if (!aborted) toast.error(String(e));
+    } finally {
+      if (showLoading) clientLoading = false;
     }
   }
 
   async function selectRun(id: number) {
+    detailLoading = true;
     detailCtrl?.abort();
     const ctl = new AbortController();
     detailCtrl = ctl;
@@ -70,6 +83,8 @@
     } catch (e) {
       if (e instanceof ApiError && e.kind === 'abort') return;
       if (!aborted) toast.error(String(e));
+    } finally {
+      detailLoading = false;
     }
   }
 
@@ -190,30 +205,54 @@
         </tr>
       </thead>
       <tbody>
-        {#each runs as r (r.id)}
-          <tr
-            class:selected={selectedID === r.id}
-            role="button"
-            tabindex="0"
-            onclick={() => selectRun(r.id)}
-            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectRun(r.id); } }}
-          >
-            <td>{r.id}</td>
-            <td>{formatDate(r.started_at)}</td>
-            <td><StatusBadge status={r.status} /></td>
-            <td>{r.files_uploaded.toLocaleString()}</td>
-            <td>{bytes(r.bytes_uploaded)}</td>
-          </tr>
-        {/each}
-        {#if runs.length === 0}
-          <tr><td colspan="5" class="muted" style="text-align: center; padding: 1.5rem">No runs yet</td></tr>
+        {#if runsLoading}
+          {#each Array(6) as _}
+            <tr class="skeleton-row">
+              <td><Skeleton lines={1} widths={['2rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['8rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['4.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['4.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['5.5rem']} height="0.9rem" /></td>
+            </tr>
+          {/each}
+        {:else}
+          {#each runs as r (r.id)}
+            <tr
+              class:selected={selectedID === r.id}
+              role="button"
+              tabindex="0"
+              onclick={() => selectRun(r.id)}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectRun(r.id); } }}
+            >
+              <td>{r.id}</td>
+              <td>{formatDate(r.started_at)}</td>
+              <td><StatusBadge status={r.status} /></td>
+              <td>{r.files_uploaded.toLocaleString()}</td>
+              <td>{bytes(r.bytes_uploaded)}</td>
+            </tr>
+          {/each}
+          {#if runs.length === 0}
+            <tr><td colspan="5" class="muted" style="text-align: center; padding: 1.5rem">No runs yet</td></tr>
+          {/if}
         {/if}
       </tbody>
     </table>
   </div>
 
   <div class="card">
-    {#if detail}
+    {#if detailLoading}
+      <div class="toolbar card-actions">
+        <Skeleton lines={1} widths={['7rem']} height="1.8rem" />
+      </div>
+      <div class="detail-skeleton">
+        <Skeleton lines={1} widths={['44%']} height="1rem" />
+        <Skeleton lines={1} widths={['58%']} height="1rem" />
+        <Skeleton lines={1} widths={['36%']} height="1rem" />
+        <Skeleton lines={1} widths={['62%']} height="1rem" />
+        <Skeleton lines={1} widths={['52%']} height="1rem" />
+        <Skeleton lines={1} widths={['84%']} height="11rem" />
+      </div>
+    {:else if detail}
       <div class="toolbar card-actions">
         <button onclick={copyRunLog} type="button">Copy run log</button>
       </div>
@@ -260,22 +299,33 @@
         </tr>
       </thead>
       <tbody>
-        {#each clientLogs as row (row.id)}
-          <tr
-            class:selected={selectedClientLog?.id === row.id}
-            role="button"
-            tabindex="0"
-            onclick={() => selectClientLog(row)}
-            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectClientLog(row); } }}
-          >
-            <td>{formatDate(row.timestamp)}</td>
-            <td><span class="level {row.level}">{row.level}</span></td>
-            <td class="mono">{row.source}</td>
-            <td>{row.message}</td>
-          </tr>
-        {/each}
-        {#if clientLogs.length === 0}
-          <tr><td colspan="4" class="muted" style="text-align: center; padding: 1.5rem">No browser logs yet</td></tr>
+        {#if clientLoading}
+          {#each Array(6) as _}
+            <tr class="skeleton-row">
+              <td><Skeleton lines={1} widths={['8rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['4.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['5.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['100%']} height="0.9rem" /></td>
+            </tr>
+          {/each}
+        {:else}
+          {#each clientLogs as row (row.id)}
+            <tr
+              class:selected={selectedClientLog?.id === row.id}
+              role="button"
+              tabindex="0"
+              onclick={() => selectClientLog(row)}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectClientLog(row); } }}
+            >
+              <td>{formatDate(row.timestamp)}</td>
+              <td><span class="level {row.level}">{row.level}</span></td>
+              <td class="mono">{row.source}</td>
+              <td>{row.message}</td>
+            </tr>
+          {/each}
+          {#if clientLogs.length === 0}
+            <tr><td colspan="4" class="muted" style="text-align: center; padding: 1.5rem">No browser logs yet</td></tr>
+          {/if}
         {/if}
       </tbody>
     </table>
@@ -318,6 +368,10 @@
   }
   .toolbar { display: flex; justify-content: flex-end; }
   .card-actions { margin-bottom: 0.75rem; }
+  .detail-skeleton {
+    display: grid;
+    gap: 0.65rem;
+  }
   .danger {
     border-color: var(--err);
     color: var(--err);
