@@ -34,6 +34,7 @@
   let invalidatingScanCache = $state(false);
   let pendingRun = $state<Run | null>(null);
   let observedRunId = $state<number | null>(null);
+  let restoreJobActive = $derived(status?.restore_job_current?.status === 'running');
 
   type ItemProgress = {
     key: string;
@@ -586,6 +587,10 @@
   let scanningRestore = $state(false);
   let restoreSyncInfo = $state('');
   async function syncRestore() {
+    if (restoreJobActive) {
+      toast.info(`Restore job #${status?.restore_job_current?.id} is already running.`);
+      return;
+    }
     syncingRestore = true;
     restoreSyncInfo = '';
     try {
@@ -601,6 +606,10 @@
     }
   }
   async function fullScanRestore() {
+    if (restoreJobActive) {
+      toast.info(`Restore job #${status?.restore_job_current?.id} is already running.`);
+      return;
+    }
     scanningRestore = true;
     restoreSyncInfo = '';
     try {
@@ -979,15 +988,20 @@
       {/if}
       {#if restoreSyncInfo}<div class="sync-info" style="margin-top: 0.5rem">{restoreSyncInfo}</div>{/if}
       <div class="run-actions">
-        <button onclick={syncRestore} type="button" disabled={syncingRestore || scanningRestore}
+        <button onclick={syncRestore} type="button" disabled={syncingRestore || scanningRestore || restoreJobActive}
                 title="Drain SQS now instead of waiting on the background poll">
           {syncingRestore ? 'Syncing…' : 'Sync now'}
         </button>
-        <button onclick={fullScanRestore} type="button" disabled={syncingRestore || scanningRestore}
+        <button onclick={fullScanRestore} type="button" disabled={syncingRestore || scanningRestore || restoreJobActive}
                 title="HEAD every uploaded file to authoritatively reconcile restore status">
           {scanningRestore ? 'Scanning…' : 'Full scan'}
         </button>
       </div>
+      {#if restoreJobActive}
+        <div class="muted small" style="margin-top: 0.4rem">
+          Restore job #{status?.restore_job_current?.id} is already running; maintenance controls are disabled until it finishes.
+        </div>
+      {/if}
     {:else if initialLoading}
       <div class="skeleton-card">
         <Skeleton lines={1} widths={['28%']} height="1.25rem" />
