@@ -5,6 +5,7 @@
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   let status = $state<Status | null>(null);
   let stats = $state<FileStats | null>(null);
@@ -63,6 +64,7 @@
   };
   let dbSync = $state<DBSync | null>(null);
   let dbSyncHideTimer: number | undefined;
+  let initialLoading = $state(true);
   let activeRun = $derived(status?.current ?? pendingRun);
   let scanBytes = $state(0);
   let liveScannedBytes = $derived(Math.max(scanBytes, status?.current?.bytes_scanned ?? activeRun?.bytes_scanned ?? 0));
@@ -260,6 +262,8 @@
       }
     } catch (e) {
       toast.error(String(e));
+    } finally {
+      initialLoading = false;
     }
   }
 
@@ -760,6 +764,17 @@
           {invalidatingScanCache ? 'Clearing…' : 'Invalidate scan cache'}
         </button>
       </div>
+    {:else if initialLoading}
+      <div class="skeleton-card">
+        <Skeleton lines={1} widths={['48%']} height="1.25rem" />
+        <Skeleton lines={1} widths={['62%']} height="0.95rem" />
+        <Skeleton lines={1} widths={['88%']} height="0.9rem" />
+        <div class="skeleton-stack" style="grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem">
+          <Skeleton lines={1} widths={['100%']} height="2rem" />
+          <Skeleton lines={1} widths={['100%']} height="2rem" />
+          <Skeleton lines={1} widths={['100%']} height="2rem" />
+        </div>
+      </div>
     {:else}
       <div class="big muted">Idle</div>
       <div class="run-actions">
@@ -796,6 +811,12 @@
       {#if status.last.error_message}
         <div class="err mono" style="margin-top: 0.5rem">{status.last.error_message}</div>
       {/if}
+    {:else if initialLoading}
+      <div class="skeleton-card">
+        <Skeleton lines={1} widths={['34%']} height="1.25rem" />
+        <Skeleton lines={1} widths={['76%']} height="0.95rem" />
+        <Skeleton lines={1} widths={['48%']} height="0.95rem" />
+      </div>
     {:else}
       <div class="big muted">No runs yet</div>
     {/if}
@@ -902,6 +923,20 @@
           {rescanningMirror ? 'Rescanning…' : 'Rescan download folder'}
         </button>
       </div>
+    {:else if initialLoading}
+      <div class="skeleton-card">
+        <Skeleton lines={1} widths={['56%']} height="1.4rem" />
+        <Skeleton lines={1} widths={['40%']} height="0.95rem" />
+        <div class="skeleton-stack" style="grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem">
+          <Skeleton lines={1} widths={['100%']} height="1.85rem" />
+          <Skeleton lines={1} widths={['100%']} height="1.85rem" />
+          <Skeleton lines={1} widths={['100%']} height="1.85rem" />
+        </div>
+        <Skeleton lines={1} widths={['68%']} height="0.85rem" />
+      </div>
+    {:else}
+      <div class="big muted">Stats unavailable</div>
+      <div class="muted small">File index stats could not be loaded yet.</div>
     {/if}
   </div>
 
@@ -953,6 +988,18 @@
           {scanningRestore ? 'Scanning…' : 'Full scan'}
         </button>
       </div>
+    {:else if initialLoading}
+      <div class="skeleton-card">
+        <Skeleton lines={1} widths={['28%']} height="1.25rem" />
+        <Skeleton lines={1} widths={['58%']} height="0.95rem" />
+        <div class="skeleton-stack" style="grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.4rem">
+          <Skeleton lines={1} widths={['100%']} height="1.7rem" />
+          <Skeleton lines={1} widths={['100%']} height="1.7rem" />
+        </div>
+      </div>
+    {:else}
+      <div class="big muted">Unavailable</div>
+      <div class="muted small">Restore status stats could not be loaded yet.</div>
     {/if}
   </div>
 </div>

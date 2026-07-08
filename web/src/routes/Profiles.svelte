@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, type ProfileInfo } from '../lib/api';
   import { toast } from '../lib/toast';
+  import Skeleton from '../components/Skeleton.svelte';
 
   let profiles = $state<ProfileInfo[]>([]);
   let active = $state('');
@@ -138,7 +139,26 @@
 
 <section class="profiles">
   {#if loading}
-    <p class="muted">Loading profiles…</p>
+    {#each Array(3) as _}
+      <article class="card profile-card skeleton-card">
+        <div class="profile-main">
+          <div class="profile-title">
+            <Skeleton lines={1} widths={['8rem']} height="1rem" />
+            <Skeleton lines={1} widths={['3.5rem']} height="1.25rem" />
+          </div>
+          <div class="profile-meta">
+            <Skeleton lines={1} widths={['78%']} height="0.95rem" />
+            <Skeleton lines={1} widths={['68%']} height="0.95rem" />
+            <Skeleton lines={1} widths={['84%']} height="0.95rem" />
+          </div>
+        </div>
+        <div class="profile-actions">
+          <Skeleton lines={1} widths={['5.5rem']} height="1.8rem" />
+          <Skeleton lines={1} widths={['5.5rem']} height="1.8rem" />
+          <Skeleton lines={1} widths={['5.5rem']} height="1.8rem" />
+        </div>
+      </article>
+    {/each}
   {:else}
     {#each profiles as p}
       <article class="card profile-card">
@@ -216,6 +236,10 @@
   .profiles {
     display: grid;
     gap: 0.75rem;
+  }
+  .profile-meta {
+    display: grid;
+    gap: 0.45rem;
   }
   .profile-card {
     display: grid;

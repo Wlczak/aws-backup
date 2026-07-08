@@ -10,6 +10,7 @@
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
   import ProgressBar from '../components/ProgressBar.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   let raw = $state('');
   let downloadTargetDir = $state('');
@@ -562,6 +563,23 @@
     <span class={`status-pill ${downloadStatus.tone}`}>{downloadStatus.label}</span>
     <span class="status-detail">{downloadStatus.detail}</span>
   </div>
+  {#if estimating && !downloadEstimate}
+    <div class="card loading-card">
+      <div class="label">Estimate</div>
+      <div class="skeleton-card">
+        <Skeleton lines={1} widths={['64%']} height="0.95rem" />
+        <div class="stats">
+          {#each Array(4) as _}
+            <div>
+              <Skeleton lines={1} widths={['5rem']} height="0.85rem" />
+              <Skeleton lines={1} widths={['4.5rem']} height="1.3rem" />
+            </div>
+          {/each}
+        </div>
+        <Skeleton lines={1} widths={['88%']} height="0.95rem" />
+      </div>
+    </div>
+  {/if}
   {#if downloadEstimate}
     <div class="stats" style="margin-top: 0.75rem">
       <div>
@@ -647,7 +665,10 @@
         {/if}
       {:else}
         <div class="muted small">Current file</div>
-        <div class="current-placeholder">Waiting for the next file…</div>
+        <div class="current-placeholder">
+          <span class="current-placeholder-text">Waiting for the next file…</span>
+          <span class="current-placeholder-skeleton skeleton skeleton-line"></span>
+        </div>
       {/if}
     </div>
     {#if downloadProgress.total_bytes > 0}
@@ -828,6 +849,16 @@
     margin-top: 0.35rem;
     color: var(--muted);
     min-height: 1.25rem;
+    display: grid;
+    gap: 0.35rem;
+  }
+  .current-placeholder-skeleton {
+    height: 0.8rem;
+    width: 72%;
+    border-radius: 999px;
+  }
+  .loading-card {
+    margin-top: 0.75rem;
   }
   .activity-list {
     display: grid;

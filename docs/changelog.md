@@ -4,7 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
-<<<<<<< HEAD
+| — | — | Dashboard, Files, Logs, Profiles, Restore, and Download now use shared shimmer skeletons for element-level loading feedback instead of leaving empty cards/tables while API calls are in flight |
 | #319 | — | Final write-buffer flush is now a hard gate before `FinishRun`, so a failed drain aborts the run instead of finalizing it with S3 and SQLite out of sync |
 | #318 | — | `serve` now keeps waiting for engine shutdown after the 10s `Server.Shutdown` deadline expires, so `app.close()` does not tear down DB/storage while a run or post-run DB sync is still draining |
 | #305 | — | Shutdown now cancels the restore SQS consumer and closes the app immediately instead of waiting for the consumer to drain, removing the occasional 30s exit stall |

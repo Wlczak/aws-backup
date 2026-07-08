@@ -7,6 +7,7 @@
   import { toast } from '../lib/toast';
   import StatusBadge from '../components/StatusBadge.svelte';
   import FileTreeNode, { type FolderChildren } from '../components/FileTreeNode.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   type ViewMode = 'tree' | 'flat';
   const VIEW_KEY = 'aws-backup:files-view';
@@ -22,6 +23,7 @@
   let detail = $state<FileRow | null>(null);
   let busy = $state(false);
   let expanded = $state<Set<string>>(new Set());
+  let initialLoading = $state(true);
 
   // Lazy tree state. The cache is keyed by folder path; the root level
   // lives under '' and is fetched on mount + on filter change. Each
@@ -96,6 +98,7 @@
     } else {
       await loadFlat();
     }
+    if (initialLoading) initialLoading = false;
   }
 
   onMount(load);
@@ -396,7 +399,12 @@
 {#if viewMode === 'tree'}
   <div class="card nopad">
     {#if rootKids.state === 'loading'}
-      <div class="muted empty">Loading…</div>
+      <div class="empty skeleton-tree">
+        <Skeleton lines={1} widths={['72%']} height="1rem" />
+        <Skeleton lines={1} widths={['58%']} height="1rem" />
+        <Skeleton lines={1} widths={['64%']} height="1rem" />
+        <Skeleton lines={1} widths={['42%']} height="1rem" />
+      </div>
     {:else if rootKids.state === 'error'}
       <div class="empty err">{rootKids.error}</div>
     {:else if rootKids.state === 'loaded'}
@@ -501,6 +509,20 @@
           {#if data.files.length === 0}
             <tr><td colspan="9" class="muted" style="text-align: center; padding: 1.5rem">No files match</td></tr>
           {/if}
+        {:else if initialLoading}
+          {#each Array(6) as _, i}
+            <tr class="skeleton-row">
+              <td class="check"><Skeleton lines={1} widths={['1rem']} height="1rem" /></td>
+              <td><Skeleton lines={1} widths={[i % 2 === 0 ? '82%' : '68%']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['4.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['7rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['5.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['4rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['5.5rem']} height="0.9rem" /></td>
+              <td><Skeleton lines={1} widths={['5rem']} height="0.9rem" /></td>
+              <td class="actions-col"><Skeleton lines={1} widths={['2.5rem']} height="0.9rem" /></td>
+            </tr>
+          {/each}
         {/if}
       </tbody>
     </table>
@@ -585,5 +607,10 @@
   .viewswitch button + button { border-left: 1px solid var(--border); }
   .empty { padding: 1.5rem; text-align: center; }
   .empty.err { color: var(--err); }
+  .skeleton-tree {
+    display: grid;
+    gap: 0.65rem;
+    justify-items: center;
+  }
   .small { font-size: 0.78rem; margin-left: 0.3rem; }
 </style>

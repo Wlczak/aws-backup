@@ -13,6 +13,7 @@
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
+  import Skeleton from '../components/Skeleton.svelte';
 
   let raw = $state('');
   let tier = $state<RestoreTier>('bulk');
@@ -70,6 +71,8 @@
   let inventory = $state<InventoryStatus | null>(null);
   let inventoryFreq = $state<'daily' | 'weekly'>('daily');
   let inventoryBusy = $state(false);
+  let inventoryLoaded = $state(false);
+  let restoreStatusLoaded = $state(false);
 
   // Guard async writes against assigning to torn-down state if the route
   // unmounts mid-fetch — same pattern as Files.svelte. (#202)
@@ -144,6 +147,8 @@
     } catch {
       if (aborted) return;
       inventory = null;
+    } finally {
+      inventoryLoaded = true;
     }
   }
 
@@ -154,6 +159,8 @@
       applyRestoreStatus(status);
     } catch {
       if (aborted) return;
+    } finally {
+      restoreStatusLoaded = true;
     }
   }
 
@@ -384,6 +391,8 @@
     <p class="muted" style="margin-top: 0.5rem">
       {scanProgress.mode}: {scanProgress.scanned.toLocaleString()} / {scanProgress.total.toLocaleString()} HEADed
     </p>
+  {:else if !restoreStatusLoaded}
+    <Skeleton lines={1} widths={['42%']} height="0.95rem" />
   {/if}
 </div>
 
@@ -412,6 +421,24 @@
           <div class="mono small">{inventory.destination ?? '—'}</div>
         </div>
       {/if}
+    </div>
+  {:else if !inventoryLoaded}
+    <div class="skeleton-card" style="margin-top: 0.5rem">
+      <div class="stats">
+        <div>
+          <Skeleton lines={1} widths={['4rem']} height="0.9rem" />
+          <Skeleton lines={1} widths={['6rem']} height="1.35rem" />
+        </div>
+        <div>
+          <Skeleton lines={1} widths={['5rem']} height="0.9rem" />
+          <Skeleton lines={1} widths={['5.5rem']} height="1.35rem" />
+        </div>
+        <div>
+          <Skeleton lines={1} widths={['6rem']} height="0.9rem" />
+          <Skeleton lines={1} widths={['9rem']} height="1.35rem" />
+        </div>
+      </div>
+      <Skeleton lines={1} widths={['58%']} height="0.95rem" />
     </div>
   {/if}
   {#if inventoryManifestProgress}
@@ -545,6 +572,24 @@
         <ul class="mono small">{#each triggerResult.errors as p}<li>{p}</li>{/each}</ul>
       </details>
     {/if}
+  </div>
+{/if}
+
+{#if loading && !triggerProgress && !triggerResult && !estimate}
+  <div class="card">
+    <div class="label">Working</div>
+    <div class="skeleton-card">
+      <Skeleton lines={1} widths={['72%']} height="0.95rem" />
+      <div class="stats">
+        {#each Array(5) as _}
+          <div>
+            <Skeleton lines={1} widths={['5rem']} height="0.85rem" />
+            <Skeleton lines={1} widths={['4rem']} height="1.3rem" />
+          </div>
+        {/each}
+      </div>
+      <Skeleton lines={1} widths={['86%']} height="0.95rem" />
+    </div>
   </div>
 {/if}
 
