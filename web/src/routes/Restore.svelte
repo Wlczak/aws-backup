@@ -73,6 +73,8 @@
   let inventoryBusy = $state(false);
   let inventoryLoaded = $state(false);
   let restoreStatusLoaded = $state(false);
+  let restoreJobCurrent = $state<RestoreJobSummary | null>(null);
+  let inventoryJobActive = $derived(restoreJobCurrent?.status === 'running' && restoreJobCurrent.kind === 'inventory');
 
   // Guard async writes against assigning to torn-down state if the route
   // unmounts mid-fetch — same pattern as Files.svelte. (#202)
@@ -166,6 +168,7 @@
 
   function applyRestoreStatus(status: Status) {
     const job = status.restore_job_current ?? status.restore_job_last;
+    restoreJobCurrent = job ?? null;
     if (!job) return;
     if (job.status === 'running') {
       if (job.kind === 'trigger') {
@@ -284,6 +287,10 @@
   }
 
   async function doInventorySync() {
+    if (inventoryJobActive) {
+      toast.info(`Inventory sync job #${restoreJobCurrent?.id} is already running.`);
+      return;
+    }
     inventoryBusy = true;
     scanResult = null;
     try {
@@ -467,11 +474,16 @@
       <button onclick={doInventoryDisable} disabled={inventoryBusy} type="button">
       Disable
       </button>
-      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy || !!inventoryManifestProgress} type="button">
+      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy || inventoryJobActive} type="button">
         Sync from inventory
       </button>
     {/if}
   </div>
+  {#if inventoryJobActive}
+    <div class="muted small" style="margin-top: 0.4rem">
+      Inventory sync job #{restoreJobCurrent?.id} is already running; the button stays disabled until it finishes.
+    </div>
+  {/if}
 </div>
 
 <div class="card">
