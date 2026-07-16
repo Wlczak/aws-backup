@@ -66,6 +66,7 @@
   let dbSyncHideTimer: number | undefined;
   let initialLoading = $state(true);
   let activeRun = $derived(status?.current ?? pendingRun);
+  let restoreJobActive = $derived(status?.restore_job_current?.status === 'running');
   let scanBytes = $state(0);
   let liveScannedBytes = $derived(Math.max(scanBytes, status?.current?.bytes_scanned ?? activeRun?.bytes_scanned ?? 0));
   let liveUploadedFiles = $derived(status?.current?.files_uploaded ?? activeRun?.files_uploaded ?? 0);
@@ -208,7 +209,7 @@
   // calls/hour for no value. (#70)
   function scheduleNextPoll() {
     if (pollDestroyed) return;
-    const delay = activeRun || status?.download_current ? 1000 : 30000;
+    const delay = activeRun || status?.download_current || restoreJobActive ? 1000 : 30000;
     pollTimer = window.setTimeout(async () => {
       await refresh();
       scheduleNextPoll();
@@ -586,6 +587,7 @@
   let scanningRestore = $state(false);
   let restoreSyncInfo = $state('');
   async function syncRestore() {
+    if (syncingRestore || scanningRestore || restoreJobActive) return;
     syncingRestore = true;
     restoreSyncInfo = '';
     try {
@@ -601,6 +603,7 @@
     }
   }
   async function fullScanRestore() {
+    if (syncingRestore || scanningRestore || restoreJobActive) return;
     scanningRestore = true;
     restoreSyncInfo = '';
     try {
@@ -979,11 +982,11 @@
       {/if}
       {#if restoreSyncInfo}<div class="sync-info" style="margin-top: 0.5rem">{restoreSyncInfo}</div>{/if}
       <div class="run-actions">
-        <button onclick={syncRestore} type="button" disabled={syncingRestore || scanningRestore}
+        <button onclick={syncRestore} type="button" disabled={syncingRestore || scanningRestore || restoreJobActive}
                 title="Drain SQS now instead of waiting on the background poll">
           {syncingRestore ? 'Syncing…' : 'Sync now'}
         </button>
-        <button onclick={fullScanRestore} type="button" disabled={syncingRestore || scanningRestore}
+        <button onclick={fullScanRestore} type="button" disabled={syncingRestore || scanningRestore || restoreJobActive}
                 title="HEAD every uploaded file to authoritatively reconcile restore status">
           {scanningRestore ? 'Scanning…' : 'Full scan'}
         </button>
