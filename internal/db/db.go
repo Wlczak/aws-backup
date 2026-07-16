@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	gsqlite "github.com/glebarez/sqlite"
@@ -23,7 +24,8 @@ import (
 
 // DB wraps *gorm.DB with a stable, typed query surface.
 type DB struct {
-	g *gorm.DB
+	g            *gorm.DB
+	fileRevision atomic.Uint64
 }
 
 const defaultConnIdleTimeout = 15 * time.Minute
@@ -82,7 +84,39 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	return &DB{g: gdb}, nil
+	db := &DB{g: gdb}
+	if err := db.registerFileRevisionCallbacks(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("register file revision callbacks: %w", err)
+	}
+	return db, nil
+}
+
+// FileRevision returns the process-local version of the files table. Every
+// successful GORM create, update, or delete advances it so API caches can
+// reject stale entries without coupling every writer to the HTTP package.
+func (db *DB) FileRevision() uint64 { return db.fileRevision.Load() }
+
+func (db *DB) registerFileRevisionCallbacks() error {
+	bump := func(tx *gorm.DB) {
+		if tx.Error != nil || tx.RowsAffected == 0 || tx.Statement == nil {
+			return
+		}
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table == "files" {
+			db.fileRevision.Add(1)
+		}
+	}
+	if err := db.g.Callback().Create().After("gorm:create").Register("aws_backup:file_revision", bump); err != nil {
+		return err
+	}
+	if err := db.g.Callback().Update().After("gorm:update").Register("aws_backup:file_revision", bump); err != nil {
+		return err
+	}
+	return db.g.Callback().Delete().After("gorm:delete").Register("aws_backup:file_revision", bump)
 }
 
 // Close releases the database connection.

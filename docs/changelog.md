@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #367 | — | Added a revision-aware, five-minute in-memory response cache for file list/tree/subtree/stats APIs, bounded by a 128 MiB LRU and invalidated by every application file-table mutation |
 | #366 | — | Added an authenticated local folder browser/creator API and a reusable web picker for source, temp, mirror-download, and restore-target directory fields |
 | — | — | Dashboard, Files, Logs, Profiles, Restore, and Download now use shared shimmer skeletons for element-level loading feedback instead of leaving empty cards/tables while API calls are in flight |
 | #319 | — | Final write-buffer flush is now a hard gate before `FinishRun`, so a failed drain aborts the run instead of finalizing it with S3 and SQLite out of sync |

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -60,45 +63,49 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		filter.Page = 1
 		filter.Limit = maxAllRows + 1
 	}
-	var files []db.File
-	var total int64
-	var err error
-	if all {
-		files, total, err = s.cachedAllFiles(r.Context(), filter)
-	} else {
-		files, total, err = s.deps.DB.ListFiles(r.Context(), filter)
+	keyParams := url.Values{
+		"all": {strconv.FormatBool(all)}, "status": {filter.Status}, "search": {filter.Search},
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	if !all {
+		keyParams.Set("page", strconv.Itoa(page))
+		keyParams.Set("limit", strconv.Itoa(limit))
 	}
-	if all && total > maxAllRows {
-		writeError(w, http.StatusBadRequest, fmt.Errorf(
-			"index has %d rows, exceeds the %d-row cap on all=true; paginate via page/limit instead",
-			total, maxAllRows,
-		))
-		return
-	}
-	out := make([]fileEntry, 0, len(files))
-	for _, f := range files {
-		out = append(out, fileEntry{
-			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
-			Status: f.Status, ZipID: f.ZipID, ZipName: f.ZipName, S3Key: f.S3Key,
-			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
-			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
-		})
-	}
-	if all {
-		// Report the real count so the client can page in tree mode if
-		// it chooses, but the payload already contains everything.
-		page = 1
-		limit = len(out)
-	}
-	writeJSON(w, http.StatusOK, filesListResponse{
-		Files: out, Total: total,
-		Page:  page,
-		Limit: limit,
+	key := "files?" + keyParams.Encode()
+	database := s.deps.DB
+	s.writeCachedFileJSON(w, r, database, key, func(ctx context.Context) (any, error) {
+		files, total, err := database.ListFiles(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		if all && total > maxAllRows {
+			return nil, &responseStatusError{status: http.StatusBadRequest, err: fmt.Errorf(
+				"index has %d rows, exceeds the %d-row cap on all=true; paginate via page/limit instead",
+				total, maxAllRows,
+			)}
+		}
+		out := make([]fileEntry, 0, len(files))
+		for _, f := range files {
+			out = append(out, toFileEntry(f))
+		}
+		responsePage, responseLimit := page, limit
+		if all {
+			responsePage = 1
+			responseLimit = len(out)
+		}
+		return filesListResponse{
+			Files: out, Total: total,
+			Page: responsePage, Limit: responseLimit,
+		}, nil
 	})
+}
+
+func toFileEntry(f db.File) fileEntry {
+	return fileEntry{
+		ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
+		Status: f.Status, ZipID: f.ZipID, ZipName: f.ZipName, S3Key: f.S3Key,
+		UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
+		RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
+	}
 }
 
 type treeFolderEntry struct {
@@ -130,32 +137,27 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request) {
 	}
 	statusFilter := q.Get("status")
 
-	folders, files, err := s.deps.DB.ListTreeChildren(r.Context(), prefix, statusFilter)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	resp := treeListResponse{
-		Prefix:  prefix,
-		Folders: make([]treeFolderEntry, 0, len(folders)),
-		Files:   make([]fileEntry, 0, len(files)),
-	}
-	for _, fd := range folders {
-		resp.Folders = append(resp.Folders, treeFolderEntry{
-			Name: fd.Name, Path: fd.Path,
-			FileCount: fd.FileCount, TotalSize: fd.TotalSize,
-		})
-	}
-	for _, f := range files {
-		resp.Files = append(resp.Files, fileEntry{
-			ID: f.ID, Path: f.Path, Size: f.Size, MTime: f.MTime, MD5: f.MD5,
-			Status: f.Status, ZipID: f.ZipID, ZipName: f.ZipName, S3Key: f.S3Key,
-			UploadedAt: f.UploadedAt, LastSeenAt: f.LastSeenAt,
-			RestoreStatus: f.RestoreStatus, RestoreExpiresAt: f.RestoreExpiresAt,
-		})
-	}
-	writeJSON(w, http.StatusOK, resp)
+	key := "tree?" + url.Values{"prefix": {prefix}, "status": {statusFilter}}.Encode()
+	database := s.deps.DB
+	s.writeCachedFileJSON(w, r, database, key, func(ctx context.Context) (any, error) {
+		folders, files, err := database.ListTreeChildren(ctx, prefix, statusFilter)
+		if err != nil {
+			return nil, err
+		}
+		resp := treeListResponse{
+			Prefix: prefix, Folders: make([]treeFolderEntry, 0, len(folders)),
+			Files: make([]fileEntry, 0, len(files)),
+		}
+		for _, fd := range folders {
+			resp.Folders = append(resp.Folders, treeFolderEntry{
+				Name: fd.Name, Path: fd.Path, FileCount: fd.FileCount, TotalSize: fd.TotalSize,
+			})
+		}
+		for _, f := range files {
+			resp.Files = append(resp.Files, toFileEntry(f))
+		}
+		return resp, nil
+	})
 }
 
 type subtreeIDsResponse struct {
@@ -186,14 +188,18 @@ func (s *Server) handleSubtreeIDs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("prefix is required"))
 		return
 	}
-	ids, paths, total, err := s.deps.DB.ListSubtreeIDs(r.Context(), prefix, q.Get("status"), subtreeIDsMaxRows)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, subtreeIDsResponse{
-		IDs: ids, Paths: paths, Total: total,
-		Truncated: total > int64(len(ids)),
+	statusFilter := q.Get("status")
+	key := "subtree-ids?" + url.Values{"prefix": {prefix}, "status": {statusFilter}}.Encode()
+	database := s.deps.DB
+	s.writeCachedFileJSON(w, r, database, key, func(ctx context.Context) (any, error) {
+		ids, paths, total, err := database.ListSubtreeIDs(ctx, prefix, statusFilter, subtreeIDsMaxRows)
+		if err != nil {
+			return nil, err
+		}
+		return subtreeIDsResponse{
+			IDs: ids, Paths: paths, Total: total,
+			Truncated: total > int64(len(ids)),
+		}, nil
 	})
 }
 
@@ -206,120 +212,59 @@ type fileStatsResponse struct {
 }
 
 func (s *Server) handleFileStats(w http.ResponseWriter, r *http.Request) {
-	st, err := s.cachedStats(r.Context())
+	database := s.deps.DB
+	s.writeCachedFileJSON(w, r, database, "stats", func(ctx context.Context) (any, error) {
+		st, err := database.Stats(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return fileStatsResponse{
+			ByStatus: st.ByStatus, ByRestoreStatus: st.ByRestoreStatus,
+			RestoreSoonestExpAt: st.RestoreSoonestExp,
+			TotalCount:          st.TotalCount, TotalSize: st.TotalSize,
+		}, nil
+	})
+}
+
+type responseStatusError struct {
+	status int
+	err    error
+}
+
+func (e *responseStatusError) Error() string      { return e.err.Error() }
+func (e *responseStatusError) Unwrap() error      { return e.err }
+func (e *responseStatusError) NonCacheable() bool { return true }
+
+func (s *Server) writeCachedFileJSON(
+	w http.ResponseWriter,
+	r *http.Request,
+	database *db.DB,
+	key string,
+	load func(context.Context) (any, error),
+) {
+	body, err := s.fileResponses.Get(r.Context(), key, database.FileRevision, func(ctx context.Context) ([]byte, error) {
+		value, err := load(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(value); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	})
 	if err != nil {
+		var statusErr *responseStatusError
+		if errors.As(err, &statusErr) {
+			writeError(w, statusErr.status, statusErr.err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, fileStatsResponse{
-		ByStatus:            st.ByStatus,
-		ByRestoreStatus:     st.ByRestoreStatus,
-		RestoreSoonestExpAt: st.RestoreSoonestExp,
-		TotalCount:          st.TotalCount,
-		TotalSize:           st.TotalSize,
-	})
-}
-
-// cachedStats serves /api/files/stats from a short TTL cache so tight
-// dashboard polls don't rescan the whole files table per request.
-//
-// The hot read path (cache hit) only takes the mutex briefly; on miss
-// we use singleflight so concurrent pollers share one DB call instead
-// of queueing serially behind a held mutex (#179). On query error we
-// set a short backoff expiry so a degraded DB isn't hammered.
-func (s *Server) cachedStats(ctx context.Context) (db.FileStats, error) {
-	s.statsMu.Lock()
-	if time.Now().Before(s.statsExpiry) {
-		v := s.statsValue
-		e := s.statsErr
-		s.statsMu.Unlock()
-		return v, e
-	}
-	s.statsMu.Unlock()
-
-	v, err, _ := s.statsSF.Do("stats", func() (any, error) {
-		// Re-check the cache inside the singleflight winner: a concurrent
-		// caller may have populated it while we were queueing.
-		s.statsMu.Lock()
-		if time.Now().Before(s.statsExpiry) {
-			cached := s.statsValue
-			cachedErr := s.statsErr
-			s.statsMu.Unlock()
-			if cachedErr != nil {
-				return db.FileStats{}, cachedErr
-			}
-			return cached, nil
-		}
-		s.statsMu.Unlock()
-		st, err := s.deps.DB.Stats(ctx)
-		s.statsMu.Lock()
-		defer s.statsMu.Unlock()
-		if err != nil {
-			// Stash the error on the cache for the backoff window so a
-			// degraded DB doesn't replay instantly AND cache-hit callers
-			// see the failure instead of a stale healthy value. (#243)
-			s.statsValue = db.FileStats{}
-			s.statsErr = err
-			s.statsExpiry = time.Now().Add(500 * time.Millisecond)
-			return db.FileStats{}, err
-		}
-		s.statsValue = st
-		s.statsErr = nil
-		s.statsExpiry = time.Now().Add(statsCacheTTL)
-		return st, nil
-	})
-	if err != nil {
-		return db.FileStats{}, err
-	}
-	return v.(db.FileStats), nil
-}
-
-// allFilesCacheTTL bounds staleness of the cached /api/files?all=true
-// response. Mirrors statsCacheTTL — short enough that the tree view
-// still reflects fresh state, long enough to absorb a 10–30 MB JSON
-// hit on every poller. (#178)
-const allFilesCacheTTL = 2 * time.Second
-
-// cachedAllFiles serves the all=true path from a short TTL cache so a
-// poll loop doesn't re-scan + re-serialise the full files table per
-// request. Singleflight collapses concurrent misses into one query.
-func (s *Server) cachedAllFiles(ctx context.Context, filter db.FilesFilter) ([]db.File, int64, error) {
-	key := filter.Status + "|" + filter.Search
-	now := time.Now()
-	s.allFilesMu.Lock()
-	if e, ok := s.allFilesCache[key]; ok && now.Before(e.expiry) {
-		s.allFilesMu.Unlock()
-		return e.files, e.total, e.err
-	}
-	s.allFilesMu.Unlock()
-
-	v, err, _ := s.allFilesSF.Do("all|"+key, func() (any, error) {
-		s.allFilesMu.Lock()
-		if e, ok := s.allFilesCache[key]; ok && time.Now().Before(e.expiry) {
-			s.allFilesMu.Unlock()
-			return e, nil
-		}
-		s.allFilesMu.Unlock()
-		files, total, qerr := s.deps.DB.ListFiles(ctx, filter)
-		s.allFilesMu.Lock()
-		defer s.allFilesMu.Unlock()
-		if qerr != nil {
-			// Cache the error itself for a short backoff window so a
-			// degraded DB isn't replayed per poll, but cache-hit callers
-			// keep seeing the failure instead of an empty 200. (#271)
-			entry := allFilesCacheEntry{expiry: time.Now().Add(500 * time.Millisecond), err: qerr}
-			s.allFilesCache[key] = entry
-			return entry, qerr
-		}
-		entry := allFilesCacheEntry{files: files, total: total, expiry: time.Now().Add(allFilesCacheTTL)}
-		s.allFilesCache[key] = entry
-		return entry, nil
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-	e := v.(allFilesCacheEntry)
-	return e.files, e.total, e.err
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 type idsRequest struct {

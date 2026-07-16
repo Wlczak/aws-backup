@@ -15,7 +15,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/Wlczak/aws-backup/internal/config"
 	"github.com/Wlczak/aws-backup/internal/db"
@@ -184,36 +183,10 @@ type Server struct {
 	// deps.StoragePrefix, both of which can be replaced by handlePutSettings.
 	cfgMu sync.RWMutex
 
-	// statsCache coalesces /api/files/stats across poll-heavy UI clients
-	// so a full-table COUNT/SUM doesn't hit the DB more than once every
-	// statsCacheTTL.
-	statsMu     sync.Mutex
-	statsValue  db.FileStats
-	statsExpiry time.Time
-	// statsErr, when non-nil, is replayed to cache-hit callers within the
-	// backoff window so a degraded DB surfaces an error instead of a
-	// misleadingly-healthy stale value. Cleared on next successful query.
-	// (#243)
-	statsErr error
-	// statsSF coalesces concurrent stats queries into a single DB call
-	// so a slow Stats() doesn't queue every poller serially behind the
-	// cache mutex (#179). The mutex still guards reads/writes of
-	// statsValue/statsExpiry; singleflight only de-dupes the DB call.
-	statsSF singleflight.Group
-
-	// allFilesCache coalesces /api/files?all=true responses across the
-	// poll-heavy tree view so the same 10-30 MB JSON isn't re-serialised
-	// per request. Keyed on (status, search). (#178)
-	allFilesMu    sync.Mutex
-	allFilesCache map[string]allFilesCacheEntry
-	allFilesSF    singleflight.Group
-}
-
-type allFilesCacheEntry struct {
-	files  []db.File
-	total  int64
-	expiry time.Time
-	err    error
+	// fileResponses caches serialized file-index GET responses. Entries
+	// carry the DB's file revision, so every application write invalidates
+	// stale reads while a finite TTL covers out-of-process SQLite changes.
+	fileResponses *responseCache
 }
 
 // cfgMutex returns the RWMutex used to serialise config reads/writes.
@@ -331,11 +304,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-// statsCacheTTL bounds staleness of the cached /api/files/stats response.
-// Short enough that the dashboard feels live, long enough that a tight
-// poll loop can't pin a 300k-row index in scan.
-const statsCacheTTL = 2 * time.Second
-
 // NewServer wires up a *Server with validated Deps.
 func NewServer(d Deps) *Server {
 	if d.Logger == nil {
@@ -344,7 +312,7 @@ func NewServer(d Deps) *Server {
 	return &Server{
 		deps:          d,
 		shutdownCh:    make(chan struct{}),
-		allFilesCache: map[string]allFilesCacheEntry{},
+		fileResponses: newFileResponseCache(),
 	}
 }
 

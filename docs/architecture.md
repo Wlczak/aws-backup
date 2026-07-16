@@ -30,6 +30,7 @@ aws-backup/
 │   │   ├── spa.go               # Embedded SPA fallback handler
 │   │   ├── sse.go               # EventEmitter → HTTP SSE with reconnect replay
 │   │   ├── handlers_files.go    # GET/DELETE /api/files, retry, stats (cached)
+│   │   ├── response_cache.go    # revision-aware, singleflight/LRU cache for file-index GET responses
 │   │   ├── handlers_runs.go     # POST /api/runs + cancel/stop/continue, status, post-run db sync
 │   │   ├── handlers_download.go # POST /api/download/full mirror job
 │   │   ├── handlers_restore.go  # Restore estimate / trigger / sync-status (drains SQS)
@@ -141,6 +142,7 @@ aws-backup/
 | Idle SQLite connection recycling | `database/sql` keeps the DB handle open but closes the underlying connection after 15 minutes of inactivity, then reopens it on demand |
 | Schedule triggers via HTTP, not in-process | The API serialises run launches; cron path uses the same 409 semantics |
 | `Deps.ConfigMu` shared with `appState.mu` | Single mutex for cfg reads/writes across both sides (#153) |
+| File API cache keyed by DB revision | File-index GETs reuse serialized JSON for up to 5 minutes, while every GORM `files` write invalidates immediately; a 128 MiB / 1024-entry LRU bounds memory (#367) |
 
 ## Go Dependencies
 

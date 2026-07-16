@@ -31,7 +31,7 @@ POST   /api/download/cancel           cancel the active mirror download or resca
 GET    /api/files                     ?status=&search=&page=&limit=&all=  (limit ≤1000; all=true ≤50k rows, else 400)
 GET    /api/files/tree                ?prefix=&status=  immediate children of a folder (lazy tree view)
 GET    /api/files/subtree-ids         ?prefix=&status=  every file id+path under prefix (cap 50k; returns `truncated:true` past the cap)
-GET    /api/files/stats               counts by status + restore_status, total size (2s cache)
+GET    /api/files/stats               counts by status + restore_status, total size
 POST   /api/files/{id}/retry          mark single file pending
 POST   /api/files/retry               batch: ids[], or all_failed:true, or paths[]
 DELETE /api/files/{id}                delete row (S3 untouched)
@@ -82,6 +82,8 @@ frames unless they provide a visible improvement that `/api/status` cannot.
 Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
 
 The folder API browses the filesystem visible to the server process, not the browser machine. `GET /api/folders` lists directories only and includes filesystem roots so the web picker can navigate across volumes. `POST /api/folders` accepts exactly one child name under an existing absolute parent; nested names and traversal segments are rejected. Both endpoints are authenticated because directory names and creation permissions expose host filesystem information.
+
+The four file-index GET endpoints (`/api/files`, `/api/files/tree`, `/api/files/subtree-ids`, and `/api/files/stats`) share a process-local serialized-response cache. Successful responses have a five-minute TTL and the LRU is bounded to 128 MiB / 1024 entries; transient DB errors retain the existing 500 ms backoff. Every application write to `files` advances an in-memory DB revision, so scans, uploads, syncs, restore updates, mirror scans, retries, and deletes invalidate cached responses immediately. Profile changes clear the entire cache and prevent in-flight reads from repopulating the previous profile. The TTL is the fallback for manual SQLite writes that bypass GORM.
 
 `POST /api/client-logs` is intentionally public so the browser can queue uncaught runtime errors, request failures, console warnings, and toast events before the session is authenticated. The ingest handler still only accepts same-origin requests because the `/api` tree is protected by `originGuard`.
 

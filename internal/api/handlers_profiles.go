@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
-	"github.com/Wlczak/aws-backup/internal/db"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -219,13 +217,5 @@ func (s *Server) profileSwitchBlockedRunLocked() (bool, string) {
 }
 
 func (s *Server) clearProfileCaches() {
-	s.statsMu.Lock()
-	s.statsValue = db.FileStats{}
-	s.statsExpiry = time.Time{}
-	s.statsErr = nil
-	s.statsMu.Unlock()
-
-	s.allFilesMu.Lock()
-	s.allFilesCache = map[string]allFilesCacheEntry{}
-	s.allFilesMu.Unlock()
+	s.fileResponses.Clear()
 }
