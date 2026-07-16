@@ -73,6 +73,8 @@
   let inventoryBusy = $state(false);
   let inventoryLoaded = $state(false);
   let restoreStatusLoaded = $state(false);
+  let restoreJobActive = $state(false);
+  let restoreStatusRequestSeq = 0;
 
   // Guard async writes against assigning to torn-down state if the route
   // unmounts mid-fetch — same pattern as Files.svelte. (#202)
@@ -153,9 +155,10 @@
   }
 
   async function loadRestoreStatus() {
+    const requestSeq = ++restoreStatusRequestSeq;
     try {
       const status = await api.status();
-      if (aborted) return;
+      if (aborted || requestSeq !== restoreStatusRequestSeq) return;
       applyRestoreStatus(status);
     } catch {
       if (aborted) return;
@@ -165,6 +168,7 @@
   }
 
   function applyRestoreStatus(status: Status) {
+    restoreJobActive = status.restore_job_current?.status === 'running';
     const job = status.restore_job_current ?? status.restore_job_last;
     if (!job) return;
     if (job.status === 'running') {
@@ -284,10 +288,14 @@
   }
 
   async function doInventorySync() {
+    if (inventoryBusy || scanBusy || restoreJobActive) return;
     inventoryBusy = true;
     scanResult = null;
     try {
       const job = await api.inventorySync();
+      // Ignore a status request that started before this job existed.
+      restoreStatusRequestSeq++;
+      restoreJobActive = true;
       toast.info(`Inventory sync started as job #${job.restore_job_id}.`);
     } catch (e) {
       toast.error(String(e));
@@ -467,7 +475,7 @@
       <button onclick={doInventoryDisable} disabled={inventoryBusy} type="button">
       Disable
       </button>
-      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy || !!inventoryManifestProgress} type="button">
+      <button onclick={doInventorySync} disabled={inventoryBusy || scanBusy || restoreJobActive} type="button">
         Sync from inventory
       </button>
     {/if}
