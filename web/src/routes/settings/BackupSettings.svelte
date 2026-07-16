@@ -1,5 +1,6 @@
 <script lang="ts">
   import { type Config } from '../../lib/api';
+  import FolderInput from '../../components/FolderInput.svelte';
 
   type Props = { cfg: Config };
   let { cfg = $bindable() }: Props = $props();
@@ -7,14 +8,14 @@
 
 <div class="card">
   <h2>Backup behavior</h2>
-  <label>
-    <span>Temp directory</span>
-    <input type="text" bind:value={cfg.backup.tmp_dir} />
-  </label>
-  <label>
-    <span>Download directory</span>
-    <input type="text" bind:value={cfg.backup.download_dir} />
-  </label>
+  <div class="folder-field">
+    <label for="backup-tmp-dir">Temp directory</label>
+    <FolderInput id="backup-tmp-dir" bind:value={cfg.backup.tmp_dir} ariaLabel="Backup temp directory" />
+  </div>
+  <div class="folder-field">
+    <label for="backup-download-dir">Download directory</label>
+    <FolderInput id="backup-download-dir" bind:value={cfg.backup.download_dir} ariaLabel="Backup download directory" />
+  </div>
   <div class="row-2">
     <label>
       <span>Chunk size (individual files per batch)</span>

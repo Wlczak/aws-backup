@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #366 | — | Added an authenticated local folder browser/creator API and a reusable web picker for source, temp, mirror-download, and restore-target directory fields |
 | — | — | Dashboard, Files, Logs, Profiles, Restore, and Download now use shared shimmer skeletons for element-level loading feedback instead of leaving empty cards/tables while API calls are in flight |
 | #319 | — | Final write-buffer flush is now a hard gate before `FinishRun`, so a failed drain aborts the run instead of finalizing it with S3 and SQLite out of sync |
 | #318 | — | `serve` now keeps waiting for engine shutdown after the 10s `Server.Shutdown` deadline expires, so `app.close()` does not tear down DB/storage while a run or post-run DB sync is still draining |

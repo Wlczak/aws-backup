@@ -9,6 +9,7 @@
   import { bytes } from '../lib/format';
   import { toast } from '../lib/toast';
   import { paths as selectionPaths, clear as clearSelection } from '../lib/selection';
+  import FolderInput from '../components/FolderInput.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
   import Skeleton from '../components/Skeleton.svelte';
 
@@ -532,12 +533,11 @@
     directory is configured.
   </p>
   <div class="download-form">
-    <input
-      type="text"
+    <FolderInput
+      id="restore-download-target"
       bind:value={downloadTargetDir}
       placeholder="/absolute/path/to/restore"
-      class="target-input mono"
-      aria-label="Target directory"
+      ariaLabel="Target directory"
     />
     <label class="verify">
       <input type="checkbox" bind:checked={verifyChecksum} />
@@ -795,17 +795,6 @@
     color: var(--muted);
     font-size: 0.9rem;
     overflow-wrap: anywhere;
-  }
-  .target-input {
-    flex: 1 1 320px;
-    min-width: 0;
-    padding: 0.45rem 0.6rem;
-    font-size: 0.9rem;
-    font-family: var(--mono, monospace);
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
-    border-radius: 4px;
   }
   .small { font-size: 0.85rem; }
   details ul { margin: 0.5rem 0 0; padding-left: 1.25rem; max-height: 220px; overflow: auto; }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type Config } from '../../lib/api';
   import { toast } from '../../lib/toast';
+  import FolderInput from '../../components/FolderInput.svelte';
 
   type Props = { cfg: Config };
   let { cfg = $bindable() }: Props = $props();
@@ -27,10 +28,10 @@
   </label>
 
   {#if cfg.source.type === 'localdir'}
-    <label>
-      <span>Root path</span>
-      <input type="text" bind:value={cfg.source.localdir.root} placeholder="/path/to/files" />
-    </label>
+    <div class="folder-field">
+      <label for="source-root">Root path</label>
+      <FolderInput id="source-root" bind:value={cfg.source.localdir.root} placeholder="/path/to/files" ariaLabel="Source root path" />
+    </div>
   {:else if cfg.source.type === 'smb'}
     <div class="row-2">
       <label>

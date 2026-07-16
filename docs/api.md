@@ -40,6 +40,8 @@ DELETE /api/files                     batch delete by ids[]
 # Settings
 GET    /api/settings                  redacted config + pending_apply flag
 PUT    /api/settings                  validate + apply (or queue if a run is in flight)
+GET    /api/folders                   ?path=/abs/path → current/parent/root metadata + immediate child directories; omitted path starts at the server user's home directory
+POST   /api/folders                   {parent: "/abs/path", name: "child"} → create one child directory and return its path
 GET    /api/profiles                  profiles + active_profile + switch-blocking state
 POST   /api/profiles                  {name, clone_active} create a profile; cloned profiles clear s3.bucket + sqs.queue_url
 PUT    /api/profiles/active           {name} switch active profile; 409 unless backup/download/restore jobs and pending settings are idle
@@ -78,6 +80,8 @@ dashboard dependencies on high-frequency `scan_progress` / `upload_progress`
 frames unless they provide a visible improvement that `/api/status` cannot.
 
 Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
+
+The folder API browses the filesystem visible to the server process, not the browser machine. `GET /api/folders` lists directories only and includes filesystem roots so the web picker can navigate across volumes. `POST /api/folders` accepts exactly one child name under an existing absolute parent; nested names and traversal segments are rejected. Both endpoints are authenticated because directory names and creation permissions expose host filesystem information.
 
 `POST /api/client-logs` is intentionally public so the browser can queue uncaught runtime errors, request failures, console warnings, and toast events before the session is authenticated. The ingest handler still only accepts same-origin requests because the `/api` tree is protected by `originGuard`.
 

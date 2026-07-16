@@ -387,6 +387,8 @@ func (s *Server) Router() http.Handler {
 
 			r.Get("/settings", s.handleGetSettings)
 			r.Put("/settings", s.handlePutSettings)
+			r.Get("/folders", s.handleListFolders)
+			r.Post("/folders", s.handleCreateFolder)
 			r.Get("/profiles", s.handleListProfiles)
 			r.Post("/profiles", s.handleCreateProfile)
 			r.Put("/profiles/active", s.handleSwitchProfile)

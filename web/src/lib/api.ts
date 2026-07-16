@@ -626,6 +626,18 @@ export interface ProfilesResponse {
   blocked_reason?: string;
 }
 
+export interface FolderEntry {
+  name: string;
+  path: string;
+}
+
+export interface FoldersResponse {
+  path: string;
+  parent?: string;
+  roots: FolderEntry[];
+  folders: FolderEntry[];
+}
+
 // Mirror of the Go `config.Config` tree exposed by /api/settings.
 // Credential-like fields are returned as "***" by the server and, if
 // sent back unchanged, are preserved by its mergeSecrets step.
@@ -866,6 +878,17 @@ export const api = {
   settings: () => request<SettingsResponse>('/api/settings'),
   updateSettings: (cfg: Config) =>
     request<SettingsResponse>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+  folders: (path?: string) => {
+    const qs = new URLSearchParams();
+    if (path) qs.set('path', path);
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : '';
+    return request<FoldersResponse>(`/api/folders${suffix}`);
+  },
+  createFolder: (parent: string, name: string) =>
+    request<FolderEntry>('/api/folders', {
+      method: 'POST',
+      body: JSON.stringify({ parent, name }),
+    }),
   profiles: () => request<ProfilesResponse>('/api/profiles'),
   createProfile: (name: string, cloneActive = true) =>
     request<ProfileInfo>('/api/profiles', {

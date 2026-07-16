@@ -167,6 +167,14 @@
     color: var(--muted);
     margin-bottom: 0.65rem;
   }
+  :global(.card .folder-field) {
+    display: grid;
+    gap: 0.3rem;
+    margin-bottom: 0.65rem;
+  }
+  :global(.card .folder-field > label) {
+    margin-bottom: 0;
+  }
   :global(.card label.checkbox) {
     grid-template-columns: auto 1fr;
     align-items: start;
