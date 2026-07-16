@@ -1,6 +1,7 @@
-// Typed wrappers around the aws-backup HTTP API. Kept free of UI concerns
-// so pages + components can import without pulling in Svelte.
+// Typed wrappers around the aws-backup HTTP API. Requests also feed the
+// shared activity counter; route-specific response handling stays in pages.
 import { recordClientLog } from './client-logs';
+import { beginApiRequest } from './api-activity';
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_only' | 'missing';
@@ -727,6 +728,15 @@ export function setUnauthorizedHandler(handler: (() => void) | null) {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const finish = beginApiRequest();
+  try {
+    return await performRequest<T>(path, init);
+  } finally {
+    finish();
+  }
+}
+
+async function performRequest<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {

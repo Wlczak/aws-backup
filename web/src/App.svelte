@@ -11,6 +11,7 @@
   import Restore from './routes/Restore.svelte';
   import Profiles from './routes/Profiles.svelte';
   import Toaster from './components/Toaster.svelte';
+  import ApiActivity from './components/ApiActivity.svelte';
   import ProfileSwitcher from './components/ProfileSwitcher.svelte';
   import { onMount } from 'svelte';
 
@@ -99,6 +100,8 @@
     };
   });
 </script>
+
+<ApiActivity />
 
 {#if authPhase === 'authenticated'}
   <div class="shell">

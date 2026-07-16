@@ -23,6 +23,7 @@ If the central config has no password hash yet, `serve` comes up locked and the 
 - Hash router; any path that doesn't resolve under `dist/` falls back to `index.html`
 - `web/src/lib/api.ts` is the typed fetch wrapper layer — keep `Config`, `SettingsResponse`, etc. in sync with `internal/config` and the API handlers
 - `web/src/lib/api.ts` also owns the login/logout/status helpers and the `401` handler hook used to fall back to the sign-in screen
+- The shared API wrapper increments `web/src/lib/api-activity.ts`; `ApiActivity.svelte` shows one delayed global busy cue for requests lasting at least 200 ms, avoiding route-specific loading gaps and fast-poll flicker
 - `web/src/lib/toast.ts` is the canonical path for transient feedback (avoid `alert()`)
 - `npm run lint` runs ESLint across the frontend `js`/`ts`/`svelte` sources; CI includes it in the lint job alongside the Go checks
 - Settings is split into per-section sub-routes under `/settings/<section>`; each sub-component takes `bind:cfg` and edits a slice of the Config tree
