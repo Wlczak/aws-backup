@@ -74,6 +74,7 @@
   let inventoryLoaded = $state(false);
   let restoreStatusLoaded = $state(false);
   let restoreJobActive = $state(false);
+  let restoreJobOutcome = $state<RestoreJobSummary | null>(null);
   let restoreStatusRequestSeq = 0;
 
   // Guard async writes against assigning to torn-down state if the route
@@ -172,6 +173,7 @@
     const job = status.restore_job_current ?? status.restore_job_last;
     if (!job) return;
     if (job.status === 'running') {
+      restoreJobOutcome = null;
       if (job.kind === 'trigger') {
         triggerProgress = { processed: job.processed, total: job.total };
         triggerResult = null;
@@ -191,6 +193,8 @@
       }
       return;
     }
+
+    restoreJobOutcome = job.status === 'failed' || job.status === 'cancelled' ? job : null;
 
     if (job.kind === 'trigger') {
       triggerProgress = null;
@@ -611,6 +615,20 @@
   </div>
 {/if}
 
+{#if restoreJobOutcome}
+  <div class="card restore-job-outcome {restoreJobOutcome.status}">
+    <div class="label">Restore job #{restoreJobOutcome.id}</div>
+    <div class="big">{restoreJobOutcome.status === 'cancelled' ? 'Cancelled' : 'Failed'}</div>
+    <p class="muted small">
+      {restoreJobOutcome.kind === 'inventory' ? 'Inventory sync' : 'Retrieval request'}
+      stopped during the {restoreJobOutcome.phase} phase.
+    </p>
+    {#if restoreJobOutcome.error_message}
+      <p class="err mono small">{restoreJobOutcome.error_message}</p>
+    {/if}
+  </div>
+{/if}
+
 {#if estimate}
   <div class="card">
     <div class="label">Estimate</div>
@@ -689,6 +707,8 @@
 
 <style>
   .err { color: var(--err); border-color: var(--err); }
+  .restore-job-outcome.failed { border-color: var(--err); }
+  .restore-job-outcome.cancelled { border-color: var(--warn); }
   .warn { color: var(--warn); }
   .label { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
   textarea {
