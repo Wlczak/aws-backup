@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/Wlczak/aws-backup/internal/pathutil"
@@ -18,6 +19,7 @@ type CloudFile struct {
 	Path   string
 	ZipKey string
 	S3Key  string
+	Size   int64
 }
 
 // CloudIndex is the set of source-relative paths currently backed up to
@@ -126,17 +128,33 @@ func readIndexInto(ctx context.Context, s storage.Storage, indexKey, zipKey stri
 	// be explicit for readability.
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
+		entryPath, size := parseZipIndexLine(sc.Text())
+		if entryPath == "" {
 			continue
 		}
-		if _, seen := idx.Files[line]; seen {
+		if _, seen := idx.Files[entryPath]; seen {
 			// Same file indexed in multiple zips (e.g. re-uploaded version)
 			// — keep the first occurrence; caller treats "present in cloud"
 			// as a boolean.
 			continue
 		}
-		idx.Files[line] = CloudFile{Path: line, ZipKey: zipKey}
+		idx.Files[entryPath] = CloudFile{Path: entryPath, ZipKey: zipKey, Size: size}
 	}
 	return sc.Err()
+}
+
+// parseZipIndexLine accepts both current "size<TAB>path" records and
+// legacy path-only records. Legacy entries have no recoverable member size.
+func parseZipIndexLine(line string) (string, int64) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", 0
+	}
+	if rawSize, entryPath, ok := strings.Cut(line, "\t"); ok && entryPath != "" {
+		size, err := strconv.ParseInt(rawSize, 10, 64)
+		if err == nil && size >= 0 {
+			return entryPath, size
+		}
+	}
+	return line, 0
 }

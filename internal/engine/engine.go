@@ -1215,8 +1215,8 @@ func (e *Engine) readIndexPaths(ctx context.Context, indexKey string) ([]string,
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" {
-			paths = append(paths, line)
+		if entryPath, _ := parseZipIndexLine(sc.Text()); entryPath != "" {
+			paths = append(paths, entryPath)
 		}
 	}
 	return paths, sc.Err()
@@ -1426,11 +1426,11 @@ func (e *Engine) uploadStagedZip(ctx context.Context, runID int64, item stagedIt
 	// from under it. (#240)
 	indexWrittenThisRun := false
 	if e.opts.EnableZipIndex {
-		entryPaths := make([]string, 0, len(item.zipEntries))
+		var index strings.Builder
 		for _, entry := range item.zipEntries {
-			entryPaths = append(entryPaths, entry.Path)
+			fmt.Fprintf(&index, "%d\t%s\n", entry.Size, entry.Path)
 		}
-		indexBody := strings.Join(entryPaths, "\n") + "\n"
+		indexBody := index.String()
 		indexSum := sha256.Sum256([]byte(indexBody))
 		indexSHA256 := hex.EncodeToString(indexSum[:])
 		if e.skipIfMatches(ctx, item.indexKey, indexSHA256) {

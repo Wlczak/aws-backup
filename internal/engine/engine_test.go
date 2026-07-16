@@ -211,20 +211,23 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 		}
 	}
 
-	// Sidecar index lists every entry in the zip, newline-separated, and
-	// was uploaded to STANDARD so it can be read without a Glacier restore.
+	// Sidecar index lists every entry with its source size and was uploaded
+	// to STANDARD so it can be read without a Glacier restore.
 	indexKey := zipKey + ".index.txt"
 	indexBytes, ok := store.GetBytes(indexKey)
 	if !ok {
 		t.Fatalf("missing zip index sidecar at %s", indexKey)
 	}
-	gotEntries := map[string]struct{}{}
+	gotEntries := map[string]int64{}
 	for _, line := range strings.Split(strings.TrimRight(string(indexBytes), "\n"), "\n") {
-		gotEntries[line] = struct{}{}
+		entryPath, size := parseZipIndexLine(line)
+		gotEntries[entryPath] = size
 	}
-	for k := range want {
+	for k, contents := range want {
 		if _, present := gotEntries[k]; !present {
 			t.Errorf("zip index missing entry %q (body=%q)", k, string(indexBytes))
+		} else if gotEntries[k] != int64(len(contents)) {
+			t.Errorf("zip index size for %q=%d want %d", k, gotEntries[k], len(contents))
 		}
 	}
 	head, err := store.Head(ctx, indexKey)

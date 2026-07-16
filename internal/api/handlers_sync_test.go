@@ -138,7 +138,7 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 	mustPut("backups/photos/a.jpg", "x")
 	mustPut("backups/docs/docs_1.zip", "zipbytes")
-	mustPut("backups/docs/docs_1.zip.index.txt", "docs/spec.pdf\nrestore-me.jpg\n")
+	mustPut("backups/docs/docs_1.zip.index.txt", "20\tdocs/spec.pdf\n42\trestore-me.jpg\n")
 	mustPut("backups/pending-on-s3.txt", "pending")
 	mustPut("backups/recoverable.txt", "recoverable")
 	// Note: backups/gone-locally.txt is intentionally ABSENT to exercise
@@ -156,11 +156,11 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// Local file set after sync = {gone-cloud.txt, new-on-disk.txt}.
-	// gone-locally and recoverable are cloud-backed, while the uploaded
-	// S3-present rows are already normalized into uploaded/cloud_only.
-	if body.LocalFileCount != 2 {
-		t.Errorf("LocalFileCount: got %d want 2 (body=%+v)", body.LocalFileCount, body)
+	// Local file set after sync includes every source-present row, whether
+	// or not it is also backed by S3. gone-locally and recoverable are the
+	// two source-absent rows.
+	if body.LocalFileCount != 5 {
+		t.Errorf("LocalFileCount: got %d want 5 (body=%+v)", body.LocalFileCount, body)
 	}
 	// Cloud index = {photos/a.jpg (standalone), docs/spec.pdf,
 	// restore-me.jpg, pending-on-s3.txt, recoverable.txt}.
@@ -174,8 +174,11 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 
 	sort.Strings(body.CloudMissingFromLocal)
-	if len(body.CloudMissingFromLocal) != 5 {
-		t.Errorf("CloudMissingFromLocal: got %v want 5 entries", body.CloudMissingFromLocal)
+	if strings.Join(body.CloudMissingFromLocal, ",") != "recoverable.txt,restore-me.jpg" {
+		t.Errorf("CloudMissingFromLocal: got %v want [recoverable.txt restore-me.jpg]", body.CloudMissingFromLocal)
+	}
+	if body.CloudMissingCount != 2 {
+		t.Errorf("CloudMissingCount: got %d want 2", body.CloudMissingCount)
 	}
 
 	if body.ZipIndexesConsumed != 1 {
@@ -253,6 +256,26 @@ func TestSyncFullReportsLocalAndCloudDiffs(t *testing.T) {
 	}
 	if restoreRows[0].S3Key != "backups/docs/docs_1.zip" {
 		t.Errorf("restore-me s3_key=%q want backups/docs/docs_1.zip", restoreRows[0].S3Key)
+	}
+	if restoreRows[0].Size != 42 {
+		t.Errorf("restore-me size=%d want 42", restoreRows[0].Size)
+	}
+
+	// A second authoritative pass must preserve the same diff. In
+	// particular, S3-present cloud_only rows must not be relabelled uploaded
+	// and then mistaken for source-present rows on the next compare.
+	rr = httptest.NewRecorder()
+	srv.handleSyncFull(rr, httptest.NewRequest(http.MethodPost, "/api/sync/full", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second sync status: %d", rr.Code)
+	}
+	var second fullSyncResponse
+	if err := json.NewDecoder(rr.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second sync: %v", err)
+	}
+	sort.Strings(second.CloudMissingFromLocal)
+	if strings.Join(second.CloudMissingFromLocal, ",") != "recoverable.txt,restore-me.jpg" {
+		t.Errorf("second CloudMissingFromLocal: got %v want [recoverable.txt restore-me.jpg]", second.CloudMissingFromLocal)
 	}
 }
 

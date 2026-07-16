@@ -260,9 +260,9 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 					})
 					continue
 				}
-				fields, err := buildFields(cf, db.StatusUploaded)
+				fields, err := buildFields(cf, db.StatusCloudOnly)
 				if err != nil {
-					return fullSyncResponse{}, fmt.Errorf("build uploaded fields for %s: %w", f.Path, err)
+					return fullSyncResponse{}, fmt.Errorf("build cloud-only fields for %s: %w", f.Path, err)
 				}
 				promoteUploaded = append(promoteUploaded, db.FileUpdate{
 					ID:     f.ID,
@@ -270,6 +270,10 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 				})
 				continue
 			}
+			// Every remaining status represents a row still present on the
+			// source. Track it independently from cloud membership so the
+			// cloud-minus-local diff does not report healthy uploaded rows.
+			localPaths[f.Path] = struct{}{}
 			if cf, ok := idx.Files[f.Path]; ok {
 				if f.Status != db.StatusUploaded {
 					fields, err := buildFields(cf, db.StatusUploaded)
@@ -281,10 +285,6 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 						Fields: fields,
 					})
 				}
-				continue
-			}
-			localPaths[f.Path] = struct{}{}
-			if _, ok := idx.Files[f.Path]; ok {
 				continue
 			}
 			if f.Status != db.StatusPending || f.MD5 != "" || f.ZipName != "" || f.S3Key != "" || !f.UploadedAt.IsZero() {
@@ -318,7 +318,7 @@ func (s *Server) runSyncCloudCompare(ctx context.Context, st storage.Storage) (f
 		cf := idx.Files[p]
 		row := db.File{
 			Path:       p,
-			Size:       0,
+			Size:       cf.Size,
 			MTime:      time.Unix(0, 0).UTC(),
 			Status:     db.StatusCloudOnly,
 			LastSeenAt: now,

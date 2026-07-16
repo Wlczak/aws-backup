@@ -63,7 +63,7 @@ POST   /api/restore/scan/pending       HEADs only rows currently marked `in_prog
 GET    /api/restore/jobs/{id}         restore-trigger / inventory-sync job lookup for reload recovery
 
 # Sync / reconcile
-POST   /api/sync                      authoritative cloud compare; lists bucket objects + zip indexes, compares them to the locally scanned rows, recreates cloud-only objects as `cloud_only`, and normalizes S3-present rows into `uploaded` or `cloud_only`
+POST   /api/sync                      authoritative cloud compare; lists bucket objects + zip indexes, compares them to source-present rows, recreates cloud-only objects as `cloud_only`, and normalizes S3-present rows into `uploaded` or `cloud_only`; cloud_missing_from_local excludes healthy rows that exist both locally and in S3
 POST   /api/sync/full                 same authoritative cloud compare (compatibility alias)
 POST   /api/sync/delete-cloud-paths   {paths: []} → delete corresponding S3 objects/zips
 

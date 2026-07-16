@@ -49,6 +49,7 @@ type Group struct {
 type ZipEntry struct {
 	Path string
 	MD5  string
+	Size int64
 }
 
 // rootDirLabel is the fake "directory" name used when naming zips that
@@ -421,7 +422,7 @@ func CreateZip(ctx context.Context, src source.Source, files []PendingFile, outP
 			zw.Close()
 			return 0, nil, "", "", fmt.Errorf("zip %s: %w", f.RelPath, err)
 		}
-		entries = append(entries, ZipEntry{Path: f.RelPath, MD5: md5hex})
+		entries = append(entries, ZipEntry{Path: f.RelPath, MD5: md5hex, Size: f.Size})
 	}
 	if err := zw.Close(); err != nil {
 		return 0, nil, "", "", err

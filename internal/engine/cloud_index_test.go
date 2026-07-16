@@ -17,7 +17,7 @@ func TestLoadCloudIndex(t *testing.T) {
 	// index listing its entries. Also two standalone keys.
 	mustPut(t, mem, "backups/photos/2024/photos_2024_1.zip", "binaryzipdata-1")
 	mustPut(t, mem, "backups/photos/2024/photos_2024_1.zip.index.txt",
-		"photos/2024/a.jpg\nphotos/2024/b.jpg\n")
+		"123\tphotos/2024/a.jpg\n456\tphotos/2024/b.jpg\n")
 	mustPut(t, mem, "backups/docs/docs_1.zip", "binaryzipdata-2")
 	mustPut(t, mem, "backups/docs/docs_1.zip.index.txt",
 		"docs/readme.md\ndocs/spec.pdf\n")
@@ -59,6 +59,12 @@ func TestLoadCloudIndex(t *testing.T) {
 
 	if z := idx.Files["photos/2024/a.jpg"].ZipKey; z != "backups/photos/2024/photos_2024_1.zip" {
 		t.Errorf("zip key mismatch: %q", z)
+	}
+	if size := idx.Files["photos/2024/a.jpg"].Size; size != 123 {
+		t.Errorf("zip member size: got %d want 123", size)
+	}
+	if size := idx.Files["docs/readme.md"].Size; size != 0 {
+		t.Errorf("legacy zip member size: got %d want 0", size)
 	}
 	if f := idx.Files["loose/notes.txt"]; f.S3Key != "backups/loose/notes.txt" || f.ZipKey != "" {
 		t.Errorf("standalone record: %+v", f)
