@@ -171,15 +171,13 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("save password: %w", err))
 		return
 	}
-	cookie, err := buildAuthCookie(central.Auth.PasswordHash)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	http.SetCookie(w, cookie)
+	// Creating the credential is deliberately separate from proving it.
+	// Clear any stale cookie and require a normal login before setup can
+	// access authenticated settings endpoints.
+	http.SetCookie(w, clearAuthCookie())
 	writeJSON(w, http.StatusOK, authStatusResponse{
 		PasswordSet:   true,
-		Authenticated: true,
+		Authenticated: false,
 		SetupRequired: true,
 	})
 }

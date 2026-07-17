@@ -7,7 +7,7 @@
 
   type Props = {
     status: AuthStatus;
-    onStatus: (status: AuthStatus) => void;
+    onStatus: (status: AuthStatus, loggedOutMessage?: string) => void;
   };
   let { status, onStatus }: Props = $props();
 
@@ -49,12 +49,11 @@
     }
     busy = true;
     try {
-      status = await api.setupPassword(password);
+      const nextStatus = await api.setupPassword(password);
       password = '';
       confirmation = '';
-      step = 1;
       toast.success('Password created.');
-      await loadSettings();
+      onStatus(nextStatus, 'Password created. Sign in to continue setup.');
     } catch (e) {
       error = String(e);
       toast.error(`Could not create password: ${e}`);

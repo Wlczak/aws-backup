@@ -18,9 +18,9 @@ This project just a specific solution for my specific problem and while it is fa
   double-click `aws-backup-windows-amd64.exe`; it starts the local server and
   opens the setup guide in your default browser.
 
-- **2.** Create a login password, choose a local folder or SMB share, and
-  connect an existing S3 bucket in the web guide. No config-file editing is
-  required.
+- **2.** Create and then sign in with a login password, choose a local folder
+  or SMB share, and connect an existing S3 bucket in the web guide. No
+  config-file editing is required.
 
 - **3.** Open the dashboard and start the first backup when ready. Backups are
   manual until a schedule is configured.

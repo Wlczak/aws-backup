@@ -33,12 +33,11 @@ func TestAuthSetupCreatesPasswordOnceAndKeepsSetupGate(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
-	if !status.PasswordSet || !status.Authenticated || !status.SetupRequired {
+	if !status.PasswordSet || status.Authenticated || !status.SetupRequired {
 		t.Fatalf("status=%+v", status)
 	}
-	cookies := resp.Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("cookies=%v", cookies)
+	if got := resp.Header.Get("Set-Cookie"); got == "" || !bytes.Contains([]byte(got), []byte("Max-Age=0")) {
+		t.Fatalf("setup Set-Cookie = %q, want clearing cookie", got)
 	}
 	central, err := config.LoadCentral(centralPath)
 	if err != nil {
@@ -48,8 +47,25 @@ func TestAuthSetupCreatesPasswordOnceAndKeepsSetupGate(t *testing.T) {
 		t.Fatalf("saved password does not verify: %v", err)
 	}
 
+	unauthenticated, err := ts.Client().Get(ts.URL + "/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthenticated.Body.Close()
+	if unauthenticated.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("settings status=%d want %d", unauthenticated.StatusCode, http.StatusUnauthorized)
+	}
+
+	login, err := ts.Client().Post(ts.URL+"/api/auth/login", "application/json", bytes.NewBufferString(`{"password":"s3cr3t"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	login.Body.Close()
+	if login.StatusCode != http.StatusOK || len(login.Cookies()) != 1 {
+		t.Fatalf("login status=%d cookies=%v", login.StatusCode, login.Cookies())
+	}
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/status", nil)
-	req.AddCookie(cookies[0])
+	req.AddCookie(login.Cookies()[0])
 	gated, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

@@ -33,7 +33,7 @@
   let authBusy = $state(false);
   let authMessage = $state('');
 
-  function applyAuth(status: AuthStatus) {
+  function applyAuth(status: AuthStatus, loggedOutMessage?: string) {
     authStatus = status;
     if (!status.password_set) {
       authPhase = 'password-setup';
@@ -46,7 +46,9 @@
       : status.setup_required
         ? 'onboarding'
         : 'authenticated';
-    authMessage = status.authenticated ? '' : 'Enter the password to unlock the app.';
+    authMessage = status.authenticated
+      ? ''
+      : (loggedOutMessage ?? 'Enter the password to unlock the app.');
     if (status.authenticated) {
       authPassword = '';
     }
@@ -95,9 +97,11 @@
       onError: (message) => toast.error(message),
     });
     setUnauthorizedHandler(() => {
-      if (authPhase === 'authenticated') {
-        authPhase = 'logged-out';
-        authMessage = 'Session expired. Please sign in again.';
+      if (authPhase === 'authenticated' || authPhase === 'onboarding') {
+        applyAuth(
+          { ...authStatus, authenticated: false },
+          'Session expired. Please sign in again to continue.',
+        );
       }
     });
     void refreshAuth();
