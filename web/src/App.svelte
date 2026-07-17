@@ -13,6 +13,7 @@
   import Toaster from './components/Toaster.svelte';
   import ApiActivity from './components/ApiActivity.svelte';
   import ProfileSwitcher from './components/ProfileSwitcher.svelte';
+  import Onboarding from './routes/Onboarding.svelte';
   import { onMount } from 'svelte';
 
   const tabs = [
@@ -24,21 +25,27 @@
     { id: 'restore', label: 'Restore' },
   ];
 
-  type AuthPhase = 'checking' | 'locked' | 'logged-out' | 'authenticated';
+  type AuthPhase = 'checking' | 'password-setup' | 'logged-out' | 'onboarding' | 'authenticated';
 
   let authPhase = $state<AuthPhase>('checking');
+  let authStatus = $state<AuthStatus>({ password_set: false, authenticated: false, setup_required: true });
   let authPassword = $state('');
   let authBusy = $state(false);
   let authMessage = $state('');
 
   function applyAuth(status: AuthStatus) {
+    authStatus = status;
     if (!status.password_set) {
-      authPhase = 'locked';
+      authPhase = 'password-setup';
       authMessage = 'No password is configured yet.';
       authPassword = '';
       return;
     }
-    authPhase = status.authenticated ? 'authenticated' : 'logged-out';
+    authPhase = !status.authenticated
+      ? 'logged-out'
+      : status.setup_required
+        ? 'onboarding'
+        : 'authenticated';
     authMessage = status.authenticated ? '' : 'Enter the password to unlock the app.';
     if (status.authenticated) {
       authPassword = '';
@@ -143,19 +150,14 @@
       {/if}
     </main>
   </div>
+{:else if authPhase === 'password-setup' || authPhase === 'onboarding'}
+  <Onboarding status={authStatus} onStatus={applyAuth} />
 {:else}
   <div class="auth-shell">
     <div class="auth-card">
       <div class="brand">aws-backup</div>
       {#if authPhase === 'checking'}
         <p class="muted">Checking authentication…</p>
-      {:else if authPhase === 'locked'}
-        <h1>Set a password first</h1>
-        <p class="muted">
-          This server is locked until an operator creates a password with
-          <code>./aws-backup passwd</code>.
-        </p>
-        <p class="muted">{authMessage}</p>
       {:else}
         <h1>Sign in</h1>
         <p class="muted">{authMessage}</p>

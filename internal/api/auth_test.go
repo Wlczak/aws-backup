@@ -21,6 +21,7 @@ func newAuthTestServer(t *testing.T, password string) (*testServer, Deps) {
 		t.Fatalf("hash password: %v", err)
 	}
 	central.Auth.PasswordHash = string(hash)
+	central.MarkSetupCompleted()
 	if err := config.SaveCentral(centralPath, central); err != nil {
 		t.Fatalf("save central: %v", err)
 	}

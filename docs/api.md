@@ -6,9 +6,11 @@ Routes mounted in `internal/api/server.go`. JSON over HTTP; the SPA at `/` is se
 
 ```text
 # Auth
-GET    /api/auth/status             password_set + authenticated flag for the login/bootstrap screen
+GET    /api/auth/status             password_set + authenticated + setup_required flags
+POST   /api/auth/setup              one-time {password} bootstrap; sets the auth cookie
 POST   /api/auth/login              {password: "..."} → sets the auth cookie on success
 POST   /api/auth/logout             clears the auth cookie
+POST   /api/setup/complete          re-test persisted source + S3, then mark onboarding complete
 
 # Run lifecycle
 GET    /api/status                    current + last run (includes scan_paused / scan_complete / bytes_scanned), download mirror snapshot, restore-download current + last, stop_requested flag
@@ -79,7 +81,7 @@ things like restore/download jobs and the active run log. Avoid adding new
 dashboard dependencies on high-frequency `scan_progress` / `upload_progress`
 frames unless they provide a visible improvement that `/api/status` cannot.
 
-Every `/api/*` route except the three auth endpoints requires a valid signed auth cookie. The SPA assets remain public so the browser can load the login/bootstrap screen, but the data API stays locked until `passwd` has set a password and the user has logged in.
+Every `/api/*` route except the auth endpoints and browser-log ingest requires a valid signed auth cookie. While `setup_required=true`, authenticated access is further restricted to settings, folder browsing, source/S3 tests, and `POST /api/setup/complete`; operational routes return `428 Precondition Required`. The completion endpoint independently validates the full config and repeats both connectivity tests before persisting `setup_completed=true`.
 
 The folder API browses the filesystem visible to the server process, not the browser machine. `GET /api/folders` lists directories only and includes filesystem roots so the web picker can navigate across volumes. `POST /api/folders` accepts exactly one child name under an existing absolute parent; nested names and traversal segments are rejected. Both endpoints are authenticated because directory names and creation permissions expose host filesystem information.
 

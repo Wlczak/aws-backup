@@ -25,6 +25,7 @@ const (
 type authStatusResponse struct {
 	PasswordSet   bool `json:"password_set"`
 	Authenticated bool `json:"authenticated"`
+	SetupRequired bool `json:"setup_required"`
 }
 
 type authLoginRequest struct {
@@ -57,16 +58,20 @@ func (s *Server) authState(r *http.Request) (authStatusResponse, string, error) 
 	}
 	if !enabled {
 		// Tests and non-auth setups can omit the central config path.
-		return authStatusResponse{PasswordSet: false, Authenticated: true}, "", nil
+		return authStatusResponse{PasswordSet: false, Authenticated: true, SetupRequired: false}, "", nil
 	}
 	if central.Auth.PasswordHash == "" {
-		return authStatusResponse{PasswordSet: false, Authenticated: false}, "", nil
+		return authStatusResponse{PasswordSet: false, Authenticated: false, SetupRequired: true}, "", nil
 	}
 	ok, err := verifyAuthCookie(r, central.Auth.PasswordHash)
 	if err != nil {
 		return authStatusResponse{}, "", err
 	}
-	return authStatusResponse{PasswordSet: true, Authenticated: ok}, central.Auth.PasswordHash, nil
+	return authStatusResponse{
+		PasswordSet:   true,
+		Authenticated: ok,
+		SetupRequired: central.SetupRequired(),
+	}, central.Auth.PasswordHash, nil
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {
@@ -92,6 +97,32 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 	})
 }
 
+// setupRequired keeps an authenticated but incomplete installation confined
+// to the APIs used by the onboarding wizard.
+func (s *Server) setupRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.deps.CentralConfigPath == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		central, _, err := s.authConfig()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !central.SetupRequired() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/settings", "/api/folders", "/api/smb/test", "/api/s3/test", "/api/setup/complete":
+			next.ServeHTTP(w, r)
+		default:
+			writeError(w, http.StatusPreconditionRequired, errors.New("initial setup is not complete"))
+		}
+	})
+}
+
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	state, _, err := s.authState(r)
 	if err != nil {
@@ -99,6 +130,58 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
+	if s.deps.CentralConfigPath == "" {
+		writeError(w, http.StatusServiceUnavailable, errors.New("authentication is not configured"))
+		return
+	}
+	var req authLoginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%w: %v", errBadJSON, err))
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("password is required"))
+		return
+	}
+
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	central, err := config.LoadCentral(s.deps.CentralConfigPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if central.Auth.PasswordHash != "" {
+		writeError(w, http.StatusConflict, errors.New("password is already configured"))
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("hash password: %w", err))
+		return
+	}
+	if central.SetupCompleted == nil {
+		central.MarkSetupRequired()
+	}
+	central.Auth.PasswordHash = string(hash)
+	if err := config.SaveCentral(s.deps.CentralConfigPath, central); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("save password: %w", err))
+		return
+	}
+	cookie, err := buildAuthCookie(central.Auth.PasswordHash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	http.SetCookie(w, cookie)
+	writeJSON(w, http.StatusOK, authStatusResponse{
+		PasswordSet:   true,
+		Authenticated: true,
+		SetupRequired: true,
+	})
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +219,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, cookie)
-	writeJSON(w, http.StatusOK, authStatusResponse{PasswordSet: true, Authenticated: true})
+	writeJSON(w, http.StatusOK, authStatusResponse{
+		PasswordSet:   true,
+		Authenticated: true,
+		SetupRequired: central.SetupRequired(),
+	})
 }
 
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {

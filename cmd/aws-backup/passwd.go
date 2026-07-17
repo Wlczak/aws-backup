@@ -58,6 +58,9 @@ func setCentralPasswordHash(path, password string) error {
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
 	}
+	if central.SetupCompleted == nil {
+		central.MarkSetupRequired()
+	}
 	central.Auth.PasswordHash = string(hash)
 	if err := config.SaveCentral(path, central); err != nil {
 		return fmt.Errorf("save central config: %w", err)

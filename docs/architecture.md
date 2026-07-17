@@ -141,6 +141,7 @@ aws-backup/
 | Pre-flight `ensureTmpSpace` | Cross-platform free-space check with 64 MiB margin before copy/zip (#138) |
 | Idle SQLite connection recycling | `database/sql` keeps the DB handle open but closes the underlying connection after 15 minutes of inactivity, then reopens it on demand |
 | Schedule triggers via HTTP, not in-process | The API serialises run launches; cron path uses the same 409 semantics |
+| Explicit first-run completion state | Fresh installs can serve a restricted setup API before source/S3 clients exist; configured legacy installs are grandfathered and normal operational routes remain gated until onboarding succeeds |
 | `Deps.ConfigMu` shared with `appState.mu` | Single mutex for cfg reads/writes across both sides (#153) |
 | File API cache keyed by DB revision | File-index GETs reuse serialized JSON for up to 5 minutes, while every GORM `files` write invalidates immediately; a 128 MiB / 1024-entry LRU bounds memory (#367) |
 
