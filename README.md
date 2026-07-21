@@ -14,28 +14,29 @@ This project just a specific solution for my specific problem and while it is fa
 
 ## Quick start
 
-- **0.** (dev only). Bring up MinIO (dev S3 backend on :9000, console on :9001)
-`make dev-up`
+- **1.** Download the release for your operating system. On Windows,
+  double-click `aws-backup-windows-amd64.exe`; it starts the local server and
+  opens the setup guide in your default browser.
 
-- **1a.** Download prebuilt
+- **2.** Create and then sign in with a login password, choose a local folder
+  or SMB share, and connect an existing S3 bucket in the web guide. No
+  config-file editing is required.
 
-- **1b.** Build the single binary (npm build + go build)
-`make build`
+- **3.** Open the dashboard and start the first backup when ready. Backups are
+  manual until a schedule is configured.
 
-- **2.** Start serve once to bootstrap config.json if it does not exist yet
-`./aws-backup serve`
-`./aws-backup config path`         # prints where it ended up
+For development, run `make dev-up` to start MinIO, then `make build`.
 
-- **3.** Run the server (HTTP + scheduler) and open the UI
-`./aws-backup serve` -> http://127.0.0.1:8080
-
-`aws-backup serve` uses `SIGINT`/`SIGTERM` for graceful shutdown.
+Running `aws-backup` with no command starts the server and opens the browser.
+Explicit `aws-backup serve` starts it without opening a browser. Both use
+`SIGINT`/`SIGTERM` for graceful shutdown.
 
 ## CLI
 
 ```text
-aws-backup [--config PATH] <command>
+aws-backup [--config PATH] [command]
 
+  (no command)      run the server and open the local web UI
   config init       write a default config.json (won't overwrite existing)
   config path       print the resolved config file path
   config validate   check the config is well-formed
@@ -50,7 +51,8 @@ Config file location defaults to the OS user config dir:
 - macOS: `~/Library/Application Support/aws-backup/config.json`
 - Windows: `%AppData%\aws-backup\config.json`
 
-The SQLite index (`index.db`) lives next to `config.json`.
+Each profile's SQLite index lives under the same OS config directory. The
+first-run web guide writes the configuration files on the user's behalf.
 
 ## Development
 

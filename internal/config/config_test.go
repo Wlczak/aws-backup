@@ -21,6 +21,35 @@ func TestDefaultScheduleDisabled(t *testing.T) {
 	}
 }
 
+func TestStarterProfileRequiresOnboardingWithoutDevCredentials(t *testing.T) {
+	central := DefaultCentral()
+	if !central.SetupRequired() {
+		t.Fatal("fresh central config should require setup")
+	}
+	profile := StarterProfile()
+	cfg := profile.ToConfig(central.Server)
+	if cfg.Source.Type != "" || cfg.S3.Bucket != "" || cfg.S3.Endpoint != "" {
+		t.Fatalf("starter unexpectedly configured: source=%q bucket=%q endpoint=%q", cfg.Source.Type, cfg.S3.Bucket, cfg.S3.Endpoint)
+	}
+	if cfg.S3.AccessKeyID != "" || cfg.S3.SecretAccessKey != "" {
+		t.Fatal("starter contains credentials")
+	}
+	if err := cfg.ValidateForSetup(); err != nil {
+		t.Fatalf("starter bootstrap validation: %v", err)
+	}
+}
+
+func TestLegacyCentralWithPasswordIsGrandfathered(t *testing.T) {
+	central := CentralConfig{
+		ActiveProfile: "default",
+		Server:        Default().Server,
+		Auth:          AuthConfig{PasswordHash: "present"},
+	}
+	if central.SetupRequired() {
+		t.Fatal("legacy configured install should be grandfathered")
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "config.json")

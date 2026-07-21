@@ -791,12 +791,18 @@ async function performRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   authStatus: () => request<AuthStatus>('/api/auth/status'),
+  setupPassword: (password: string) =>
+    request<AuthStatus>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
   login: (password: string) =>
     request<AuthStatus>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
   logout: () => request<AuthStatus>('/api/auth/logout', { method: 'POST' }),
+  completeSetup: () => request<AuthStatus>('/api/setup/complete', { method: 'POST' }),
   status: () => request<Status>('/api/status'),
   runs: (page = 1, limit = 20, signal?: AbortSignal) =>
     request<RunsPage>(`/api/runs?page=${page}&limit=${limit}`, { signal }),
@@ -1021,6 +1027,7 @@ export interface InventoryStatus {
 export interface AuthStatus {
   password_set: boolean;
   authenticated: boolean;
+  setup_required: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -118,6 +118,14 @@ jobs:
         run: npm ci --prefer-offline --no-audit
         working-directory: web
 
+      - name: Audit dependencies
+        run: npm audit --audit-level=moderate
+        working-directory: web
+
+      - name: Build
+        run: npm run build
+        working-directory: web
+
       - name: Run ESLint
         run: npm run lint
         working-directory: web

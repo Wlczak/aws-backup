@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,54 @@ func TestSMBValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewSMB(tc.cfg); err == nil {
 				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestSMBOpenPathIsShareRelative(t *testing.T) {
+	tests := []struct {
+		name string
+		root string
+		rel  string
+		want string
+	}{
+		{
+			name: "share root with slash path",
+			rel:  "Photos 2023/IMG_9273.JPG",
+			want: "Photos 2023/IMG_9273.JPG",
+		},
+		{
+			name: "share root with leading slash",
+			rel:  "/Photos 2023/IMG_9273.JPG",
+			want: "Photos 2023/IMG_9273.JPG",
+		},
+		{
+			name: "windows separators",
+			root: `\Backups\Photos\`,
+			rel:  `2023\IMG_9273.JPG`,
+			want: "Backups/Photos/2023/IMG_9273.JPG",
+		},
+		{
+			name: "traversal remains under configured root",
+			root: "Backups/Photos",
+			rel:  "../../IMG_9273.JPG",
+			want: "Backups/Photos/IMG_9273.JPG",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &SMB{cfg: SMBConfig{Path: tt.root}}
+			got, err := src.openPath(tt.rel)
+			if err != nil {
+				t.Fatalf("openPath: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("openPath() = %q, want %q", got, tt.want)
+			}
+			if strings.HasPrefix(got, "/") || strings.HasPrefix(got, `\`) {
+				t.Fatalf("openPath() returned an absolute SMB path: %q", got)
 			}
 		})
 	}
