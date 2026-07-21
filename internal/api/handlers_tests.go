@@ -26,24 +26,26 @@ func (s *Server) handleTestSource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
 		return
 	}
+	writeJSON(w, http.StatusOK, testSourceConfig(r.Context(), cfg))
+}
+
+func testSourceConfig(ctx context.Context, cfg config.Config) testResult {
 	switch cfg.Source.Type {
 	case config.SourceLocalDir:
 		root := cfg.Source.LocalDir.Root
 		st, err := os.Stat(root)
 		if err != nil {
-			writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
-			return
+			return testResult{OK: false, Message: err.Error()}
 		}
 		if !st.IsDir() {
-			writeJSON(w, http.StatusOK, testResult{OK: false, Message: root + " is not a directory"})
-			return
+			return testResult{OK: false, Message: root + " is not a directory"}
 		}
-		writeJSON(w, http.StatusOK, testResult{OK: true, Message: "localdir root reachable"})
+		return testResult{OK: true, Message: "localdir root reachable"}
 	case config.SourceSMB:
 		// Bound the dial: source.FromConfig takes no ctx and the OS
 		// default TCP-connect timeout (~75–120 s) would otherwise pin a
 		// goroutine + FD per request against a black-holed host. (#177)
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		type result struct {
 			smb source.Source
@@ -57,13 +59,11 @@ func (s *Server) handleTestSource(w http.ResponseWriter, r *http.Request) {
 		select {
 		case res := <-ch:
 			if res.err != nil {
-				writeJSON(w, http.StatusOK, testResult{OK: false, Message: res.err.Error()})
-				return
+				return testResult{OK: false, Message: res.err.Error()}
 			}
 			_ = res.smb.Close()
-			writeJSON(w, http.StatusOK, testResult{OK: true, Message: "smb share reachable"})
+			return testResult{OK: true, Message: "smb share reachable"}
 		case <-ctx.Done():
-			writeJSON(w, http.StatusOK, testResult{OK: false, Message: "smb dial timed out after 10s"})
 			// Don't leak the goroutine OR the SMB connection it may yet
 			// establish: drain the late result and close any successful
 			// dial so we don't pile up FDs + sessions per timed-out test
@@ -74,9 +74,10 @@ func (s *Server) handleTestSource(w http.ResponseWriter, r *http.Request) {
 					_ = res.smb.Close()
 				}
 			}()
+			return testResult{OK: false, Message: "smb dial timed out after 10s"}
 		}
 	default:
-		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "unknown source type"})
+		return testResult{OK: false, Message: "source is not configured"}
 	}
 }
 
@@ -92,12 +93,15 @@ func (s *Server) handleTestStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	writeJSON(w, http.StatusOK, testStorageConfig(r.Context(), cfg))
+}
+
+func testStorageConfig(parent context.Context, cfg config.Config) testResult {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	if cfg.S3.Bucket == "" {
-		writeJSON(w, http.StatusOK, testResult{OK: false, Message: "s3 bucket is not configured"})
-		return
+		return testResult{OK: false, Message: "s3 bucket is not configured"}
 	}
 
 	client, err := storage.NewS3Storage(ctx, storage.S3Config{
@@ -110,22 +114,20 @@ func (s *Server) handleTestStorage(w http.ResponseWriter, r *http.Request) {
 		StorageClass:    cfg.S3.StorageClass,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
-		return
+		return testResult{OK: false, Message: err.Error()}
 	}
 	defer client.Close()
 
 	if err := client.HeadBucket(ctx); err != nil {
-		writeJSON(w, http.StatusOK, testResult{OK: false, Message: err.Error()})
-		return
+		return testResult{OK: false, Message: err.Error()}
 	}
 
 	target := "AWS S3"
 	if cfg.S3.Endpoint != "" {
 		target = cfg.S3.Endpoint
 	}
-	writeJSON(w, http.StatusOK, testResult{
+	return testResult{
 		OK:      true,
 		Message: "bucket reachable: " + cfg.S3.Bucket + " (" + target + ")",
-	})
+	}
 }
