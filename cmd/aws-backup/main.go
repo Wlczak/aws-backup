@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,8 +41,9 @@ func main() {
 	configPath := flag.String("config", "", "path to config.json (default: OS-specific user config dir)")
 	profileOverride := flag.String("profile", "", "profile to use for this process (overrides central active_profile)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: aws-backup [flags] <command>\n\n")
+		fmt.Fprintf(os.Stderr, "usage: aws-backup [flags] [command]\n\n")
 		fmt.Fprintf(os.Stderr, "commands:\n")
+		fmt.Fprintf(os.Stderr, "  (none)          run the HTTP server and open the local web UI\n")
 		fmt.Fprintf(os.Stderr, "  config init     write a default config.json (won't overwrite existing)\n")
 		fmt.Fprintf(os.Stderr, "  config path     print the resolved config file path\n")
 		fmt.Fprintf(os.Stderr, "  config validate check the config is well-formed\n")
@@ -68,8 +71,8 @@ func main() {
 
 	args := flag.Args()
 	if len(args) == 0 {
-		flag.Usage()
-		os.Exit(2)
+		runServe(path, *profileOverride, true)
+		return
 	}
 
 	switch args[0] {
@@ -80,7 +83,7 @@ func main() {
 	case "run":
 		runBackup(path, *profileOverride)
 	case "serve":
-		runServe(path, *profileOverride)
+		runServe(path, *profileOverride, false)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
 		flag.Usage()
@@ -125,7 +128,8 @@ type appState struct {
 	// inventoryMgr manages the bucket's S3 inventory configuration. nil
 	// only when storage is not an *storage.S3Storage (memory storage in
 	// tests).
-	inventoryMgr *inventory.Manager
+	inventoryMgr  *inventory.Manager
+	setupRequired bool
 }
 
 // loadAppState loads config + storage, refreshes the local index.db from
@@ -140,7 +144,12 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 		return nil, err
 	}
 	cfg := profile.ToConfig(central.Server)
-	if err := cfg.Validate(); err != nil {
+	setupRequired := central.SetupRequired()
+	validate := cfg.Validate
+	if setupRequired {
+		validate = cfg.ValidateForSetup
+	}
+	if err := validate(); err != nil {
 		return nil, fmt.Errorf("invalid config:\n%w", err)
 	}
 
@@ -157,9 +166,12 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 	}
 	_ = os.Chmod(dir, 0o700) // tighten loose existing dirs (#221)
 
-	store, err := openConfiguredStorage(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("init storage: %w", err)
+	var store storage.Storage
+	if !setupRequired {
+		store, err = openConfiguredStorage(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("init storage: %w", err)
+		}
 	}
 
 	dbPath := filepath.Join(dir, "index.db")
@@ -202,25 +214,29 @@ func loadAppState(ctx context.Context, cfgPath, profileOverride string, withBoot
 		}
 	}
 
-	src, err := source.FromConfig(cfg.Source)
-	if err != nil {
-		d.Close()
-		if store != nil {
-			store.Close()
+	var src source.Source
+	if !setupRequired {
+		src, err = source.FromConfig(cfg.Source)
+		if err != nil {
+			d.Close()
+			if store != nil {
+				store.Close()
+			}
+			return nil, fmt.Errorf("open source: %w", err)
 		}
-		return nil, fmt.Errorf("open source: %w", err)
 	}
 
 	return &appState{
-		cfg:         cfg,
-		cfgPath:     cfgPath,
-		profile:     activeProfile,
-		profilePath: profilePath,
-		db:          d,
-		src:         src,
-		store:       store,
-		bus:         events.NewBus(128),
-		dbPath:      dbPath,
+		cfg:           cfg,
+		cfgPath:       cfgPath,
+		profile:       activeProfile,
+		profilePath:   profilePath,
+		db:            d,
+		src:           src,
+		store:         store,
+		bus:           events.NewBus(128),
+		dbPath:        dbPath,
+		setupRequired: setupRequired,
 	}, nil
 }
 
@@ -514,6 +530,9 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 	if mode != engine.RunModeScan && a.store == nil {
 		return nil, errors.New("storage not configured")
 	}
+	if a.src == nil {
+		return nil, errors.New("source not configured")
+	}
 	return engine.New(engine.Options{
 		DB:               a.db,
 		Source:           a.src,
@@ -556,6 +575,12 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	sourceChanged := prev.Source != next.Source
 	s3Changed := prev.S3 != next.S3
 	scheduleChanged := prev.Backup.Schedule != next.Backup.Schedule
+	a.mu.RLock()
+	sourceMissing := a.src == nil
+	storageMissing := a.store == nil
+	a.mu.RUnlock()
+	needSource := sourceChanged || sourceMissing
+	needStorage := s3Changed || (storageMissing && next.S3.Bucket != "")
 
 	// Pre-validate the cron expression before any swap so applySettings
 	// is all-or-nothing: a bad schedule must not leave src/store hot-
@@ -567,14 +592,14 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 		}
 	}
 
-	if sourceChanged {
+	if needSource {
 		s, err := source.FromConfig(next.Source)
 		if err != nil {
 			return fmt.Errorf("source: %w", err)
 		}
 		newSrc = s
 	}
-	if s3Changed {
+	if needStorage {
 		s, err := openConfiguredStorage(ctx, next)
 		if err != nil {
 			if newSrc != nil {
@@ -588,14 +613,14 @@ func (a *appState) applySettings(ctx context.Context, prev, next config.Config) 
 	a.mu.Lock()
 	var oldSrc source.Source
 	var oldStore storage.Storage
-	if newSrc != nil {
+	if needSource {
 		oldSrc = a.src
 		a.src = newSrc
 		if a.logger != nil {
 			a.logger.Info("source hot-swapped", "type", next.Source.Type)
 		}
 	}
-	if s3Changed {
+	if needStorage {
 		oldStore = a.store
 		a.store = newStore
 		if a.logger != nil {
@@ -1101,8 +1126,9 @@ func (a *appState) startSQSConsumer(rootCtx context.Context) {
 	a.mu.RLock()
 	cfg := a.cfg
 	logger := a.logger
+	setupRequired := a.setupRequired
 	a.mu.RUnlock()
-	if cfg.SQS.QueueURL == "" {
+	if setupRequired || cfg.SQS.QueueURL == "" {
 		return
 	}
 	consumer, err := restore.New(rootCtx, cfg.SQS, cfg.S3, a.db, logger)
@@ -1133,6 +1159,22 @@ func (a *appState) startSQSConsumer(rootCtx context.Context) {
 	}()
 }
 
+func (a *appState) completeSetup(rootCtx context.Context) {
+	a.mu.Lock()
+	a.setupRequired = false
+	sched := a.sched
+	schedule := a.cfg.Backup.Schedule
+	logger := a.logger
+	a.mu.Unlock()
+
+	if sched != nil {
+		if err := sched.Update(schedule); err != nil && logger != nil {
+			logger.Error("activate setup schedule", "error", err)
+		}
+	}
+	a.startSQSConsumer(rootCtx)
+}
+
 func runBackup(cfgPath, profileOverride string) {
 	// Honour SIGINT/SIGTERM so Ctrl-C cancels the engine cleanly and lets
 	// it write a 'cancelled' run row + clean up staged tmp zips, instead
@@ -1147,6 +1189,9 @@ func runBackup(cfgPath, profileOverride string) {
 		fatalf("%v", err)
 	}
 	defer app.close()
+	if app.setupRequired {
+		fatalf("initial setup is incomplete; start aws-backup without arguments and finish the web setup guide")
+	}
 
 	eng := engine.New(engine.Options{
 		DB:             app.db,
@@ -1176,7 +1221,7 @@ func runBackup(cfgPath, profileOverride string) {
 	fmt.Printf("run %d completed. db: %s\n", runID, app.dbPath)
 }
 
-func runServe(cfgPath, profileOverride string) {
+func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1228,6 +1273,7 @@ func runServe(cfgPath, profileOverride string) {
 		SwitchProfile:     app.switchProfile(ctx),
 		RenameProfile:     app.renameProfile(ctx),
 		DeleteProfile:     app.deleteProfile,
+		SetupCompleted:    func() { app.completeSetup(ctx) },
 		BuildEngine:       app.buildEngine,
 		Storage:           app.liveStorage,
 		StoragePrefix:     app.cfg.S3.KeyPrefix,
@@ -1246,7 +1292,11 @@ func runServe(cfgPath, profileOverride string) {
 	// callback. (#124)
 	app.stopRequested = srv.IsStopRequested
 
-	sched, err := scheduler.New(app.cfg.Backup.Schedule, func(ctx context.Context) error {
+	schedule := app.cfg.Backup.Schedule
+	if app.setupRequired {
+		schedule = ""
+	}
+	sched, err := scheduler.New(schedule, func(ctx context.Context) error {
 		// POST /api/runs trigger. Direct call — we own the same DB/engine.
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/runs", nil)
 		w := newDiscardResponse()
@@ -1277,11 +1327,21 @@ func runServe(cfgPath, profileOverride string) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		fatalf("http listen: %v", err)
+	}
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("serving", "addr", addr, "config", app.cfgPath, "profile", app.profile)
-		serveErr <- httpSrv.ListenAndServe()
+		serveErr <- httpSrv.Serve(listener)
 	}()
+	if launchBrowser {
+		url := "http://" + addr + "/"
+		if err := openBrowser(url); err != nil {
+			logger.Warn("open browser", "url", url, "error", err)
+		}
+	}
 
 	select {
 	case <-ctx.Done():
@@ -1314,6 +1374,23 @@ func runServe(cfgPath, profileOverride string) {
 	// app.close() cancels the SQS consumer and tears down the remaining
 	// app resources immediately. We intentionally do not wait for the
 	// consumer to drain before closing the app.
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 type shutdowner interface {
@@ -1373,7 +1450,12 @@ func runConfig(path string, args []string) {
 		if err := central.ValidateCentral(); err != nil {
 			fatalf("invalid central config:\n%v", err)
 		}
-		if err := prof.ValidateProfile(central.Server); err != nil {
+		cfg := prof.ToConfig(central.Server)
+		validate := cfg.Validate
+		if central.SetupRequired() {
+			validate = cfg.ValidateForSetup
+		}
+		if err := validate(); err != nil {
 			fatalf("invalid profile config:\n%v", err)
 		}
 		fmt.Printf("ok: %s\n", path)
@@ -1417,7 +1499,7 @@ func ensureProfileLayout(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := config.SaveProfile(profilePath, config.DefaultProfile()); err != nil {
+	if err := config.SaveProfile(profilePath, config.StarterProfile()); err != nil {
 		return false, err
 	}
 	if err := config.SaveCentral(path, central); err != nil {

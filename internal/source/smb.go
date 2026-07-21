@@ -99,8 +99,35 @@ func NewSMB(cfg SMBConfig) (*SMB, error) {
 
 // rootPath returns the share-relative path the walker treats as the root.
 func (s *SMB) rootPath() string {
-	p := strings.TrimPrefix(s.cfg.Path, "/")
-	p = strings.TrimSuffix(p, "/")
+	return cleanSMBRelativePath(s.cfg.Path)
+}
+
+// openPath resolves relPath beneath the configured root and returns the
+// share-relative path expected by go-smb2. In particular, it must not have a
+// leading slash: go-smb2 converts separators to backslashes and rejects a
+// leading backslash in Share.Open.
+func (s *SMB) openPath(relPath string) (string, error) {
+	root := s.rootPath()
+	clean := cleanSMBRelativePath(relPath)
+	full := clean
+	if root != "" {
+		full = path.Join(root, clean)
+		if full != root && !strings.HasPrefix(full, root+"/") {
+			return "", errors.New("path escapes SMB root")
+		}
+	}
+	return full, nil
+}
+
+// cleanSMBRelativePath accepts either Windows or slash-separated input and
+// anchors traversal at the mounted share before returning an fs-style path.
+func cleanSMBRelativePath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = path.Clean("/" + strings.TrimLeft(p, "/"))
+	p = strings.TrimPrefix(p, "/")
+	if p == "." {
+		return ""
+	}
 	return p
 }
 
@@ -193,14 +220,9 @@ func (s *SMB) Walk(ctx context.Context, fn WalkFunc) error {
 // re-dials and re-mounts the share once before giving up — long backups
 // shouldn't die because the share was idle during a slow zip.
 func (s *SMB) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	root := s.rootPath()
-	clean := path.Clean("/" + strings.TrimPrefix(relPath, "/"))
-	full := clean
-	if root != "" {
-		full = path.Join(root, clean)
-		if full != root && !strings.HasPrefix(full, root+"/") {
-			return nil, errors.New("path escapes SMB root")
-		}
+	full, err := s.openPath(relPath)
+	if err != nil {
+		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
