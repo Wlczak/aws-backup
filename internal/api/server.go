@@ -40,6 +40,8 @@ type Deps struct {
 	SwitchProfile     func(ctx context.Context, name string) (ProfileRuntime, error)
 	RenameProfile     func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
 	DeleteProfile     func(ctx context.Context, name string) error
+	SetupCompleted    func()
+	ValidateSetup     func(ctx context.Context, cfg config.Config) error
 	// BuildEngine constructs an Engine for a new backup run with the
 	// current config. mode and scanPaths are per-run parameters: mode
 	// selects scan-only, upload-only, or full (default); scanPaths
@@ -325,12 +327,15 @@ func (s *Server) Router() http.Handler {
 	r.Route("/api", func(r chi.Router) {
 		r.Use(originGuard)
 		r.Get("/auth/status", s.handleAuthStatus)
+		r.Post("/auth/setup", s.handleAuthSetup)
 		r.Post("/auth/login", s.handleAuthLogin)
 		r.Post("/auth/logout", s.handleAuthLogout)
 		r.Post("/client-logs", s.handlePostClientLogs)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.authRequired)
+			r.Use(s.setupRequired)
+			r.Post("/setup/complete", s.handleSetupComplete)
 			r.Get("/status", s.handleStatus)
 
 			r.Get("/runs", s.handleListRuns)

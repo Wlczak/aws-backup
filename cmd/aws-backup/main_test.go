@@ -270,6 +270,29 @@ func TestEnsureProfileLayoutMigratesLegacyConfigAndIndex(t *testing.T) {
 	}
 }
 
+func TestLoadAppStateAllowsFreshOnboardingProfile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.json")
+	created, err := ensureProfileLayout(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("expected fresh profile layout")
+	}
+	app, err := loadAppState(ctx, path, "", false)
+	if err != nil {
+		t.Fatalf("load setup app state: %v", err)
+	}
+	defer app.close()
+	if !app.setupRequired {
+		t.Fatal("fresh app should require setup")
+	}
+	if app.src != nil || app.store != nil {
+		t.Fatalf("bootstrap initialized resources: src=%v store=%v", app.src, app.store)
+	}
+}
+
 func TestSetCentralPasswordHash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	central := config.DefaultCentral()
