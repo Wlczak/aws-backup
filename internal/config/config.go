@@ -66,9 +66,10 @@ const (
 // CentralConfig is the process-wide config stored at config.json. It owns
 // settings that are shared across every backup profile.
 type CentralConfig struct {
-	ActiveProfile string       `json:"active_profile"`
-	Server        ServerConfig `json:"server"`
-	Auth          AuthConfig   `json:"auth,omitempty"`
+	ActiveProfile  string       `json:"active_profile"`
+	Server         ServerConfig `json:"server"`
+	Auth           AuthConfig   `json:"auth,omitempty"`
+	SetupCompleted *bool        `json:"setup_completed,omitempty"`
 }
 
 // AuthConfig holds the login secret for the web UI / HTTP API. The
@@ -250,15 +251,54 @@ func Default() Config {
 // DefaultCentral returns the shared config for a fresh install.
 func DefaultCentral() CentralConfig {
 	def := Default()
+	incomplete := false
 	return CentralConfig{
-		ActiveProfile: "default",
-		Server:        def.Server,
+		ActiveProfile:  "default",
+		Server:         def.Server,
+		SetupCompleted: &incomplete,
 	}
 }
 
 // DefaultProfile returns the per-profile portion of Default.
 func DefaultProfile() ProfileConfig {
 	return ProfileFromConfig(Default())
+}
+
+// StarterProfile returns production-safe first-run settings. Unlike Default,
+// which remains convenient for the local MinIO development stack, the starter
+// contains no source, bucket, endpoint, or embedded credentials.
+func StarterProfile() ProfileConfig {
+	cfg := Default()
+	cfg.Source.Type = ""
+	cfg.Source.LocalDir.Root = ""
+	cfg.S3.Endpoint = ""
+	cfg.S3.UsePathStyle = false
+	cfg.S3.Bucket = ""
+	cfg.S3.Region = "us-east-1"
+	cfg.S3.AccessKeyID = ""
+	cfg.S3.SecretAccessKey = ""
+	cfg.S3.StorageClass = StorageClassDeepArchive
+	return ProfileFromConfig(cfg)
+}
+
+// SetupRequired distinguishes fresh/passwordless installations from legacy
+// central configs that predate setup_completed. A legacy install with a
+// password is grandfathered as complete.
+func (c CentralConfig) SetupRequired() bool {
+	if c.Auth.PasswordHash == "" {
+		return true
+	}
+	return c.SetupCompleted != nil && !*c.SetupCompleted
+}
+
+func (c *CentralConfig) MarkSetupCompleted() {
+	completed := true
+	c.SetupCompleted = &completed
+}
+
+func (c *CentralConfig) MarkSetupRequired() {
+	incomplete := false
+	c.SetupCompleted = &incomplete
 }
 
 // ProfileFromConfig extracts the per-profile fields from the runtime config.
@@ -618,6 +658,21 @@ func (c Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// ValidateForSetup validates the parts of a runtime config that must be sane
+// before the onboarding UI can start. Source and S3 completeness are deferred
+// to the wizard.
+func (c Config) ValidateForSetup() error {
+	c.Source = SourceConfig{
+		Type:     SourceLocalDir,
+		LocalDir: LocalDirConfig{Root: os.TempDir()},
+		SMB:      SMBConfig{Port: 445},
+	}
+	c.S3.Bucket = ""
+	c.S3.Region = ""
+	c.S3.StorageClass = ""
+	return c.Validate()
 }
 
 // Redacted returns a copy with credential-like fields replaced by RedactedMarker.
