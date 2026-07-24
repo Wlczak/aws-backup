@@ -116,6 +116,7 @@ type appState struct {
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
+	commitStop    func() bool
 	// sqsConsumer holds the long-running S3 Glacier restore-event
 	// consumer when sqs.queue_url is configured. Stored so the API's
 	// "Sync restore status" button can call DrainAll alongside the
@@ -556,6 +557,7 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		ScanPaths:        scanPaths,
 		Emit:             a.bus.Publish,
 		StopRequested:    a.stopRequested,
+		CommitStop:       a.commitStop,
 	}), nil
 }
 
@@ -1333,6 +1335,7 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// Router() is mounted so buildEngine, called per-run, sees a non-nil
 	// callback. (#124)
 	app.stopRequested = srv.IsStopRequested
+	app.commitStop = srv.TryCommitStop
 
 	schedule := app.cfg.Backup.Schedule
 	if app.setupRequired {

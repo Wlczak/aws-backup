@@ -123,11 +123,10 @@ type Server struct {
 	runMu            sync.Mutex
 	currentRun       int64 // 0 when idle
 	currentRunCancel context.CancelFunc
-	// currentRunStopReq is the graceful-stop flag for the in-flight run.
-	// /api/runs/:id/stop sets it; the engine polls via IsStopRequested
-	// between files / groups and exits cleanly with status="stopped"
-	// once the current upload finishes. Cleared at run start. (#124)
-	currentRunStopReq atomic.Bool
+	// currentRunStopState is a two-phase graceful-stop handshake: requested
+	// remains reversible via /continue while uploads drain; committed means the
+	// engine won the final CAS and will exit stopped. Cleared at run start.
+	currentRunStopState atomic.Int32
 	// currentRunCancelReq distinguishes a user-initiated /cancel from a
 	// service-shutdown cancel: handleCancelRun sets it before calling
 	// currentRunCancel, Server.Shutdown does not. The post-run goroutine
@@ -537,7 +536,13 @@ var errBadJSON = errors.New("invalid JSON body")
 // stop gracefully. The CLI wires this into engine.Options.StopRequested
 // so the engine exits cleanly between files when the flag flips.
 func (s *Server) IsStopRequested() bool {
-	return s.currentRunStopReq.Load()
+	return s.currentRunStopState.Load() != stopStateNone
+}
+
+// TryCommitStop lets the engine atomically win or lose against /continue at
+// the final drained-pipeline boundary.
+func (s *Server) TryCommitStop() bool {
+	return s.currentRunStopState.CompareAndSwap(stopStateRequested, stopStateCommitted)
 }
 
 // sseReplay is passed to sseHandler as the replay callback. On each SSE

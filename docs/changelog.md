@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #384 | — | Made graceful Stop/Continue a two-phase atomic handshake so Continue during drain replans pending uploads in the same run instead of still finalizing as stopped |
 | #389 | — | Added Settings → About release checks and operator-confirmed, checksum-verified self-update; restart preserves the executable path, drains SSE promptly, uses backward-compatible `serve` arguments, and warns when replacing a development build |
 | — | — | First-password creation now clears any session and requires an explicit login before onboarding can access settings; onboarding-time 401s return to that login screen |
 | — | — | Added double-click/no-command launch plus a mandatory web onboarding guide for password, source, and reachable S3 setup, with safe fresh-install defaults and legacy-install compatibility |
