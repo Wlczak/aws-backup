@@ -1429,21 +1429,16 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	app.close()
 	appClosed = true
 	if updateAction == "restart" {
-		if err := restartSelf(); err != nil {
+		exe, pathErr := updater.ExecutablePath()
+		if pathErr != nil {
+			logger.Error("restart after update failed", "error", pathErr)
+		} else if err := restartSelf(exe); err != nil {
 			logger.Error("restart after update failed", "error", err)
 		}
 	}
 }
 
-func restartSelf() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return err
-	}
+func restartSelf(exe string) error {
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), "AWS_BACKUP_RESTARTED=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr

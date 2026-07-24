@@ -78,6 +78,10 @@ func TestInstallVerifiesAndAppliesReleaseAsset(t *testing.T) {
 	binary := []byte("new executable")
 	sum := sha256.Sum256(binary)
 	m := New("v0.1.0", slog.Default())
+	capturedPath, err := m.ExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	m.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/SHA256SUMS" {
 			return response(hex.EncodeToString(sum[:]) + "  aws-backup-linux-amd64\n"), nil
@@ -99,6 +103,9 @@ func TestInstallVerifiesAndAppliesReleaseAsset(t *testing.T) {
 		}
 		if hex.EncodeToString(opts.Checksum) != hex.EncodeToString(sum[:]) {
 			t.Fatal("wrong apply checksum")
+		}
+		if opts.TargetPath != capturedPath {
+			t.Fatalf("target=%q want captured %q", opts.TargetPath, capturedPath)
 		}
 		called = true
 		return nil

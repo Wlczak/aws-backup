@@ -59,7 +59,7 @@ Builds use `-trimpath` for reproducibility and to keep developer paths out of pa
 
 Tag pushes that start with `v` trigger `.github/workflows/release.yml`, which builds the embedded web bundle, cross-compiles the release binaries, and publishes them as GitHub release assets alongside `SHA256SUMS`.
 
-The Settings → About page consumes those raw assets for self-update. `SHA256SUMS` must contain asset basenames; the updater also accepts the legacy `out/<asset>` entries published before issue #389. Server boot checks are optional and non-blocking, while executable replacement always requires operator confirmation and an idle process.
+The Settings → About page consumes those raw assets for self-update. `SHA256SUMS` must contain asset basenames; the updater also accepts the legacy `out/<asset>` entries published before issue #389. Server boot checks are optional and non-blocking, while executable replacement always requires operator confirmation and an idle process. Exact matching means a dirty/development build is offered the newest published release even when that release is older; the confirmation UI warns that unreleased features will be lost. The executable path is captured before replacement because resolving `/proc/self/exe` afterward can point at the removed `.old` image on Linux.
 
 ## Local dev stack
 
