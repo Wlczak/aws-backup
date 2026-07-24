@@ -313,11 +313,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Close shutdownCh first so any in-flight DB-sync goroutine aborts
 	// its upload before we cancel the run ctx; otherwise the sync's
 	// 600 s timeout could outlive this call. (#128)
-	s.shutdownOnce.Do(func() {
-		if s.shutdownCh != nil {
-			close(s.shutdownCh)
-		}
-	})
+	s.BeginShutdown()
 
 	s.runMu.Lock()
 	if s.currentRunCancel != nil {
@@ -354,6 +350,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// BeginShutdown broadcasts process shutdown before http.Server.Shutdown waits
+// for handlers. Long-lived SSE handlers must return first or they consume the
+// entire graceful-shutdown deadline.
+func (s *Server) BeginShutdown() {
+	s.shutdownOnce.Do(func() {
+		if s.shutdownCh != nil {
+			close(s.shutdownCh)
+		}
+	})
 }
 
 // NewServer wires up a *Server with validated Deps.
@@ -447,7 +454,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/sync/full", s.handleSyncFull)
 			r.Post("/sync/delete-cloud-paths", s.handleDeleteCloudPaths)
 
-			r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger, s.sseReplay))
+			r.Mount("/events", sseHandler(s.deps.Bus, s.deps.Logger, s.sseReplay, s.shutdownCh))
 		})
 	})
 
