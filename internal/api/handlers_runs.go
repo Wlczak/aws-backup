@@ -182,6 +182,16 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown mode %q; use full, scan, or upload", mode))
 		return
 	}
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 
 	// applyMu serialises against the post-run goroutine's
 	// applyPendingSettings (and PUT /api/settings success path). Without
@@ -249,6 +259,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	logger := s.deps.Logger
 	s.runWg.Add(1)
 	go func() {
+		defer operationDone()
 		defer s.runWg.Done()
 		// Release the run context regardless of how RunWithID returned, so
 		// the WithCancel chain doesn't leak goroutines/timers per run.
@@ -279,6 +290,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		s.maybeSyncDBToS3(syncDBToS3, logger, runID, mode, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, triggerRunResponse{RunID: runID})
 }

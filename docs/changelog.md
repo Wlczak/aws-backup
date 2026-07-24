@@ -4,6 +4,7 @@ Kept as searchable context for past architectural calls. The git log has the ful
 
 | # | Commit | Summary |
 | --- | --- | --- |
+| #389 | — | Added Settings → About release checks and operator-confirmed, checksum-verified self-update with restart/shutdown choices and a process-wide automatic boot-check preference |
 | — | — | First-password creation now clears any session and requires an explicit login before onboarding can access settings; onboarding-time 401s return to that login screen |
 | — | — | Added double-click/no-command launch plus a mandatory web onboarding guide for password, source, and reachable S3 setup, with safe fresh-install defaults and legacy-install compatibility |
 | #369 | — | SMB source paths now normalize slash and backslash input into a share-relative path without the leading separator rejected by go-smb2 |

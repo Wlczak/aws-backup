@@ -23,25 +23,30 @@ import (
 	"github.com/Wlczak/aws-backup/internal/restore/inventory"
 	"github.com/Wlczak/aws-backup/internal/restore/scanner"
 	"github.com/Wlczak/aws-backup/internal/storage"
+	appupdate "github.com/Wlczak/aws-backup/internal/update"
 	webassets "github.com/Wlczak/aws-backup/web"
 )
 
 // Deps holds everything the HTTP handlers need.
 type Deps struct {
-	DB                *db.DB
-	Bus               *events.Bus
-	Config            *config.Config
-	ConfigPath        string
-	CentralConfigPath string
-	SaveSettings      func(config.Config) error
-	ActiveProfile     string
-	ListProfiles      func() ([]ProfileInfo, error)
-	CreateProfile     func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
-	SwitchProfile     func(ctx context.Context, name string) (ProfileRuntime, error)
-	RenameProfile     func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
-	DeleteProfile     func(ctx context.Context, name string) error
-	SetupCompleted    func()
-	ValidateSetup     func(ctx context.Context, cfg config.Config) error
+	DB                    *db.DB
+	Bus                   *events.Bus
+	Config                *config.Config
+	ConfigPath            string
+	CentralConfigPath     string
+	SaveSettings          func(config.Config) error
+	ActiveProfile         string
+	ListProfiles          func() ([]ProfileInfo, error)
+	CreateProfile         func(ctx context.Context, name string, cloneActive bool) (ProfileInfo, error)
+	SwitchProfile         func(ctx context.Context, name string) (ProfileRuntime, error)
+	RenameProfile         func(ctx context.Context, oldName, newName string) (ProfileRuntime, bool, error)
+	DeleteProfile         func(ctx context.Context, name string) error
+	Updater               *appupdate.Manager
+	GetUpdateSettings     func() (config.UpdateConfig, error)
+	SaveUpdateSettings    func(config.UpdateConfig) error
+	RequestUpdateShutdown func(action string)
+	SetupCompleted        func()
+	ValidateSetup         func(ctx context.Context, cfg config.Config) error
 	// BuildEngine constructs an Engine for a new backup run with the
 	// current config. mode and scanPaths are per-run parameters: mode
 	// selects scan-only, upload-only, or full (default); scanPaths
@@ -189,6 +194,51 @@ type Server struct {
 	// carry the DB's file revision, so every application write invalidates
 	// stale reads while a finite TTL covers out-of-process SQLite changes.
 	fileResponses *responseCache
+	operations    operationGate
+}
+
+// operationGate makes the idle check for executable replacement atomic with
+// starting background work. Active operations hold a lease until all their
+// post-processing has completed.
+type operationGate struct {
+	mu       sync.Mutex
+	active   int
+	updating bool
+}
+
+func (g *operationGate) start() (func(), bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.updating {
+		return nil, false
+	}
+	g.active++
+	var once sync.Once
+	return func() { once.Do(func() { g.mu.Lock(); g.active--; g.mu.Unlock() }) }, true
+}
+
+func (g *operationGate) beginUpdate() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.updating || g.active != 0 {
+		return false
+	}
+	g.updating = true
+	return true
+}
+
+func (g *operationGate) cancelUpdate() {
+	g.mu.Lock()
+	g.updating = false
+	g.mu.Unlock()
+}
+
+func (s *Server) startOperation(w http.ResponseWriter) (func(), bool) {
+	done, ok := s.operations.start()
+	if !ok {
+		writeError(w, http.StatusConflict, errors.New("an application update is in progress"))
+	}
+	return done, ok
 }
 
 // cfgMutex returns the RWMutex used to serialise config reads/writes.
@@ -367,6 +417,12 @@ func (s *Server) Router() http.Handler {
 			r.Put("/profiles/active", s.handleSwitchProfile)
 			r.Put("/profiles/{name}/rename", s.handleRenameProfile)
 			r.Delete("/profiles/{name}", s.handleDeleteProfile)
+
+			r.Get("/update", s.handleGetUpdate)
+			r.Post("/update/check", s.handleCheckUpdate)
+			r.Put("/update/settings", s.handlePutUpdateSettings)
+			r.Post("/update/ignore", s.handleIgnoreUpdate)
+			r.Post("/update/install", s.handleInstallUpdate)
 
 			r.Get("/smb/test", s.handleTestSource)
 			r.Get("/s3/test", s.handleTestStorage)

@@ -3,6 +3,7 @@
   import { api, setUnauthorizedHandler, type AuthStatus } from './lib/api';
   import { toast } from './lib/toast';
   import { clientLogDebug, installClientLogging, setClientLogDebug } from './lib/client-logs';
+  import { updateStatus } from './lib/update';
   import Dashboard from './routes/Dashboard.svelte';
   import Download from './routes/Download.svelte';
   import Files from './routes/Files.svelte';
@@ -32,6 +33,8 @@
   let authPassword = $state('');
   let authBusy = $state(false);
   let authMessage = $state('');
+  let updateBusy = $state(false);
+  let updateTransition = $state<'restart' | 'shutdown' | null>(null);
 
   function applyAuth(status: AuthStatus, loggedOutMessage?: string) {
     authStatus = status;
@@ -51,6 +54,42 @@
       : (loggedOutMessage ?? 'Enter the password to unlock the app.');
     if (status.authenticated) {
       authPassword = '';
+      if (!status.setup_required) void refreshUpdateStatus();
+    }
+  }
+
+  async function refreshUpdateStatus() {
+    try {
+      const next = await api.updateStatus();
+      updateStatus.set(next);
+      if (next.state === 'checking') setTimeout(() => void refreshUpdateStatus(), 750);
+    } catch { /* Update checks must never interfere with login or startup. */ }
+  }
+
+  async function ignoreUpdate() {
+    try { updateStatus.set(await api.ignoreUpdate()); }
+    catch (e) { toast.error(`Could not ignore update: ${e}`); }
+  }
+
+  async function installUpdate(action: 'restart' | 'shutdown') {
+    if (updateBusy) return;
+    updateBusy = true;
+    try {
+      await api.installUpdate(action);
+      updateTransition = action;
+      if (action === 'restart') setTimeout(waitForRestart, 1200);
+    } catch (e) {
+      toast.error(`Update installation failed: ${e}`);
+      updateBusy = false;
+    }
+  }
+
+  async function waitForRestart() {
+    try {
+      await api.authStatus();
+      window.location.reload();
+    } catch {
+      setTimeout(waitForRestart, 750);
     }
   }
 
@@ -83,6 +122,7 @@
     authBusy = true;
     try {
       applyAuth(await api.logout());
+      updateStatus.set(null);
       toast.info('Signed out.');
     } catch (e) {
       toast.error(String(e));
@@ -184,6 +224,36 @@
   </div>
 {/if}
 
+{#if authPhase === 'authenticated' && $updateStatus?.state === 'available' && !updateTransition}
+  <div class="modal-backdrop" role="presentation">
+    <div class="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title" tabindex="-1">
+      <h2 id="update-title">Update available</h2>
+      <p>
+        Installed <span class="mono">{$updateStatus.current_version}</span> does not exactly match
+        <span class="mono">{$updateStatus.latest?.tag_name}</span>.
+      </p>
+      <p class="muted">The release binary will be verified against its published SHA-256 checksum before replacing this executable.</p>
+      {#if !$updateStatus.install_supported}<p class="error">No update binary is published for this operating system and architecture.</p>{/if}
+      <div class="modal-actions">
+        <button type="button" onclick={ignoreUpdate} disabled={updateBusy}>Ignore</button>
+        <button type="button" onclick={() => installUpdate('shutdown')} disabled={updateBusy || !$updateStatus.install_supported}>Install & shut down</button>
+        <button class="primary" type="button" onclick={() => installUpdate('restart')} disabled={updateBusy || !$updateStatus.install_supported}>
+          {updateBusy ? 'Installing…' : 'Install & restart'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if updateTransition}
+  <div class="modal-backdrop" role="presentation">
+    <section class="update-modal" role="status">
+      <h2>{updateTransition === 'restart' ? 'Restarting with the update…' : 'Update installed'}</h2>
+      <p class="muted">{updateTransition === 'restart' ? 'This page will reconnect automatically.' : 'The application has been shut down. You can close this page.'}</p>
+    </section>
+  </div>
+{/if}
+
 <Toaster />
 
 <style>
@@ -278,4 +348,26 @@
     display: flex;
     gap: 0.5rem;
   }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgba(0, 0, 0, 0.7);
+  }
+  .update-modal {
+    width: min(580px, 100%);
+    display: grid;
+    gap: 1rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  }
+  .update-modal h2, .update-modal p { margin: 0; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
+  .error { color: var(--err); }
 </style>
