@@ -65,6 +65,9 @@ Runs execute against the currently active profile. The active profile determines
                                     progressReader, ChecksumSHA256, multipart
                                     over MultipartThreshold; emit upload_*.
     Between groups/files the engine polls IsStopRequested for graceful stop.
+    Stop uses a two-phase requested/committed handshake: Continue can clear the
+    request while in-flight uploads drain; if it wins the final CAS, the engine
+    replans the still-pending groups and resumes the same run.
     The dashboard should treat the persisted `/api/status` snapshot as the
     source of truth for headline progress and use SSE only for optional live
     detail, not as a required control plane for scan-only runs.
@@ -100,7 +103,7 @@ Runs execute against the currently active profile. The active profile determines
 
 - `runMu` guards `currentRun`, `currentRunCancel`, and the `pendingConfig` field
 - `currentRun` is the in-flight run ID; 0 when idle. Set in `handleTriggerRun`, cleared in the post-run goroutine before the DB-sync step
-- `currentRunStopReq` (atomic.Bool) — graceful-stop flag polled by the engine between files (#124)
+- `currentRunStopState` (atomic.Int32) — two-phase none/requested/committed graceful-stop state; `/continue` and the engine atomically race at the drained-pipeline boundary so a successful Continue cannot still finalize as stopped (#384)
 - `currentRunCancelReq` (atomic.Bool) — distinguishes user `/cancel` from service-shutdown cancel (#128)
 - `runWg` waits on the engine goroutine during `Server.Shutdown` so DB/storage tear-down sees no live writers (#85)
 - `downloadWg` waits on the full-download goroutine during `Server.Shutdown`

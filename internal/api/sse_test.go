@@ -17,7 +17,7 @@ import (
 
 func TestSSEDeliversEvents(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := newInProcServer(sseHandler(bus, slog.Default(), nil))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), nil, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -52,7 +52,7 @@ func TestSSEDeliversEvents(t *testing.T) {
 
 func TestSSECleansUpOnDisconnect(t *testing.T) {
 	bus := events.NewBus(8)
-	srv := newInProcServer(sseHandler(bus, slog.Default(), nil))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), nil, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")
@@ -67,6 +67,25 @@ func TestSSECleansUpOnDisconnect(t *testing.T) {
 	waitFor(t, func() bool { return bus.SubscriberCount() == 0 }, time.Second)
 	if bus.SubscriberCount() != 0 {
 		t.Errorf("subscribers=%d want 0", bus.SubscriberCount())
+	}
+}
+
+func TestSSECleansUpOnServerShutdown(t *testing.T) {
+	bus := events.NewBus(8)
+	shutdown := make(chan struct{})
+	srv := newInProcServer(sseHandler(bus, slog.Default(), nil, shutdown))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	waitFor(t, func() bool { return bus.SubscriberCount() == 1 }, 500*time.Millisecond)
+	close(shutdown)
+	waitFor(t, func() bool { return bus.SubscriberCount() == 0 }, time.Second)
+	if bus.SubscriberCount() != 0 {
+		t.Fatalf("subscribers=%d want 0", bus.SubscriberCount())
 	}
 }
 
@@ -115,7 +134,7 @@ func TestSSEReplayOnConnect(t *testing.T) {
 		{Type: engine.EventRunLog, RunID: 5, Data: map[string]any{"level": "info", "message": "scan complete"}},
 	}
 	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, time.Time{} }
-	srv := newInProcServer(sseHandler(bus, slog.Default(), replay))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), replay, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL)
@@ -195,7 +214,7 @@ func TestSSEReplayDedupesRunLogOverlap(t *testing.T) {
 			Data: map[string]any{"level": "info", "message": "replayed"}},
 	}
 	replay := func(_ context.Context) ([]engine.Event, time.Time) { return replayed, cutoff }
-	srv := newInProcServer(sseHandler(bus, slog.Default(), replay))
+	srv := newInProcServer(sseHandler(bus, slog.Default(), replay, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL)
@@ -280,7 +299,7 @@ func TestSSEMarshalErrorLogsAndClosesStream(t *testing.T) {
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	srv := newInProcServer(sseHandler(bus, log, nil))
+	srv := newInProcServer(sseHandler(bus, log, nil, nil))
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/api/events")

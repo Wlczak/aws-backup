@@ -233,6 +233,7 @@
         <span class="mono">{$updateStatus.latest?.tag_name}</span>.
       </p>
       <p class="muted">The release binary will be verified against its published SHA-256 checksum before replacing this executable.</p>
+      <p class="warning">Exact matching is enabled. Installing always replaces this binary with the newest published release, which may be older than a dirty or development build and may not contain its unreleased features.</p>
       {#if !$updateStatus.install_supported}<p class="error">No update binary is published for this operating system and architecture.</p>{/if}
       <div class="modal-actions">
         <button type="button" onclick={ignoreUpdate} disabled={updateBusy}>Ignore</button>
@@ -370,4 +371,5 @@
   .update-modal h2, .update-modal p { margin: 0; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
   .error { color: var(--err); }
+  .warning { color: var(--warn); }
 </style>
