@@ -81,6 +81,10 @@ type Options struct {
 	// start). Distinct from context cancellation, which kills mid-stream.
 	// (#124)
 	StopRequested func() bool
+	// CommitStop atomically commits a pending graceful-stop request after the
+	// pipeline has drained. It returns false when Continue cleared the request,
+	// in which case the engine replans pending groups and resumes the same run.
+	CommitStop func() bool
 	// CopyThreads is the number of concurrent staging workers
 	// (source → tmp). 0 or 1 = sequential.
 	CopyThreads int
@@ -371,7 +375,7 @@ func (e *Engine) runInner(ctx context.Context, runID int64) (string, error) {
 	}
 
 	if mode == RunModeUpload {
-		terminal, _, _, _, err := e.runUploadPhase(ctx, runID, nil, -1, -1, true)
+		terminal, _, _, _, err := e.runUploadPhaseResumable(ctx, runID, nil, -1, -1, true)
 		return terminal, err
 	}
 
@@ -613,7 +617,7 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			batchNum, batch.Paused, len(completedFolders),
 		))
 
-		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhase(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, true)
+		terminal, batchPlannedFiles, batchPlannedGroups, batchPlannedBytes, uploadErr := e.runUploadPhaseResumable(ctx, runID, completedFolders, uploadedTotal, bytesUploadedTotal, true)
 		if uploadErr != nil {
 			e.log(ctx, runID, db.LogError, fmt.Sprintf(
 				"batched run batch %d upload stopped with %s: %v",
@@ -695,6 +699,50 @@ func (e *Engine) runBatchedFull(ctx context.Context, runID int64) (string, error
 			"batched run batch %d will continue to next scan batch: paused=%t completed_folders=%d",
 			batchNum, batch.Paused, len(completedFolders),
 		))
+	}
+}
+
+// runUploadPhaseResumable turns a reversible stop request into either a
+// committed RunStopped result or a fresh pipeline over the still-pending rows.
+// The first plan remains authoritative so cumulative upload counters keep the
+// original denominator when a resumed pipeline contains only the remainder.
+func (e *Engine) runUploadPhaseResumable(ctx context.Context, runID int64, skipFolders map[string]struct{}, uploadedStart, bytesStart int64, emitPlan bool) (string, int64, int64, int64, error) {
+	var plannedFiles, plannedGroups, plannedBytes int64
+	first := true
+	for {
+		terminal, files, groups, bytes, err := e.runUploadPhase(ctx, runID, skipFolders, uploadedStart, bytesStart, emitPlan && first)
+		if first {
+			plannedFiles, plannedGroups, plannedBytes = files, groups, bytes
+			first = false
+		}
+		if err != nil || terminal != db.RunStopped {
+			return terminal, plannedFiles, plannedGroups, plannedBytes, err
+		}
+
+		commit := true
+		if e.opts.CommitStop != nil {
+			commit = e.opts.CommitStop()
+		} else if e.opts.StopRequested != nil {
+			commit = e.opts.StopRequested()
+		}
+		if commit {
+			return db.RunStopped, plannedFiles, plannedGroups, plannedBytes, nil
+		}
+
+		e.log(ctx, runID, db.LogInfo, "stop request cleared before commit — resuming pending uploads")
+		// Replanning reads pending rows from SQLite, so completed uploads from
+		// the drained pipeline must leave the write buffer first. Otherwise the
+		// resumed phase would rediscover and recount already-uploaded files.
+		if e.buf != nil {
+			if flushErr := e.buf.flush(ctx); flushErr != nil {
+				return db.RunFailed, plannedFiles, plannedGroups, plannedBytes, fmt.Errorf("flush uploads before resume: %w", flushErr)
+			}
+		}
+		run, loadErr := e.opts.DB.GetRun(ctx, runID)
+		if loadErr != nil {
+			return db.RunFailed, plannedFiles, plannedGroups, plannedBytes, fmt.Errorf("load run totals for resume: %w", loadErr)
+		}
+		uploadedStart, bytesStart = run.FilesUploaded, run.BytesUploaded
 	}
 }
 

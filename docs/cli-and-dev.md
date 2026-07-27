@@ -59,6 +59,8 @@ Builds use `-trimpath` for reproducibility and to keep developer paths out of pa
 
 Tag pushes that start with `v` trigger `.github/workflows/release.yml`, which builds the embedded web bundle, cross-compiles the release binaries, and publishes them as GitHub release assets alongside `SHA256SUMS`.
 
+The Settings → About page consumes those raw assets for self-update. `SHA256SUMS` must contain asset basenames; the updater also accepts the legacy `out/<asset>` entries published before issue #389. Server boot checks are optional and non-blocking, while executable replacement always requires operator confirmation and an idle process. Exact matching means a dirty/development build is offered the newest published release even when that release is older; the confirmation UI warns that unreleased features will be lost. The executable path is captured before replacement because resolving `/proc/self/exe` afterward can point at the removed `.old` image on Linux. A no-command GUI launch restarts as explicit `serve` for compatibility with older release binaries, while the already-open browser reconnects to the new process.
+
 ## Local dev stack
 
 `deploy/docker-compose.yml` brings up MinIO on `:9000` (S3 endpoint) + `:9001` (console) and a one-shot init container that creates the bucket. Combined with `web-dev` (Vite on `:5173` proxying to the Go server on `:8080`) this gives full hot-reload on both sides.

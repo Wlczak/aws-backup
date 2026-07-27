@@ -894,6 +894,25 @@ func TestStopRun(t *testing.T) {
 		t.Error("stop flag should be clear after /continue")
 	}
 
+	// Once the engine wins the final commit CAS, Continue must report that
+	// the run can no longer be revived instead of claiming success.
+	resp, err = ts.Client().Post(ts.URL+"/api/runs/42/stop", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !srv.TryCommitStop() {
+		t.Fatal("expected stop commit CAS to succeed")
+	}
+	resp, err = ts.Client().Post(ts.URL+"/api/runs/42/continue", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("committed /continue status=%d want 409", resp.StatusCode)
+	}
+
 	// Idle server: 404.
 	idle := &Server{deps: deps}
 	ts.Config.Handler = idle.Router()

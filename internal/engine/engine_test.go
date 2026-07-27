@@ -562,6 +562,50 @@ func TestEngineGracefulStop(t *testing.T) {
 	}
 }
 
+func TestEngineContinueBeforeStopCommitResumesSameRun(t *testing.T) {
+	eng, d, _, store, root, col := newTestEngine(t, 100)
+	for _, dir := range []string{"a", "b", "c", "d", "e"} {
+		writeFile(t, root, dir+"/file.txt", "data-"+dir)
+	}
+
+	var stop atomic.Bool
+	var requested atomic.Bool
+	var commits atomic.Int32
+	eng.opts.StopRequested = stop.Load
+	eng.opts.CommitStop = func() bool {
+		commits.Add(1)
+		// Deterministically model /continue winning the final CAS after the
+		// first pipeline observed stop and drained its in-flight upload.
+		stop.Store(false)
+		return false
+	}
+	origEmit := eng.opts.Emit
+	eng.opts.Emit = func(ev Event) {
+		origEmit(ev)
+		if ev.Type == EventUploadComplete && requested.CompareAndSwap(false, true) {
+			stop.CompareAndSwap(false, true)
+		}
+	}
+
+	runID, err := eng.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	run, _ := d.GetRun(context.Background(), runID)
+	if run.Status != db.RunCompleted {
+		t.Fatalf("status=%q want completed", run.Status)
+	}
+	if commits.Load() == 0 {
+		t.Fatal("stop was never taken to the commit boundary")
+	}
+	if got := len(col.byType(EventUploadComplete)); got != 5 {
+		t.Fatalf("completed uploads=%d want 5", got)
+	}
+	if got := len(store.Keys()); got != 5 {
+		t.Fatalf("stored keys=%d want 5", got)
+	}
+}
+
 func TestEngineNoPendingFiles(t *testing.T) {
 	eng, d, _, _, _, col := newTestEngine(t, 3)
 	runID, err := eng.Run(context.Background())

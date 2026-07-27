@@ -8,6 +8,7 @@
   import SqsSettings from './settings/SqsSettings.svelte';
   import BackupSettings from './settings/BackupSettings.svelte';
   import ServerSettings from './settings/ServerSettings.svelte';
+  import AboutSettings from './settings/AboutSettings.svelte';
 
   let cfg = $state<Config | null>(null);
   let saving = $state(false);
@@ -20,6 +21,7 @@
     { id: 'sqs',     label: 'SQS'      },
     { id: 'backup',  label: 'Backup'   },
     { id: 'server',  label: 'Schedule & server' },
+    { id: 'about',   label: 'About' },
   ] as const;
   type SectionId = typeof sections[number]['id'];
 
@@ -100,7 +102,9 @@
   </div>
 {/if}
 
-{#if cfg}
+{#if active === 'about'}
+  <AboutSettings />
+{:else if cfg}
   {#if active === 'source'}
     <SourceSettings bind:cfg />
   {:else if active === 'storage'}

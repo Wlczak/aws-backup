@@ -8,6 +8,21 @@ export type FileStatus = 'pending' | 'zipped' | 'uploaded' | 'failed' | 'cloud_o
 export type RestoreStatus = '' | 'in_progress' | 'restored';
 export type RestoreTier = 'bulk' | 'standard';
 
+export interface UpdateRelease {
+  tag_name: string;
+  url: string;
+  published_at: string;
+}
+
+export interface UpdateStatus {
+  current_version: string;
+  state: 'idle' | 'checking' | 'up_to_date' | 'available' | 'ignored' | 'error';
+  latest?: UpdateRelease;
+  install_supported: boolean;
+  error?: string;
+  auto_check: boolean;
+}
+
 type EmptyPayload = Record<string, never>;
 
 export interface ScanProgressPayload {
@@ -894,6 +909,19 @@ export const api = {
   settings: () => request<SettingsResponse>('/api/settings'),
   updateSettings: (cfg: Config) =>
     request<SettingsResponse>('/api/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+  updateStatus: () => request<UpdateStatus>('/api/update'),
+  checkForUpdate: () => request<UpdateStatus>('/api/update/check', { method: 'POST' }),
+  saveUpdateSettings: (autoCheck: boolean) =>
+    request<UpdateStatus>('/api/update/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ auto_check: autoCheck }),
+    }),
+  ignoreUpdate: () => request<UpdateStatus>('/api/update/ignore', { method: 'POST' }),
+  installUpdate: (action: 'restart' | 'shutdown') =>
+    request<{ status: string; version: string; action: 'restart' | 'shutdown' }>('/api/update/install', {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    }),
   folders: (path?: string) => {
     const qs = new URLSearchParams();
     if (path) qs.set('path', path);

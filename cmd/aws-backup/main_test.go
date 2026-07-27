@@ -178,6 +178,24 @@ func TestEnsureConfigFileCreatesDefault(t *testing.T) {
 	}
 }
 
+func TestRestartArgumentsUsesServeForNoCommandLaunch(t *testing.T) {
+	got := restartArguments([]string{"-config", "/tmp/config.json"}, true)
+	want := []string{"-config", "/tmp/config.json", "serve"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("restart args=%v want %v", got, want)
+	}
+
+	explicit := []string{"-profile", "archive", "serve"}
+	got = restartArguments(explicit, false)
+	if !reflect.DeepEqual(got, explicit) {
+		t.Fatalf("explicit restart args=%v want %v", got, explicit)
+	}
+	got[0] = "changed"
+	if explicit[0] == "changed" {
+		t.Fatal("restartArguments returned caller-owned slice")
+	}
+}
+
 func TestEnsureConfigFileDoesNotOverwriteExisting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte("sentinel"), 0o600); err != nil {

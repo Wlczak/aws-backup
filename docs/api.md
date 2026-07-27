@@ -42,6 +42,11 @@ DELETE /api/files                     batch delete by ids[]
 # Settings
 GET    /api/settings                  redacted config + pending_apply flag
 PUT    /api/settings                  validate + apply (or queue if a run is in flight)
+GET    /api/update                    exact current version + cached GitHub release/check state + auto_check
+POST   /api/update/check              refresh the newest published release, including pre-releases
+PUT    /api/update/settings           {auto_check} process-wide boot-check preference
+POST   /api/update/ignore             dismiss the cached candidate for this process
+POST   /api/update/install            {action: restart|shutdown}; idle-only verified executable replacement
 GET    /api/folders                   ?path=/abs/path → current/parent/root metadata + immediate child directories; omitted path starts at the server user's home directory
 POST   /api/folders                   {parent: "/abs/path", name: "child"} → create one child directory and return its path
 GET    /api/profiles                  profiles + active_profile + switch-blocking state
@@ -73,6 +78,10 @@ POST   /api/sync/delete-cloud-paths   {paths: []} → delete corresponding S3 ob
 GET    /api/events                    SSE stream
 GET    /*                             embedded Svelte SPA (hash router fallback to index.html)
 ```
+
+Graceful stop is reversible until the engine commits it after draining in-flight uploads. `POST /api/runs/{id}/continue` atomically clears a requested stop and the same run replans its remaining pending groups; it returns `409` only if the engine already committed the terminal stop.
+
+Update discovery is hardcoded to the public `Wlczak/aws-backup` GitHub releases feed. Availability uses exact string equality between the baked-in version and newest non-draft release tag, so dirty/development builds are deliberately offered the published binary. Installation selects the current OS/architecture release asset, requires a matching `SHA256SUMS` entry, and returns `409` while backup/download/restore or post-run sync work is active.
 
 The dashboard does not treat `/api/events` as the source of truth for run
 state. `GET /api/status` is authoritative for the current/last run, scan
