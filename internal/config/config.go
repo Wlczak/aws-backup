@@ -69,7 +69,14 @@ type CentralConfig struct {
 	ActiveProfile  string       `json:"active_profile"`
 	Server         ServerConfig `json:"server"`
 	Auth           AuthConfig   `json:"auth,omitempty"`
+	Updates        UpdateConfig `json:"updates,omitempty"`
 	SetupCompleted *bool        `json:"setup_completed,omitempty"`
+}
+
+// UpdateConfig controls process-wide release checks. Updates are shared by
+// every profile because one executable serves all profiles.
+type UpdateConfig struct {
+	AutoCheck bool `json:"auto_check"`
 }
 
 // AuthConfig holds the login secret for the web UI / HTTP API. The

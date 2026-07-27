@@ -349,6 +349,16 @@ const (
 // /api/restore/scan/* HEAD sweep; the affected DB rows immediately move
 // to restore_status='in_progress' so the UI reflects the request.
 func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 	st := s.storage()
 	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
@@ -394,6 +404,7 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 
 	s.restoreJobWg.Add(1)
 	go func(jobID int64) {
+		defer operationDone()
 		defer s.restoreJobWg.Done()
 		defer cancel()
 		done := make(chan struct{})
@@ -452,6 +463,7 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 		})
 		s.finishRestoreJob(jobID, "completed", nil)
 	}(job.ID)
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, restoreJobStartResponse{
 		RestoreJobID: job.ID,
@@ -468,6 +480,16 @@ func (s *Server) handleRestoreTrigger(w http.ResponseWriter, r *http.Request) {
 // and never-restored rows are reported as skipped. Progress is exposed
 // through SSE plus /api/status so the Download tab can survive reloads.
 func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 	st := s.storage()
 	if st == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
@@ -559,6 +581,7 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 
 	s.restoreDownloadWg.Add(1)
 	go func(downloadID int64, cfg restoreDownloadSummary, storage storage.Storage, tmpDir string) {
+		defer operationDone()
 		defer s.restoreDownloadWg.Done()
 		defer cancel()
 		done := make(chan struct{})
@@ -611,6 +634,7 @@ func (s *Server) handleRestoreDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		s.restoreDownloadMu.Unlock()
 	}(job.ID, *job, st, tmpDir)
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"restore_download_id": job.ID,
@@ -850,6 +874,11 @@ func round2(f float64) float64 {
 // of messages processed. 503 when SQS isn't configured so the UI can
 // surface that as a friendly "no queue configured" message.
 func (s *Server) handleRestoreSyncStatus(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	defer operationDone()
 	if s.deps.SyncRestoreStatus == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			fmt.Errorf("SQS restore consumer is not configured (set sqs.queue_url in config)"))
@@ -867,6 +896,11 @@ func (s *Server) handleRestoreSyncStatus(w http.ResponseWriter, r *http.Request)
 // reconciliation of restore status. Long-running on big indexes;
 // progress streams via SSE (restore_scan_*).
 func (s *Server) handleRestoreScanFull(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	defer operationDone()
 	if s.deps.RestoreScanner == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			errors.New("restore scanner not configured (storage missing)"))
@@ -904,6 +938,11 @@ func (s *Server) handleRestoreScanFull(w http.ResponseWriter, r *http.Request) {
 // handleRestoreScanPending HEADs only files locally marked in_progress
 // to catch SQS notifications that never arrived.
 func (s *Server) handleRestoreScanPending(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	defer operationDone()
 	if s.deps.RestoreScanner == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			errors.New("restore scanner not configured (storage missing)"))
@@ -1006,6 +1045,16 @@ func (s *Server) handleInventoryDelete(w http.ResponseWriter, r *http.Request) {
 // handleInventorySync enumerates keys from the latest inventory manifest
 // and runs them through the restore scanner.
 func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 	if s.deps.Inventory == nil || s.deps.RestoreScanner == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			errors.New("inventory manager or scanner not configured (storage missing)"))
@@ -1035,6 +1084,7 @@ func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
 
 	s.restoreJobWg.Add(1)
 	go func(jobID int64) {
+		defer operationDone()
 		defer s.restoreJobWg.Done()
 		defer cancel()
 		done := make(chan struct{})
@@ -1101,6 +1151,7 @@ func (s *Server) handleInventorySync(w http.ResponseWriter, r *http.Request) {
 		})
 		s.finishRestoreJob(jobID, "completed", nil)
 	}(job.ID)
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, restoreJobStartResponse{
 		RestoreJobID: job.ID,
