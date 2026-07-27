@@ -59,6 +59,16 @@ func toDownloadSnapshotSummary(snap db.DownloadMirrorSnapshot) downloadMirrorSna
 }
 
 func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 	live, ok := s.snapshotConfig()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
@@ -131,6 +141,7 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 	}
 	s.downloadWg.Add(1)
 	go func(downloadID int64, cfg downloadSummary, storage storage.Storage, tmpDir string) {
+		defer operationDone()
 		defer s.downloadWg.Done()
 		defer cancel()
 		done := make(chan struct{})
@@ -221,11 +232,22 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 		}
 		s.downloadMu.Unlock()
 	}(job.ID, *job, st, live.Backup.TmpDir)
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, downloadTriggerResponse{DownloadID: job.ID})
 }
 
 func (s *Server) handleDownloadRescan(w http.ResponseWriter, r *http.Request) {
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 	live, ok := s.snapshotConfig()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, errors.New("config not loaded"))
@@ -286,6 +308,7 @@ func (s *Server) handleDownloadRescan(w http.ResponseWriter, r *http.Request) {
 	}
 	s.downloadWg.Add(1)
 	go func(downloadID int64, cfg downloadSummary) {
+		defer operationDone()
 		defer s.downloadWg.Done()
 		defer cancel()
 		done := make(chan struct{})
@@ -376,6 +399,7 @@ func (s *Server) handleDownloadRescan(w http.ResponseWriter, r *http.Request) {
 		}
 		s.downloadMu.Unlock()
 	}(job.ID, *job)
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, downloadTriggerResponse{DownloadID: job.ID})
 }

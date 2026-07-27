@@ -158,6 +158,12 @@ type triggerRunRequest struct {
 	Paths []string `json:"paths"`
 }
 
+const (
+	stopStateNone int32 = iota
+	stopStateRequested
+	stopStateCommitted
+)
+
 type triggerRunResponse struct {
 	RunID int64 `json:"run_id"`
 }
@@ -182,6 +188,16 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown mode %q; use full, scan, or upload", mode))
 		return
 	}
+	operationDone, ok := s.startOperation(w)
+	if !ok {
+		return
+	}
+	operationLaunched := false
+	defer func() {
+		if !operationLaunched {
+			operationDone()
+		}
+	}()
 
 	// applyMu serialises against the post-run goroutine's
 	// applyPendingSettings (and PUT /api/settings success path). Without
@@ -228,7 +244,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	s.currentRunCancel = cancel
 	// Clear any stale graceful-stop flag from a prior run before the
 	// engine starts polling it. (#124)
-	s.currentRunStopReq.Store(false)
+	s.currentRunStopState.Store(stopStateNone)
 	// Same for the cancel-request flag — its only role is to tell the
 	// post-run goroutine "the run ended via /cancel, sync the DB", and
 	// it must not survive into the next run. (#128)
@@ -249,6 +265,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	logger := s.deps.Logger
 	s.runWg.Add(1)
 	go func() {
+		defer operationDone()
 		defer s.runWg.Done()
 		// Release the run context regardless of how RunWithID returned, so
 		// the WithCancel chain doesn't leak goroutines/timers per run.
@@ -257,7 +274,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		// Read the stop/cancel flags BEFORE clearing currentRun so a
 		// concurrent handleTriggerRun (which clears them under runMu)
 		// can't race us to false. (#128)
-		stopReq := s.currentRunStopReq.Load()
+		stopReq := s.currentRunStopState.Load() != stopStateNone
 		cancelReq := s.currentRunCancelReq.Load()
 		s.runMu.Lock()
 		s.currentRun = 0
@@ -279,6 +296,7 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		s.maybeSyncDBToS3(syncDBToS3, logger, runID, mode, runErr, stopReq, cancelReq)
 	}()
 	goroutineLaunched = true
+	operationLaunched = true
 
 	writeJSON(w, http.StatusAccepted, triggerRunResponse{RunID: runID})
 }
@@ -392,7 +410,7 @@ func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no running run with that id"))
 		return
 	}
-	s.currentRunStopReq.Store(true)
+	s.currentRunStopState.CompareAndSwap(stopStateNone, stopStateRequested)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
 
@@ -413,8 +431,22 @@ func (s *Server) handleContinueRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no running run with that id"))
 		return
 	}
-	s.currentRunStopReq.Store(false)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "continuing"})
+	for {
+		switch state := s.currentRunStopState.Load(); state {
+		case stopStateNone:
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "continuing"})
+			return
+		case stopStateCommitted:
+			writeError(w, http.StatusConflict, errors.New("graceful stop is already committed"))
+			return
+		case stopStateRequested:
+			if !s.currentRunStopState.CompareAndSwap(stopStateRequested, stopStateNone) {
+				continue
+			}
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "continuing"})
+			return
+		}
+	}
 }
 
 type statusResponse struct {
@@ -462,7 +494,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		default:
 			sum := toSummary(run)
 			resp.Current = &sum
-			resp.StopRequested = s.currentRunStopReq.Load()
+			resp.StopRequested = s.currentRunStopState.Load() != stopStateNone
 			resp.CancelRequested = s.currentRunCancelReq.Load()
 		}
 	}
