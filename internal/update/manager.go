@@ -63,16 +63,18 @@ type Status struct {
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	checkMu sync.Mutex
-	client  *http.Client
-	version string
-	goos    string
-	goarch  string
-	status  Status
-	logger  *slog.Logger
-	apiURL  string
-	apply   func(io.Reader, selfupdate.Options) error
+	mu         sync.RWMutex
+	checkMu    sync.Mutex
+	client     *http.Client
+	version    string
+	goos       string
+	goarch     string
+	status     Status
+	logger     *slog.Logger
+	apiURL     string
+	apply      func(io.Reader, selfupdate.Options) error
+	targetPath string
+	targetErr  error
 }
 
 func New(version string, logger *slog.Logger) *Manager {
@@ -88,8 +90,28 @@ func New(version string, logger *slog.Logger) *Manager {
 		apiURL:  releasesAPI,
 		apply:   selfupdate.Apply,
 	}
+	m.targetPath, m.targetErr = executablePath()
 	m.status = Status{CurrentVersion: version, State: StateIdle, InstallSupported: assetName(m.goos, m.goarch) != ""}
 	return m
+}
+
+// ExecutablePath returns the executable location captured before any update
+// can rename the running image. Resolving os.Executable after replacement is
+// unsafe on Linux because /proc/self/exe may then point at a removed .old file.
+func (m *Manager) ExecutablePath() (string, error) {
+	return m.targetPath, m.targetErr
+}
+
+func executablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve executable: %w", err)
+	}
+	return exe, nil
 }
 
 func (m *Manager) Status() Status {
@@ -235,13 +257,9 @@ func (m *Manager) Install(ctx context.Context) (*Release, error) {
 	if !strings.EqualFold(hex.EncodeToString(actual[:]), hex.EncodeToString(expected)) {
 		return nil, errors.New("downloaded update checksum does not match SHA256SUMS")
 	}
-	exe, err := os.Executable()
+	exe, err := m.ExecutablePath()
 	if err != nil {
-		return nil, fmt.Errorf("locate executable: %w", err)
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return nil, fmt.Errorf("resolve executable: %w", err)
+		return nil, err
 	}
 	if err := m.apply(bytes.NewReader(binary), selfupdate.Options{TargetPath: exe, Checksum: expected}); err != nil {
 		if rollback := selfupdate.RollbackError(err); rollback != nil {

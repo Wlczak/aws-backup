@@ -31,7 +31,7 @@ import (
 // is cleared so future events flow unconditionally. (#176)
 //
 // log is used to surface marshal errors.
-func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) ([]engine.Event, time.Time)) http.Handler {
+func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) ([]engine.Event, time.Time), shutdown <-chan struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -54,11 +54,11 @@ func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) 
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no") // for nginx if proxied
 		w.WriteHeader(http.StatusOK)
-		flusher.Flush()
 
 		// Initial comment line so clients know the stream is live even
 		// before the first real event arrives.
 		fmt.Fprint(w, ": connected\n\n")
+		flusher.Flush()
 
 		// Replay in-flight run history if a run is active.
 		var replayCutoff time.Time
@@ -82,6 +82,8 @@ func sseHandler(bus *events.Bus, log *slog.Logger, replay func(context.Context) 
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-shutdown:
 				return
 			case ev, ok := <-sub.Chan():
 				if !ok {

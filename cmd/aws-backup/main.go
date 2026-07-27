@@ -116,6 +116,7 @@ type appState struct {
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
+	commitStop    func() bool
 	// sqsConsumer holds the long-running S3 Glacier restore-event
 	// consumer when sqs.queue_url is configured. Stored so the API's
 	// "Sync restore status" button can call DrainAll alongside the
@@ -556,6 +557,7 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		ScanPaths:        scanPaths,
 		Emit:             a.bus.Publish,
 		StopRequested:    a.stopRequested,
+		CommitStop:       a.commitStop,
 	}), nil
 }
 
@@ -1247,6 +1249,7 @@ func runBackup(cfgPath, profileOverride string) {
 }
 
 func runServe(cfgPath, profileOverride string, launchBrowser bool) {
+	restartAsServe := launchBrowser
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1332,6 +1335,7 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// Router() is mounted so buildEngine, called per-run, sees a non-nil
 	// callback. (#124)
 	app.stopRequested = srv.IsStopRequested
+	app.commitStop = srv.TryCommitStop
 
 	schedule := app.cfg.Backup.Schedule
 	if app.setupRequired {
@@ -1413,6 +1417,9 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// down DB/Storage. sched.Stop drains the in-flight tick (if any)
 	// before returning. (#108)
 	sched.Stop()
+	// Close SSE and notify background workers before waiting for active HTTP
+	// handlers. http.Server.Shutdown does not cancel long-lived streams.
+	srv.BeginShutdown()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown", "error", err)
 	}
@@ -1429,22 +1436,25 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	app.close()
 	appClosed = true
 	if updateAction == "restart" {
-		if err := restartSelf(); err != nil {
+		exe, pathErr := updater.ExecutablePath()
+		if pathErr != nil {
+			logger.Error("restart after update failed", "error", pathErr)
+		} else if err := restartSelf(exe, restartArguments(os.Args[1:], restartAsServe)); err != nil {
 			logger.Error("restart after update failed", "error", err)
 		}
 	}
 }
 
-func restartSelf() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
+func restartArguments(current []string, explicitServe bool) []string {
+	args := append([]string(nil), current...)
+	if explicitServe {
+		args = append(args, "serve")
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(exe, os.Args[1:]...)
+	return args
+}
+
+func restartSelf(exe string, args []string) error {
+	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "AWS_BACKUP_RESTARTED=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Start()
