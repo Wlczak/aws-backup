@@ -20,9 +20,12 @@ Central `config.json` owns shared process settings plus the optional login hash 
   "active_profile": "default",
   "server": { "host": "127.0.0.1", "port": 8080 },
   "auth": { "password_hash": "" },
+  "updates": { "auto_check": false },
   "setup_completed": false
 }
 ```
+
+`updates.auto_check` performs a non-blocking GitHub release check when the server starts. It never installs unattended: an authenticated operator must choose Ignore, Install & restart, or Install & shut down. The setting is central because one executable serves every profile.
 
 Each profile config owns `source`, `s3`, `sqs`, and `backup`. A profile maps to at most one bucket and one local SQLite index. Existing single-profile installs are migrated on startup by moving the old runtime config/index into `profiles/default/` and writing the central config at the old `config.json` path. Creating a new profile with `clone_active` copies operational defaults from the active profile but clears `s3.bucket` and `sqs.queue_url`, so the new profile cannot accidentally reuse the active bucket or restore queue. An empty `s3.bucket` means S3 is not configured yet; the profile can still be active, but backup upload, cloud sync, restore, download, inventory, and S3 test actions reject until a bucket is set.
 The auth hash stays in the central config, not the per-profile config, so switching profiles does not change the login state. Fresh installs persist `setup_completed=false` and use production-safe empty source/S3 defaults. The web onboarding guide creates the first password, requires a separate login with that password, configures and tests the source and S3 bucket, then marks setup complete. Existing central configs with a password and no `setup_completed` field are grandfathered as complete; passwordless legacy installs enter onboarding.

@@ -69,7 +69,7 @@ jobs:
           mv aws-backup-windows-amd64.exe out/
           mv aws-backup-darwin-amd64 out/
           mv aws-backup-darwin-arm64 out/
-          sha256sum out/* > out/SHA256SUMS
+          (cd out && sha256sum aws-backup-* > SHA256SUMS)
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
