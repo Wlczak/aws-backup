@@ -31,6 +31,7 @@ import (
 	"github.com/Wlczak/aws-backup/internal/scheduler"
 	"github.com/Wlczak/aws-backup/internal/source"
 	"github.com/Wlczak/aws-backup/internal/storage"
+	appupdate "github.com/Wlczak/aws-backup/internal/update"
 	"github.com/robfig/cron/v3"
 )
 
@@ -115,6 +116,7 @@ type appState struct {
 	// stopRequested is wired from api.Server.IsStopRequested in runServe
 	// so the engine can poll for graceful-stop requests between files. (#124)
 	stopRequested func() bool
+	commitStop    func() bool
 	// sqsConsumer holds the long-running S3 Glacier restore-event
 	// consumer when sqs.queue_url is configured. Stored so the API's
 	// "Sync restore status" button can call DrainAll alongside the
@@ -555,6 +557,7 @@ func (a *appState) buildEngine(mode engine.RunMode, scanPaths []string) (*engine
 		ScanPaths:        scanPaths,
 		Emit:             a.bus.Publish,
 		StopRequested:    a.stopRequested,
+		CommitStop:       a.commitStop,
 	}), nil
 }
 
@@ -691,6 +694,30 @@ func (a *appState) close() {
 	if a.db != nil {
 		a.db.Close()
 	}
+}
+
+func (a *appState) getUpdateSettings() (config.UpdateConfig, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	central, err := config.LoadCentral(a.cfgPath)
+	if err != nil {
+		return config.UpdateConfig{}, err
+	}
+	return central.Updates, nil
+}
+
+func (a *appState) saveUpdateSettings(next config.UpdateConfig) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	central, err := config.LoadCentral(a.cfgPath)
+	if err != nil {
+		return err
+	}
+	central.Updates = next
+	if err := central.ValidateCentral(); err != nil {
+		return err
+	}
+	return config.SaveCentral(a.cfgPath, central)
 }
 
 func (a *appState) listProfiles() ([]api.ProfileInfo, error) {
@@ -1222,6 +1249,7 @@ func runBackup(cfgPath, profileOverride string) {
 }
 
 func runServe(cfgPath, profileOverride string, launchBrowser bool) {
+	restartAsServe := launchBrowser
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -1243,7 +1271,14 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 		fatalf("%v", err)
 	}
 	app.logger = logger
-	defer app.close()
+	appClosed := false
+	defer func() {
+		if !appClosed {
+			app.close()
+		}
+	}()
+	updater := appupdate.New(version, logger)
+	updateShutdown := make(chan string, 1)
 
 	// Restore scanner: thin closure over the live storage so a settings
 	// hot-swap is observed without rebuilding it.
@@ -1261,18 +1296,27 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	}, "")
 
 	srv := api.NewServer(api.Deps{
-		DB:                app.db,
-		Bus:               app.bus,
-		Config:            &app.cfg,
-		ConfigPath:        app.profilePath,
-		CentralConfigPath: app.cfgPath,
-		SaveSettings:      app.saveSettings,
-		ActiveProfile:     app.profile,
-		ListProfiles:      app.listProfiles,
-		CreateProfile:     app.createProfile,
-		SwitchProfile:     app.switchProfile(ctx),
-		RenameProfile:     app.renameProfile(ctx),
-		DeleteProfile:     app.deleteProfile,
+		DB:                 app.db,
+		Bus:                app.bus,
+		Config:             &app.cfg,
+		ConfigPath:         app.profilePath,
+		CentralConfigPath:  app.cfgPath,
+		SaveSettings:       app.saveSettings,
+		ActiveProfile:      app.profile,
+		ListProfiles:       app.listProfiles,
+		CreateProfile:      app.createProfile,
+		SwitchProfile:      app.switchProfile(ctx),
+		RenameProfile:      app.renameProfile(ctx),
+		DeleteProfile:      app.deleteProfile,
+		Updater:            updater,
+		GetUpdateSettings:  app.getUpdateSettings,
+		SaveUpdateSettings: app.saveUpdateSettings,
+		RequestUpdateShutdown: func(action string) {
+			select {
+			case updateShutdown <- action:
+			default:
+			}
+		},
 		SetupCompleted:    func() { app.completeSetup(ctx) },
 		BuildEngine:       app.buildEngine,
 		Storage:           app.liveStorage,
@@ -1291,6 +1335,7 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// Router() is mounted so buildEngine, called per-run, sees a non-nil
 	// callback. (#124)
 	app.stopRequested = srv.IsStopRequested
+	app.commitStop = srv.TryCommitStop
 
 	schedule := app.cfg.Backup.Schedule
 	if app.setupRequired {
@@ -1337,15 +1382,26 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 		serveErr <- httpSrv.Serve(listener)
 	}()
 	if launchBrowser {
+		launchBrowser = os.Getenv("AWS_BACKUP_RESTARTED") != "1"
+	}
+	if launchBrowser {
 		url := "http://" + addr + "/"
 		if err := openBrowser(url); err != nil {
 			logger.Warn("open browser", "url", url, "error", err)
 		}
 	}
 
+	updateAction := ""
+	if prefs, err := app.getUpdateSettings(); err != nil {
+		logger.Warn("load update settings", "error", err)
+	} else if prefs.AutoCheck {
+		go updater.Check(ctx)
+	}
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+	case updateAction = <-updateShutdown:
+		logger.Info("shutdown requested after update", "action", updateAction)
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
 			fatalf("http: %v", err)
@@ -1361,6 +1417,9 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// down DB/Storage. sched.Stop drains the in-flight tick (if any)
 	// before returning. (#108)
 	sched.Stop()
+	// Close SSE and notify background workers before waiting for active HTTP
+	// handlers. http.Server.Shutdown does not cancel long-lived streams.
+	srv.BeginShutdown()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown", "error", err)
 	}
@@ -1374,6 +1433,31 @@ func runServe(cfgPath, profileOverride string, launchBrowser bool) {
 	// app.close() cancels the SQS consumer and tears down the remaining
 	// app resources immediately. We intentionally do not wait for the
 	// consumer to drain before closing the app.
+	app.close()
+	appClosed = true
+	if updateAction == "restart" {
+		exe, pathErr := updater.ExecutablePath()
+		if pathErr != nil {
+			logger.Error("restart after update failed", "error", pathErr)
+		} else if err := restartSelf(exe, restartArguments(os.Args[1:], restartAsServe)); err != nil {
+			logger.Error("restart after update failed", "error", err)
+		}
+	}
+}
+
+func restartArguments(current []string, explicitServe bool) []string {
+	args := append([]string(nil), current...)
+	if explicitServe {
+		args = append(args, "serve")
+	}
+	return args
+}
+
+func restartSelf(exe string, args []string) error {
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "AWS_BACKUP_RESTARTED=1")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Start()
 }
 
 func openBrowser(url string) error {

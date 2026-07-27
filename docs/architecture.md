@@ -65,6 +65,8 @@ aws-backup/
 │   │   └── sqs_consumer.go      # SQS poller for S3 Glacier restore events → DB
 │   ├── scheduler/
 │   │   └── scheduler.go         # robfig/cron wrapper, Trigger via HTTP to /api/runs
+│   ├── update/
+│   │   └── manager.go           # GitHub release checks, SHA-256 verification, executable replacement
 │   ├── source/
 │   │   ├── source.go            # Source interface (Walk, Open, Close)
 │   │   ├── factory.go           # NewSource / FromConfig — picks SMB or LocalDir
@@ -141,6 +143,7 @@ aws-backup/
 | Pre-flight `ensureTmpSpace` | Cross-platform free-space check with 64 MiB margin before copy/zip (#138) |
 | Idle SQLite connection recycling | `database/sql` keeps the DB handle open but closes the underlying connection after 15 minutes of inactivity, then reopens it on demand |
 | Schedule triggers via HTTP, not in-process | The API serialises run launches; cron path uses the same 409 semantics |
+| Exact-version, operator-confirmed self-update | Boot/manual checks include published pre-releases; installation is idle-only, checksum-required, and either restarts or shuts down |
 | Explicit first-run completion state | Fresh installs can serve a restricted setup API before source/S3 clients exist; configured legacy installs are grandfathered and normal operational routes remain gated until onboarding succeeds |
 | `Deps.ConfigMu` shared with `appState.mu` | Single mutex for cfg reads/writes across both sides (#153) |
 | File API cache keyed by DB revision | File-index GETs reuse serialized JSON for up to 5 minutes, while every GORM `files` write invalidates immediately; a 128 MiB / 1024-entry LRU bounds memory (#367) |
