@@ -373,6 +373,58 @@ func TestSetZipName(t *testing.T) {
 	_ = r3
 }
 
+func TestReconcileZipRequiresExactPathAndCurrentIndexSize(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	exact, err := d.UpsertFile(ctx, "1/2/3.jpg", 123, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling, err := d.UpsertFile(ctx, "other/3.jpg", 123, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := d.UpsertFile(ctx, "1/2/changed.jpg", 456, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := d.UpsertFile(ctx, "1/2/legacy.jpg", 789, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := d.ReconcileZip(ctx, []ZipIndexEntry{
+		{Path: "1/2/3.jpg", Size: 123, HasSize: true},
+		{Path: "1/2/changed.jpg", Size: 455, HasSize: true},
+		{Path: "1/2/legacy.jpg", HasSize: false},
+	}, "1/1_1.zip", "backups/1/1_1.zip", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("reconciled=%d want 1", n)
+	}
+
+	files, _, err := d.ListFiles(ctx, FilesFilter{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[int64]File, len(files))
+	for _, f := range files {
+		byID[f.ID] = f
+	}
+	if got := byID[exact.ID]; got.Status != StatusUploaded || got.ZipName != "1/1_1.zip" || got.S3Key != "backups/1/1_1.zip" || got.ZipID == nil {
+		t.Errorf("exact match not recovered: %+v", got)
+	}
+	for _, id := range []int64{sibling.ID, changed.ID, legacy.ID} {
+		if got := byID[id]; got.Status != StatusPending {
+			t.Errorf("%s status=%q want pending", got.Path, got.Status)
+		}
+	}
+}
+
 func TestStats(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)
