@@ -141,6 +141,15 @@ type ZipMemberUpload struct {
 	MD5 string
 }
 
+// ZipIndexEntry is one member record read from a zip sidecar. Current
+// sidecars carry Size; legacy path-only records leave HasSize false and are
+// intentionally not eligible for upload-loss reconciliation.
+type ZipIndexEntry struct {
+	Path    string
+	Size    int64
+	HasSize bool
+}
+
 // AfterFind parses restore_expires_at via parseFlexTime so legacy /
 // non-canonical layouts don't poison the whole page. (#248)
 func (f *File) AfterFind(_ *gorm.DB) error {
@@ -1168,15 +1177,18 @@ func (db *DB) ListIndividualS3Keys(ctx context.Context) ([]string, error) {
 
 // ReconcileZip marks files as uploaded based on an S3 index sidecar.
 //
-// The match is restricted to rows that look genuinely orphaned in the
-// crash window between a successful S3 zip upload and its DB commit:
+// The match requires a current size-bearing sidecar entry whose full path and
+// size equal the DB row. Legacy path-only entries are intentionally skipped so
+// stale archived content cannot hide a changed local file after DB loss (#411).
+// It is further restricted to rows that look genuinely orphaned in the crash
+// window between a successful S3 zip upload and its DB commit:
 // either status='zipped' (the intended intermediate state, now atomic
 // per #84) or pending/failed rows that still have NULL md5 / zip_name /
 // uploaded_at. A pending row that already carries those columns means
 // UpsertFileBatch saw a size/mtime change after the previous upload and
 // cleared them — re-binding it to the old zip would silently lose the
 // modified content (the new bytes never get uploaded). See #103.
-func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key string, now time.Time) (int64, error) {
+func (db *DB) ReconcileZip(ctx context.Context, entries []ZipIndexEntry, zipRel, s3Key string, now time.Time) (int64, error) {
 	var total int64
 	zipID, err := db.UpsertZip(ctx, Zip{
 		ZipName:    zipRel,
@@ -1187,47 +1199,57 @@ func (db *DB) ReconcileZip(ctx context.Context, paths []string, zipRel, s3Key st
 	if err != nil {
 		return 0, err
 	}
-	for len(paths) > 0 {
-		// Check ctx between chunks so a cancel doesn't keep blocking
-		// other writers behind the SQLite write lock for the remaining
-		// chunks of a huge reconcile. (#171)
-		if err := ctx.Err(); err != nil {
-			return total, err
+	pathsBySize := make(map[int64][]string)
+	for _, entry := range entries {
+		if entry.Path == "" || !entry.HasSize {
+			continue
 		}
-		chunk := paths
-		if len(chunk) > sqlChunkSize {
-			chunk = paths[:sqlChunkSize]
+		pathsBySize[entry.Size] = append(pathsBySize[entry.Size], entry.Path)
+	}
+	for size, paths := range pathsBySize {
+		for len(paths) > 0 {
+			// Check ctx between chunks so a cancel doesn't keep blocking
+			// other writers behind the SQLite write lock for the remaining
+			// chunks of a huge reconcile. (#171)
+			if err := ctx.Err(); err != nil {
+				return total, err
+			}
+			chunk := paths
+			if len(chunk) > sqlChunkSize {
+				chunk = paths[:sqlChunkSize]
+			}
+			paths = paths[len(chunk):]
+			// Match either:
+			//   - status='zipped' (the legacy intermediate state, kept for
+			//     migrations from older deployments), OR
+			//   - status in (pending, failed) AND uploaded_at IS NULL — i.e.
+			//     a row that has never been uploaded. This guards against
+			//     re-binding a freshly-modified file (whose row was reset to
+			//     pending by UpsertFile but retains uploaded_at from the
+			//     previous version) back to its stale zip and silently losing
+			//     the new content. See #103.
+			result := db.g.WithContext(ctx).Model(&File{}).
+				Where("path IN ? AND size = ? AND ("+
+					"status = ? OR "+
+					"(status IN ? AND uploaded_at IS NULL)"+
+					")",
+					chunk,
+					size,
+					StatusZipped,
+					[]string{StatusPending, StatusFailed},
+				).
+				Updates(map[string]any{
+					"zip_id":      zipID,
+					"zip_name":    zipRel,
+					"s3_key":      s3Key,
+					"uploaded_at": now,
+					"status":      StatusUploaded,
+				})
+			if result.Error != nil {
+				return total, result.Error
+			}
+			total += result.RowsAffected
 		}
-		paths = paths[len(chunk):]
-		// Match either:
-		//   - status='zipped' (the legacy intermediate state, kept for
-		//     migrations from older deployments), OR
-		//   - status in (pending, failed) AND uploaded_at IS NULL — i.e.
-		//     a row that has never been uploaded. This guards against
-		//     re-binding a freshly-modified file (whose row was reset to
-		//     pending by UpsertFile but retains uploaded_at from the
-		//     previous version) back to its stale zip and silently losing
-		//     the new content. See #103.
-		result := db.g.WithContext(ctx).Model(&File{}).
-			Where("path IN ? AND ("+
-				"status = ? OR "+
-				"(status IN ? AND uploaded_at IS NULL)"+
-				")",
-				chunk,
-				StatusZipped,
-				[]string{StatusPending, StatusFailed},
-			).
-			Updates(map[string]any{
-				"zip_id":      zipID,
-				"zip_name":    zipRel,
-				"s3_key":      s3Key,
-				"uploaded_at": now,
-				"status":      StatusUploaded,
-			})
-		if result.Error != nil {
-			return total, result.Error
-		}
-		total += result.RowsAffected
 	}
 	return total, nil
 }

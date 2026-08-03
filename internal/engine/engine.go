@@ -1218,7 +1218,7 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 			}
 			continue
 		}
-		paths, err := e.readIndexPaths(ctx, k)
+		entries, err := e.readIndexEntries(ctx, k)
 		if err != nil {
 			// Cancellation must abort the run; everything else is a
 			// per-sidecar issue (transient 5xx, corrupt object) — log
@@ -1230,11 +1230,11 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 			e.log(ctx, runID, db.LogWarn, fmt.Sprintf("reconcile: read %s failed, skipping: %v", k, err))
 			continue
 		}
-		if len(paths) == 0 {
+		if len(entries) == 0 {
 			continue
 		}
 		zipRel := strings.TrimPrefix(zipKey, prefix)
-		n, err := e.opts.DB.ReconcileZip(ctx, paths, zipRel, zipKey, e.opts.Now())
+		n, err := e.opts.DB.ReconcileZip(ctx, entries, zipRel, zipKey, e.opts.Now())
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
@@ -1253,21 +1253,21 @@ func (e *Engine) reconcileFromS3(ctx context.Context, runID int64, s3Keys []stri
 	return nil
 }
 
-func (e *Engine) readIndexPaths(ctx context.Context, indexKey string) ([]string, error) {
+func (e *Engine) readIndexEntries(ctx context.Context, indexKey string) ([]db.ZipIndexEntry, error) {
 	rc, err := e.opts.Storage.Get(ctx, indexKey)
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	var paths []string
+	var entries []db.ZipIndexEntry
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		if entryPath, _ := parseZipIndexLine(sc.Text()); entryPath != "" {
-			paths = append(paths, entryPath)
+		if entryPath, size, hasSize := parseZipIndexLine(sc.Text()); entryPath != "" {
+			entries = append(entries, db.ZipIndexEntry{Path: entryPath, Size: size, HasSize: hasSize})
 		}
 	}
-	return paths, sc.Err()
+	return entries, sc.Err()
 }
 
 func (e *Engine) listPending(ctx context.Context) ([]PendingFile, error) {
