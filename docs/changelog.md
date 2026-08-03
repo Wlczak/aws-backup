@@ -213,5 +213,6 @@ Kept as searchable context for past architectural calls. The git log has the ful
 | #320 | — | Failed and cancelled restore jobs are rebuilt from `/api/status.restore_job_last` and remain visible after a Restore-page reload |
 | #318 | — | Authoritative sync computes `cloud_missing_from_local` against every source-present row instead of only the already cloud-missing subset |
 | #317 | — | New zip sidecars store each member's size alongside its path; cloud-only row recreation preserves that size while legacy path-only indexes remain readable |
+| #411 | — | Upload reconciliation recovers pending rows after local DB upload metadata loss only when a current zip sidecar matches the exact source-relative path and file size; legacy path-only entries no longer suppress uploads |
 | #306 | — | The shared web API wrapper drives a delayed global activity spinner so slow API calls have a consistent visible and accessible busy cue |
 | #224 / #221 / #222 / #220 / #219 / #218 / #223 | a4fbbe1 | `decodeJSON` wraps the body in `http.MaxBytesReader(16 MiB)`; config dir is 0o700 + chmod-tightened; `/api/sync*` and `/delete-cloud-paths` 409 when a run is in flight; SQS `Run()` does Receive outside `receiveMu`; heartbeat tolerates 3 consecutive failures before giving up; `safeJoin` walks ancestors via EvalSymlinks; `ListLogs` paginates (default 500, max 5000) |
