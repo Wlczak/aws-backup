@@ -128,7 +128,7 @@ func readIndexInto(ctx context.Context, s storage.Storage, indexKey, zipKey stri
 	// be explicit for readability.
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		entryPath, size := parseZipIndexLine(sc.Text())
+		entryPath, size, _ := parseZipIndexLine(sc.Text())
 		if entryPath == "" {
 			continue
 		}
@@ -145,16 +145,16 @@ func readIndexInto(ctx context.Context, s storage.Storage, indexKey, zipKey stri
 
 // parseZipIndexLine accepts both current "size<TAB>path" records and
 // legacy path-only records. Legacy entries have no recoverable member size.
-func parseZipIndexLine(line string) (string, int64) {
+func parseZipIndexLine(line string) (string, int64, bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", 0
+		return "", 0, false
 	}
 	if rawSize, entryPath, ok := strings.Cut(line, "\t"); ok && entryPath != "" {
 		size, err := strconv.ParseInt(rawSize, 10, 64)
 		if err == nil && size >= 0 {
-			return entryPath, size
+			return entryPath, size, true
 		}
 	}
-	return line, 0
+	return line, 0, false
 }

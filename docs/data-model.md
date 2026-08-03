@@ -163,7 +163,7 @@ The dashboard can invalidate that cache via `DELETE /api/scan-cache`, which clea
 
 `{topdir}/{topdir}_{subdir}_{N}.zip` where N is the per-directory counter, seeded from `MAX(DB, S3 listing)`. Sidecar `{zipKey}.index.txt` is uploaded **before** the zip (#95) so partial uploads never leave a zip without an index. Sidecars are uploaded with `Storage.PutStandard` (#125) so they remain instantly listable even when the zip is in Deep Archive.
 
-Current sidecars store one `size<TAB>source-relative-path` record per member. `LoadCloudIndex` and crash reconciliation still accept legacy path-only records; those older records have no recoverable member size and therefore retain the historical zero-size fallback when recreating a row.
+Current sidecars store one `size<TAB>source-relative-path` record per member. `LoadCloudIndex` still accepts legacy path-only records and retains the historical zero-size fallback when recreating cloud-only rows. Upload-loss reconciliation is stricter: it relinks a pending row only when a current sidecar contains the same full source-relative path and size. Legacy path-only entries are not used to suppress an upload because they cannot distinguish the current local version from stale archived content (#411).
 
 ## Conventions
 
