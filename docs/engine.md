@@ -24,9 +24,12 @@ Runs execute against the currently active profile. The active profile determines
 
 4.  Reconcile from S3
     For every {zipKey}.index.txt whose .zip exists in S3, mark contained files
-    'uploaded' in the DB if they're still pending/zipped/failed. Closes the
-    crash window between successful Put and DB commit (#43). Orphan sidecars
-    whose backing zip is missing are deleted (#121).
+    'uploaded' in the DB if they're still pending/zipped/failed and the current
+    sidecar's full source-relative path + member size match the DB row. This
+    recovers both the crash window between successful Put and DB commit (#43)
+    and a subsequently lost local upload index (#411). Legacy path-only entries
+    do not suppress uploads. Orphan sidecars whose backing zip is missing are
+    deleted (#121).
 
 5.  listPending → GroupFiles
     Pull rows in pending|failed (gated by RetryFailed). GroupFiles splits the

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -220,7 +221,7 @@ func TestEngineHappyPathMixedGroups(t *testing.T) {
 	}
 	gotEntries := map[string]int64{}
 	for _, line := range strings.Split(strings.TrimRight(string(indexBytes), "\n"), "\n") {
-		entryPath, size := parseZipIndexLine(line)
+		entryPath, size, _ := parseZipIndexLine(line)
 		gotEntries[entryPath] = size
 	}
 	for k, contents := range want {
@@ -897,6 +898,69 @@ func TestEngineReconcileFromS3(t *testing.T) {
 		}
 		if f.ZipName == "" {
 			t.Errorf("%s: zip_name empty after reconcile", f.Path)
+		}
+	}
+}
+
+// TestEngineRecoversZipUploadsAfterDBLoss verifies the full #411 scenario:
+// the bucket still has a zip and current size-bearing sidecar, but the local
+// index is replaced with an empty DB. The rescan must relink the files without
+// writing another S3 object.
+func TestEngineRecoversZipUploadsAfterDBLoss(t *testing.T) {
+	eng, _, _, store, root, _ := newTestEngine(t, 2)
+	ctx := context.Background()
+	writeFile(t, root, "1/2/3.jpg", "three")
+	writeFile(t, root, "1/2/4.jpg", "four")
+
+	if _, err := eng.Run(ctx); err != nil {
+		t.Fatalf("initial run: %v", err)
+	}
+	keysBefore := store.Keys()
+
+	freshDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "replacement.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshSource, err := source.NewLocalDir(root)
+	if err != nil {
+		freshDB.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		freshSource.Close()
+		freshDB.Close()
+	})
+	freshEngine := New(Options{
+		DB:             freshDB,
+		Source:         freshSource,
+		Storage:        store,
+		TmpDir:         t.TempDir(),
+		KeyPrefix:      "backups",
+		ScanChunkSize:  2,
+		ScanBatchBytes: 4 << 30,
+		ZipThresh:      2,
+		EnableZipIndex: true,
+	})
+
+	if _, err := freshEngine.Run(ctx); err != nil {
+		t.Fatalf("recovery run: %v", err)
+	}
+	keysAfter := store.Keys()
+	sort.Strings(keysBefore)
+	sort.Strings(keysAfter)
+	if strings.Join(keysAfter, "\n") != strings.Join(keysBefore, "\n") {
+		t.Fatalf("recovery wrote duplicate objects:\nbefore=%v\nafter=%v", keysBefore, keysAfter)
+	}
+	files, _, err := freshDB.ListFiles(ctx, db.FilesFilter{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files=%d want 2", len(files))
+	}
+	for _, f := range files {
+		if f.Status != db.StatusUploaded || f.ZipID == nil || f.ZipName == "" || f.S3Key == "" {
+			t.Errorf("file not recovered from zip index: %+v", f)
 		}
 	}
 }
