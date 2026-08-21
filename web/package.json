@@ -21,7 +21,7 @@
     "eslint": "^10.8.0",
     "eslint-plugin-svelte": "^3.22.0",
     "globals": "^17.8.0",
-    "svelte-check": "^4.7.3",
+    "svelte-check": "^4.7.5",
     "svelte-eslint-parser": "^1.8.0",
     "tslib": "^2.7.0",
     "typescript": "^6.0.3",
