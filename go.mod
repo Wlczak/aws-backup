@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.46.7
 	github.com/aws/smithy-go v1.28.1
 	github.com/glebarez/sqlite v1.11.0
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/minio/selfupdate v0.6.0
 	github.com/pressly/goose/v3 v3.27.3
