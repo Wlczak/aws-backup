@@ -3,7 +3,7 @@ module github.com/Wlczak/aws-backup
 go 1.26.6
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.0
+	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.38
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.4
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.3.12
